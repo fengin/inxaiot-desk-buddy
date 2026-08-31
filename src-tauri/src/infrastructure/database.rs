@@ -113,9 +113,12 @@ impl DualMySqlPools {
         let tls_cipher = sqlx::query("SHOW STATUS LIKE 'Ssl_cipher'")
             .fetch_optional(&self.platform)
             .await
-            .ok()
-            .flatten()
-            .and_then(|row| row.try_get::<String, _>("Value").ok())
+            .map_err(|error| AppError::database("读取MySQL TLS状态", &error))?
+            .map(|row| {
+                row.try_get::<String, _>("Value")
+                    .map_err(|error| AppError::database("解析MySQL TLS状态", &error))
+            })
+            .transpose()?
             .filter(|value| !value.is_empty());
 
         let rows = sqlx::query(
@@ -129,8 +132,11 @@ impl DualMySqlPools {
 
         let columns = rows
             .into_iter()
-            .filter_map(|row| row.try_get::<String, _>("column_name").ok())
-            .collect::<BTreeSet<_>>();
+            .map(|row| {
+                row.try_get::<String, _>("column_name")
+                    .map_err(|error| AppError::database("解析平台一体机表字段", &error))
+            })
+            .collect::<AppResult<BTreeSet<_>>>()?;
         let missing_required_columns = REQUIRED_AIO_COLUMNS
             .iter()
             .filter(|column| !columns.contains(**column))
@@ -146,14 +152,19 @@ impl DualMySqlPools {
         .await
         .map_err(|error| AppError::database("读取工作台库字符集", &error))?;
 
-        let (workbench_charset, workbench_collation) = schema_row
-            .map(|row| {
-                (
-                    row.try_get::<String, _>("default_character_set_name").ok(),
-                    row.try_get::<String, _>("default_collation_name").ok(),
-                )
-            })
-            .unwrap_or_default();
+        let (workbench_charset, workbench_collation) = match schema_row {
+            Some(row) => (
+                Some(
+                    row.try_get("default_character_set_name")
+                        .map_err(|error| AppError::database("解析工作台库字符集", &error))?,
+                ),
+                Some(
+                    row.try_get("default_collation_name")
+                        .map_err(|error| AppError::database("解析工作台库排序规则", &error))?,
+                ),
+            ),
+            None => (None, None),
+        };
 
         Ok(DatabaseProbeReport {
             server_version,

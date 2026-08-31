@@ -117,8 +117,11 @@ impl WorkbenchStore {
         .map_err(|error| map_error("检查工作台MySQL表", error))?;
         let tables = rows
             .into_iter()
-            .filter_map(|row| row.try_get::<String, _>("table_name").ok())
-            .collect::<BTreeSet<_>>();
+            .map(|row| {
+                row.try_get::<String, _>("table_name")
+                    .map_err(|_| FormalError::LocalDatabase("解析工作台表名"))
+            })
+            .collect::<FormalResult<BTreeSet<_>>>()?;
         let missing_tables = EXPECTED_BUSINESS_TABLES
             .iter()
             .filter(|table| !tables.contains(**table))
@@ -143,16 +146,11 @@ impl WorkbenchStore {
                 .map_err(|error| map_error("读取工作台迁移状态", error))?;
                 (
                     row.try_get::<Option<i64>, _>("current_version")
-                        .ok()
-                        .flatten(),
-                    row.try_get::<Option<i64>, _>("applied_count")
-                        .ok()
-                        .flatten()
-                        .unwrap_or(0),
-                    row.try_get::<Option<i64>, _>("failed_count")
-                        .ok()
-                        .flatten()
-                        .unwrap_or(0),
+                        .map_err(|_| FormalError::LocalDatabase("解析工作台当前版本"))?,
+                    row.try_get::<i64, _>("applied_count")
+                        .map_err(|_| FormalError::LocalDatabase("解析已应用迁移数"))?,
+                    row.try_get::<i64, _>("failed_count")
+                        .map_err(|_| FormalError::LocalDatabase("解析失败迁移数"))?,
                 )
             } else {
                 (None, 0, 0)
@@ -184,8 +182,11 @@ impl WorkbenchStore {
         .map_err(|error| map_error("审计工作台MySQL表", error))?;
         let tables = rows
             .into_iter()
-            .filter_map(|row| row.try_get::<String, _>("table_name").ok())
-            .collect::<BTreeSet<_>>();
+            .map(|row| {
+                row.try_get::<String, _>("table_name")
+                    .map_err(|_| FormalError::LocalDatabase("解析工作台审计表名"))
+            })
+            .collect::<FormalResult<BTreeSet<_>>>()?;
         let missing_tables = EXPECTED_BUSINESS_TABLES
             .iter()
             .filter(|table| !tables.contains(**table))
@@ -207,8 +208,11 @@ impl WorkbenchStore {
         .await
         .map_err(|error| map_error("审计发布配置密文字段", error))?
         .into_iter()
-        .filter_map(|row| row.try_get::<String, _>("column_name").ok())
-        .collect::<BTreeSet<_>>();
+        .map(|row| {
+            row.try_get::<String, _>("column_name")
+                .map_err(|_| FormalError::LocalDatabase("解析发布配置审计字段"))
+        })
+        .collect::<FormalResult<BTreeSet<_>>>()?;
         let release_credentials_are_encrypted = [
             "credential_scheme",
             "credential_salt",

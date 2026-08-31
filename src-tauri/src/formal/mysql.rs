@@ -130,9 +130,12 @@ impl ProjectMySqlPools {
         let tls_cipher = sqlx::query("SHOW STATUS LIKE 'Ssl_cipher'")
             .fetch_optional(&self.platform)
             .await
-            .ok()
-            .flatten()
-            .and_then(|row| row.try_get::<String, _>("Value").ok())
+            .map_err(|error| map_database_error("读取MySQL TLS状态", error))?
+            .map(|row| {
+                row.try_get::<String, _>("Value")
+                    .map_err(|error| map_database_error("解析MySQL TLS状态", error))
+            })
+            .transpose()?
             .filter(|value| !value.is_empty());
         let rows = sqlx::query(
             "SELECT column_name FROM information_schema.columns \
@@ -144,8 +147,11 @@ impl ProjectMySqlPools {
         .map_err(|error| map_database_error("探测平台一体机表", error))?;
         let columns = rows
             .into_iter()
-            .filter_map(|row| row.try_get::<String, _>("column_name").ok())
-            .collect::<BTreeSet<_>>();
+            .map(|row| {
+                row.try_get::<String, _>("column_name")
+                    .map_err(|error| map_database_error("解析平台一体机表字段", error))
+            })
+            .collect::<FormalResult<BTreeSet<_>>>()?;
         let missing_platform_aio_columns = REQUIRED_PLATFORM_AIO_COLUMNS
             .iter()
             .filter(|column| !columns.contains(**column))
@@ -159,14 +165,19 @@ impl ProjectMySqlPools {
         .fetch_optional(&self.workbench)
         .await
         .map_err(|error| map_database_error("读取工作台库字符集", error))?;
-        let (workbench_charset, workbench_collation) = schema
-            .map(|row| {
-                (
-                    row.try_get::<String, _>("default_character_set_name").ok(),
-                    row.try_get::<String, _>("default_collation_name").ok(),
-                )
-            })
-            .unwrap_or_default();
+        let (workbench_charset, workbench_collation) = match schema {
+            Some(row) => (
+                Some(
+                    row.try_get("default_character_set_name")
+                        .map_err(|error| map_database_error("解析工作台库字符集", error))?,
+                ),
+                Some(
+                    row.try_get("default_collation_name")
+                        .map_err(|error| map_database_error("解析工作台库排序规则", error))?,
+                ),
+            ),
+            None => (None, None),
+        };
         Ok(SchemaCapabilities {
             server_version,
             connection_encrypted: tls_cipher.is_some(),

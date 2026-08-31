@@ -81,9 +81,12 @@ where
     .await?;
     let targets = results
         .into_iter()
-        .map(|result| {
-            let mac = macs.get(result.index).cloned().unwrap_or_default();
-            match result.outcome {
+        .map(|result| -> AppResult<DeploymentTargetOutcome> {
+            let mac = macs
+                .get(result.index)
+                .cloned()
+                .ok_or_else(|| AppError::Conflict("批处理结果索引超出部署目标范围".into()))?;
+            Ok(match result.outcome {
                 TargetExecutionOutcome::Completed => DeploymentTargetOutcome {
                     mac,
                     state: DeploymentTargetState::Succeeded,
@@ -104,9 +107,9 @@ where
                     state: DeploymentTargetState::Panicked,
                     error: Some("节点执行器panic".into()),
                 },
-            }
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<AppResult<Vec<_>>>()?;
     Ok(DeploymentExecutionSummary {
         success_count: count(&targets, DeploymentTargetState::Succeeded),
         failure_count: count(&targets, DeploymentTargetState::Failed)

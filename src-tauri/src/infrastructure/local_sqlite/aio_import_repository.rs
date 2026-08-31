@@ -136,22 +136,45 @@ impl AioImportRepository {
                 .map_err(|error| AppError::database("解析本地导入行", &error))?;
             let mut item = serde_json::from_str::<ReconciledImportItem>(&json)
                 .map_err(|_| AppError::InvalidConfig("本地导入行内容已损坏".into()))?;
-            item.selected = row.try_get::<i64, _>("selected").unwrap_or_default() != 0;
+            let selected: i64 = row
+                .try_get("selected")
+                .map_err(|error| AppError::database("解析本地导入选择状态", &error))?;
+            item.selected = match selected {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(AppError::InvalidConfig("本地导入选择状态已损坏".into()));
+                }
+            };
             items.push(item);
         }
         let counts_json: String = session
             .try_get("counts_json")
             .map_err(|error| AppError::database("解析本地导入统计", &error))?;
         Ok(AioImportSession {
-            id: session.try_get("id").unwrap_or_default(),
-            local_project_id: session.try_get("local_project_id").unwrap_or_default(),
-            file_name: session.try_get("file_name").unwrap_or_default(),
-            file_path: session.try_get("file_path").unwrap_or_default(),
-            state: session.try_get("state").unwrap_or_default(),
+            id: session
+                .try_get("id")
+                .map_err(|error| AppError::database("解析本地导入会话ID", &error))?,
+            local_project_id: session
+                .try_get("local_project_id")
+                .map_err(|error| AppError::database("解析本地导入项目ID", &error))?,
+            file_name: session
+                .try_get("file_name")
+                .map_err(|error| AppError::database("解析本地导入文件名", &error))?,
+            file_path: session
+                .try_get("file_path")
+                .map_err(|error| AppError::database("解析本地导入文件路径", &error))?,
+            state: session
+                .try_get("state")
+                .map_err(|error| AppError::database("解析本地导入状态", &error))?,
             counts: serde_json::from_str(&counts_json)
                 .map_err(|_| AppError::InvalidConfig("本地导入统计已损坏".into()))?,
-            created_at: session.try_get("created_at").unwrap_or_default(),
-            updated_at: session.try_get("updated_at").unwrap_or_default(),
+            created_at: session
+                .try_get("created_at")
+                .map_err(|error| AppError::database("解析本地导入创建时间", &error))?,
+            updated_at: session
+                .try_get("updated_at")
+                .map_err(|error| AppError::database("解析本地导入更新时间", &error))?,
             items,
         })
     }
@@ -363,6 +386,22 @@ mod tests {
             .await
             .expect("update selection");
         assert_eq!(changed.counts.selected, 0);
+        let corrupt_selection = sqlx::query(
+            "UPDATE local_aio_import_item SET selected = 2 \
+             WHERE import_session_id = ? AND row_number = 2",
+        )
+        .bind(&session.id)
+        .execute(store.pool())
+        .await;
+        assert!(corrupt_selection.is_err());
+        assert!(
+            !repository
+                .get(&session.id)
+                .await
+                .expect("valid selection")
+                .items[0]
+                .selected
+        );
         assert!(
             repository
                 .update_selection(

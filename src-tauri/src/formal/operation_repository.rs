@@ -171,7 +171,10 @@ impl OperationRepository {
             .into_iter()
             .map(map_history_record)
             .collect::<FormalResult<Vec<_>>>()?;
-        Ok((items, u64::try_from(total).unwrap_or_default()))
+        Ok((
+            items,
+            u64::try_from(total).map_err(|_| FormalError::LocalDatabase("解析操作历史总数"))?,
+        ))
     }
 
     pub async fn history_detail(

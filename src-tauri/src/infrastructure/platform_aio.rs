@@ -67,8 +67,11 @@ impl PlatformAioRepository {
         .map_err(|error| AppError::database("探测平台一体机表字段", &error))?;
         let columns = rows
             .into_iter()
-            .filter_map(|row| row.try_get::<String, _>("column_name").ok())
-            .collect::<Vec<_>>();
+            .map(|row| {
+                row.try_get::<String, _>("column_name")
+                    .map_err(|error| AppError::database("解析平台一体机表字段", &error))
+            })
+            .collect::<AppResult<Vec<_>>>()?;
         let missing = REQUIRED_COLUMNS
             .iter()
             .filter(|column| !columns.iter().any(|item| item == **column))
@@ -109,26 +112,48 @@ impl PlatformAioRepository {
                     continue;
                 }
             };
-            let last_beat_time = row
-                .try_get::<Option<String>, _>("last_beat_text")
-                .ok()
-                .flatten()
-                .and_then(|value| value.parse::<i64>().ok());
+            let name: String = row
+                .try_get("name_text")
+                .map_err(|error| AppError::database("解析平台一体机名称", &error))?;
+            let ip: String = row
+                .try_get("ip_text")
+                .map_err(|error| AppError::database("解析平台一体机IP", &error))?;
+            let last_beat_text: Option<String> = row
+                .try_get("last_beat_text")
+                .map_err(|error| AppError::database("解析平台心跳时间", &error))?;
+            let last_beat_time = last_beat_text
+                .map(|value| {
+                    value
+                        .parse::<i64>()
+                        .map_err(|_| AppError::InvalidConfig("平台一体机心跳时间格式无效".into()))
+                })
+                .transpose()?;
+            let status_value: Option<i64> = row
+                .try_get("status_value")
+                .map_err(|error| AppError::database("解析平台一体机状态", &error))?;
             snapshot.nodes.push(PlatformNodeSnapshot {
                 id,
-                name: row.try_get("name_text").unwrap_or_default(),
-                ip: row.try_get("ip_text").unwrap_or_default(),
+                name,
+                ip,
                 mac_raw: raw_mac,
                 mac_normalized: mac.normalized().into(),
-                building_id: row.try_get("building_id_text").ok(),
-                addr_alias: row.try_get("addr_alias").ok(),
-                status: row
-                    .try_get::<Option<i64>, _>("status_value")
-                    .ok()
-                    .flatten()
-                    .and_then(|value| i32::try_from(value).ok()),
+                building_id: row
+                    .try_get("building_id_text")
+                    .map_err(|error| AppError::database("解析平台楼宇ID", &error))?,
+                addr_alias: row
+                    .try_get("addr_alias")
+                    .map_err(|error| AppError::database("解析平台地址别名", &error))?,
+                status: status_value
+                    .map(|value| {
+                        i32::try_from(value).map_err(|_| {
+                            AppError::InvalidConfig("平台一体机状态超出整数范围".into())
+                        })
+                    })
+                    .transpose()?,
                 last_beat_time,
-                last_sync_time: row.try_get("last_sync_time_text").ok(),
+                last_sync_time: row
+                    .try_get("last_sync_time_text")
+                    .map_err(|error| AppError::database("解析平台同步时间", &error))?,
             });
         }
         Ok(snapshot)

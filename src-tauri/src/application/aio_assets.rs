@@ -810,15 +810,24 @@ async fn latest_local_checks(
     .fetch_all(state.local_store.pool())
     .await
     .map_err(|error| AppError::database("读取一体机本机检查记录", &error))?;
-    Ok(rows
-        .into_iter()
-        .map(|row| LocalCheckRecord {
-            step_code: row.try_get("step_code").unwrap_or_default(),
-            state: row.try_get("state").unwrap_or_default(),
-            message: row.try_get("message").ok(),
-            updated_at: row.try_get("updated_at").unwrap_or_default(),
+    rows.into_iter()
+        .map(|row| -> AppResult<LocalCheckRecord> {
+            Ok(LocalCheckRecord {
+                step_code: row
+                    .try_get("step_code")
+                    .map_err(|error| AppError::database("解析本机检查步骤", &error))?,
+                state: row
+                    .try_get("state")
+                    .map_err(|error| AppError::database("解析本机检查状态", &error))?,
+                message: row
+                    .try_get("message")
+                    .map_err(|error| AppError::database("解析本机检查消息", &error))?,
+                updated_at: row
+                    .try_get("updated_at")
+                    .map_err(|error| AppError::database("解析本机检查时间", &error))?,
+            })
         })
-        .collect())
+        .collect::<AppResult<Vec<_>>>()
 }
 
 fn timestamp() -> String {

@@ -112,18 +112,33 @@ impl WorkbenchAioRepository {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| AppError::database("读取一体机服务版本", &error))?;
-        Ok(rows
-            .into_iter()
-            .map(|row| ServiceVersionRecord {
-                mac_normalized: row.try_get("mac_normalized").unwrap_or_default(),
-                service_name: row.try_get("service_name").unwrap_or_default(),
-                expected_image_name: row.try_get("expected_image_name").ok(),
-                expected_version: row.try_get("expected_version").ok(),
-                observed_image_name: row.try_get("observed_image_name").ok(),
-                observed_version: row.try_get("observed_version").ok(),
-                observed_at: row.try_get("observed_at_text").ok(),
+        rows.into_iter()
+            .map(|row| -> AppResult<ServiceVersionRecord> {
+                Ok(ServiceVersionRecord {
+                    mac_normalized: row
+                        .try_get("mac_normalized")
+                        .map_err(|error| AppError::database("解析服务版本MAC", &error))?,
+                    service_name: row
+                        .try_get("service_name")
+                        .map_err(|error| AppError::database("解析服务版本名称", &error))?,
+                    expected_image_name: row
+                        .try_get("expected_image_name")
+                        .map_err(|error| AppError::database("解析期望镜像名", &error))?,
+                    expected_version: row
+                        .try_get("expected_version")
+                        .map_err(|error| AppError::database("解析期望服务版本", &error))?,
+                    observed_image_name: row
+                        .try_get("observed_image_name")
+                        .map_err(|error| AppError::database("解析观测镜像名", &error))?,
+                    observed_version: row
+                        .try_get("observed_version")
+                        .map_err(|error| AppError::database("解析观测服务版本", &error))?,
+                    observed_at: row
+                        .try_get("observed_at_text")
+                        .map_err(|error| AppError::database("解析服务观测时间", &error))?,
+                })
             })
-            .collect())
+            .collect::<AppResult<Vec<_>>>()
     }
 
     pub async fn list_last_operations(
@@ -138,24 +153,39 @@ impl WorkbenchAioRepository {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| AppError::database("读取一体机最近操作", &error))?;
-        Ok(rows
-            .into_iter()
-            .map(|row| {
-                let mac = row.try_get("mac_normalized").unwrap_or_default();
-                (
+        rows.into_iter()
+            .map(|row| -> AppResult<(String, OperationRecordSummary)> {
+                let mac = row
+                    .try_get("mac_normalized")
+                    .map_err(|error| AppError::database("解析最近操作MAC", &error))?;
+                Ok((
                     mac,
                     OperationRecordSummary {
-                        id: row.try_get("id").unwrap_or_default(),
-                        operation_type: row.try_get("operation_type").unwrap_or_default(),
-                        operation_name: row.try_get("operation_name").unwrap_or_default(),
-                        state: row.try_get("state").unwrap_or_default(),
-                        operator_name: row.try_get("operator_name").unwrap_or_default(),
-                        ended_at: row.try_get("ended_at_text").ok(),
-                        result_summary: row.try_get("result_summary").ok(),
+                        id: row
+                            .try_get("id")
+                            .map_err(|error| AppError::database("解析最近操作ID", &error))?,
+                        operation_type: row
+                            .try_get("operation_type")
+                            .map_err(|error| AppError::database("解析最近操作类型", &error))?,
+                        operation_name: row
+                            .try_get("operation_name")
+                            .map_err(|error| AppError::database("解析最近操作名称", &error))?,
+                        state: row
+                            .try_get("state")
+                            .map_err(|error| AppError::database("解析最近操作状态", &error))?,
+                        operator_name: row
+                            .try_get("operator_name")
+                            .map_err(|error| AppError::database("解析最近操作用户", &error))?,
+                        ended_at: row
+                            .try_get("ended_at_text")
+                            .map_err(|error| AppError::database("解析最近操作结束时间", &error))?,
+                        result_summary: row
+                            .try_get("result_summary")
+                            .map_err(|error| AppError::database("解析最近操作摘要", &error))?,
                     },
-                )
+                ))
             })
-            .collect())
+            .collect::<AppResult<std::collections::HashMap<_, _>>>()
     }
 
     pub async fn apply_inventory(
@@ -366,20 +396,36 @@ fn map_snapshot(row: sqlx::mysql::MySqlRow) -> AppResult<WorkbenchNodeSnapshot> 
         ip: row
             .try_get("ip")
             .map_err(|error| AppError::database("解析一体机IP", &error))?,
-        building_id: row.try_get("building_id").ok(),
-        region_id: row.try_get("region_id").ok(),
-        addr_alias: row.try_get("addr_alias").ok(),
-        floor: row.try_get("floor").ok(),
-        location: row.try_get("location").ok(),
-        remark: row.try_get("remark").ok(),
-        platform_aio_id: row.try_get("platform_aio_id").ok(),
+        building_id: row
+            .try_get("building_id")
+            .map_err(|error| AppError::database("解析一体机楼宇ID", &error))?,
+        region_id: row
+            .try_get("region_id")
+            .map_err(|error| AppError::database("解析一体机区域ID", &error))?,
+        addr_alias: row
+            .try_get("addr_alias")
+            .map_err(|error| AppError::database("解析一体机地址别名", &error))?,
+        floor: row
+            .try_get("floor")
+            .map_err(|error| AppError::database("解析一体机楼层", &error))?,
+        location: row
+            .try_get("location")
+            .map_err(|error| AppError::database("解析一体机位置", &error))?,
+        remark: row
+            .try_get("remark")
+            .map_err(|error| AppError::database("解析一体机备注", &error))?,
+        platform_aio_id: row
+            .try_get("platform_aio_id")
+            .map_err(|error| AppError::database("解析平台一体机ID", &error))?,
         management_state: row
             .try_get("management_state")
             .map_err(|error| AppError::database("解析一体机管理状态", &error))?,
         source: row
             .try_get("source")
             .map_err(|error| AppError::database("解析一体机来源", &error))?,
-        last_operation_id: row.try_get("last_operation_id").ok(),
+        last_operation_id: row
+            .try_get("last_operation_id")
+            .map_err(|error| AppError::database("解析最近操作ID", &error))?,
         version: row
             .try_get::<u64, _>("version")
             .map_err(|error| AppError::database("解析一体机版本", &error))?,

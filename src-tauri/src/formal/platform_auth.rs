@@ -168,9 +168,12 @@ impl PlatformAuthAdapter {
             .json::<Value>()
             .await
             .map_err(|error| map_http_error("解析平台会话校验响应", error))?;
-        Ok(envelope
-            .get("code")
-            .is_some_and(|code| code.as_i64() == Some(200) || code.as_str() == Some("200")))
+        if let Some(code) = envelope.get("code") {
+            return Ok(code.as_i64() == Some(200) || code.as_str() == Some("200"));
+        }
+        Ok(envelope.as_object().is_some_and(|object| {
+            object.contains_key("menuList") && object.contains_key("authorities")
+        }))
     }
 }
 

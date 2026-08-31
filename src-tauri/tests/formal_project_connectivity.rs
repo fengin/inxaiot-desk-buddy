@@ -93,4 +93,11 @@ async fn formal_platform_auth_session_is_redacted() {
     assert_eq!(session.principal, config.login.principal);
     assert!(!session.access_token.is_empty());
     assert!(!format!("{session:?}").contains(&session.access_token));
+    assert!(session.expires_at.is_some());
+    assert!(
+        adapter
+            .validate_access_token(&config.login.base_url, &session.access_token)
+            .await
+            .expect("validate platform access token")
+    );
 }

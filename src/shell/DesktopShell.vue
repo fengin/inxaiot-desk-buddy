@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { NButton, NDescriptions, NDescriptionsItem, NModal, NSpace, NTag } from "naive-ui";
+import { NAlert, NButton, NDescriptions, NDescriptionsItem, NModal, NSpace, NTag } from "naive-ui";
 import {
   Boxes,
   ChevronLeft,
@@ -38,6 +38,13 @@ const preferences = usePreferencesStore();
 const projects = useProjectStore();
 const dataDirectory = useDataDirectoryStore();
 const diagnostics = useDiagnosticsStore();
+const dataDirectoryStatusLabel = computed(() => {
+  if (dataDirectory.loading) return "正在读取数据目录";
+  if (dataDirectory.error) return "数据目录状态不可用";
+  if (!dataDirectory.status) return "数据目录尚未加载";
+  if (dataDirectory.status.lastSwitchError) return "数据目录维护异常";
+  return dataDirectory.status.restartRequired ? "数据目录待重启切换" : "数据目录已生效";
+});
 const preferencesOpen = ref(false);
 const aboutOpen = ref(false);
 const aioExpanded = ref(true);
@@ -68,7 +75,7 @@ onMounted(async () => {
   });
 });
 watch(aboutOpen, (open) => {
-  if (open) void diagnostics.load(true);
+  if (open) void diagnostics.load(true).catch(() => undefined);
 });
 watch(
   () => projects.activeProjectId,
@@ -179,7 +186,7 @@ const businessRouteMessage = computed(() => {
       <span class="status-segment"><i class="status-dot" :class="projects.databaseConnected ? 'success' : projects.activeProject?.databaseState === 'failed' ? 'error' : ''"></i>{{ projects.databaseConnected ? '工作台数据库已连接' : projects.activeProject?.databaseState === 'failed' ? '工作台数据库连接失败' : '工作台数据库未连接' }}</span>
       <span class="status-segment">{{ projects.session?.state === 'active' ? `平台已登录 · ${projects.session.username}` : projects.session?.state === 'expired' ? '平台会话已过期' : '平台未登录' }}</span>
       <span class="status-segment status-context">{{ projects.activeProject?.name ?? '未选择项目' }}</span>
-      <span class="status-segment" :title="dataDirectory.activeDirectory">{{ dataDirectory.status?.restartRequired ? '数据目录待重启切换' : '数据目录已生效' }}</span>
+      <span class="status-segment" :class="{ error: Boolean(dataDirectory.error || dataDirectory.status?.lastSwitchError) }" :title="dataDirectory.error || dataDirectory.activeDirectory">{{ dataDirectoryStatusLabel }}</span>
       <button class="status-segment status-activity" type="button" @click="activity.openPanel('logs')">
         <History :size="13" />任务与日志<n-tag v-if="activity.activeTaskCount" size="tiny" type="info" :bordered="false">{{ activity.activeTaskCount }}</n-tag>
       </button>
@@ -189,6 +196,10 @@ const businessRouteMessage = computed(() => {
     <n-modal v-model:show="aboutOpen" preset="card" title="关于 INX 实施工作台" class="about-modal" :bordered="false">
       <div class="about-product"><span class="brand-mark large">INX</span><div><strong>INX 实施工作台</strong><span>Rust + Tauri 阶段 7.5 最终收口版</span></div></div>
       <p class="modal-description">面向项目实施与维护人员，统一管理一体机部署、升级和结果追踪；生产路径仅使用 Tauri Real Adapter。</p>
+      <n-alert v-if="diagnostics.error" type="error" :bordered="false">
+        {{ diagnostics.error }}
+        <n-button text type="primary" size="tiny" @click="diagnostics.load(true).catch(() => undefined)">重新读取诊断</n-button>
+      </n-alert>
       <n-descriptions :column="1" size="small" bordered label-placement="left">
         <n-descriptions-item label="版本">{{ diagnostics.value?.applicationVersion ?? '读取中…' }}</n-descriptions-item>
         <n-descriptions-item label="源码提交"><span class="diagnostic-value">{{ diagnostics.value?.sourceCommit ?? '读取中…' }}</span></n-descriptions-item>

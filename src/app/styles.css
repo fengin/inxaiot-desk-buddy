@@ -1510,6 +1510,10 @@ a {
   white-space: nowrap;
 }
 
+.status-segment.error {
+  color: var(--inx-color-danger);
+}
+
 .status-context {
   overflow: hidden;
   text-overflow: ellipsis;

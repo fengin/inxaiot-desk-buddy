@@ -6,7 +6,8 @@ import { useActivityAdapter } from "@/shared/api/activityAdapter";
 import type {
   ActivityLogEntry,
   ActivityLogLevel,
-  ActivityTask
+  ActivityTask,
+  TaskEventPayload
 } from "@/shared/model/activity";
 
 const activeStates = new Set(["queued", "running", "cancelling", "finalizing_failed"]);
@@ -25,6 +26,7 @@ export const useActivityStore = defineStore("activity", () => {
   const started = ref(false);
   const panelOpen = ref(false);
   const panelTab = ref<"tasks" | "logs">("tasks");
+  const lastEvent = ref<TaskEventPayload>();
   let unlisten: (() => void) | undefined;
   let refreshTimer: number | undefined;
 
@@ -122,8 +124,7 @@ export const useActivityStore = defineStore("activity", () => {
     }
   }
 
-  function scheduleRefresh(taskId: string) {
-    if (taskId === selectedTaskId.value) void refreshLogs();
+  function scheduleRefresh() {
     if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
     refreshTimer = window.setTimeout(() => void refreshTasks(), 120);
   }
@@ -135,7 +136,10 @@ export const useActivityStore = defineStore("activity", () => {
     }
     started.value = true;
     await refreshTasks(nextProjectId);
-    unlisten = await useActivityAdapter().listen((event) => scheduleRefresh(event.localTaskId));
+    unlisten = await useActivityAdapter().listen((event) => {
+      lastEvent.value = event;
+      scheduleRefresh();
+    });
   }
 
   function dispose() {
@@ -159,6 +163,7 @@ export const useActivityStore = defineStore("activity", () => {
     logHasMore,
     panelOpen,
     panelTab,
+    lastEvent,
     openPanel,
     start,
     dispose,

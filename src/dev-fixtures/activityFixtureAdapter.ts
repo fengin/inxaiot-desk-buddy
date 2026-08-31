@@ -5,6 +5,8 @@ import type { ActivityLogEntry, ActivityTask } from "@/shared/model/activity";
 const tasks: ActivityTask[] = demoTasks.map((task) => ({
   id: task.id,
   projectId: task.projectId,
+  domainType: "aio",
+  operationType: task.mode,
   name: task.name,
   state: task.state,
   stage: task.stage,

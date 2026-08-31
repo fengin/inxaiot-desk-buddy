@@ -80,6 +80,7 @@ const imageInspection = ref<ServiceImageInspection>();
 const checking = ref(false);
 const executing = ref(false);
 let taskRefreshTimer: number | undefined;
+let taskEventRefreshTimer: number | undefined;
 let projectContextMounted = false;
 let projectContextRequest = 0;
 
@@ -153,6 +154,14 @@ watch(
     if (["succeeded", "partially_succeeded", "failed", "cancelled", "interrupted", "check_failed", "finalizing_failed"].includes(state ?? "")) step.value = 3;
   }
 );
+watch(
+  () => activity.lastEvent,
+  (event) => {
+    if (!event || event.localTaskId !== resultTaskId.value) return;
+    if (taskEventRefreshTimer !== undefined) window.clearTimeout(taskEventRefreshTimer);
+    taskEventRefreshTimer = window.setTimeout(() => void refreshSubmittedTask(), 80);
+  }
+);
 
 onMounted(async () => {
   await projects.initialize();
@@ -170,6 +179,7 @@ onBeforeUnmount(() => {
   projectContextMounted = false;
   projectContextRequest += 1;
   if (taskRefreshTimer !== undefined) window.clearTimeout(taskRefreshTimer);
+  if (taskEventRefreshTimer !== undefined) window.clearTimeout(taskEventRefreshTimer);
 });
 
 async function activateProjectContext(projectId?: string) {
@@ -181,6 +191,12 @@ async function activateProjectContext(projectId?: string) {
   imageInspection.value = undefined;
   selectedMacs.value = [];
   targetSearch.value = "";
+  if (operationProjectId.value !== projectId) {
+    step.value = 0;
+    resultTaskId.value = undefined;
+    operationProjectId.value = undefined;
+    workflow.clearTask();
+  }
   if (!projectId || !projects.isReady) return;
   await Promise.all([
     aio.refresh(projectId),
@@ -189,6 +205,7 @@ async function activateProjectContext(projectId?: string) {
     activity.start(projectId)
   ]);
   if (request !== projectContextRequest || projectId !== projects.activeProjectId) return;
+  if (await restoreActiveDeployment(projectId)) return;
   const routedTarget = typeof route.query.target === "string" ? route.query.target : "";
   const routedNode = eligibleNodes.value.find(
     (node) => node.mac === routedTarget && node.managementState !== "conflict"
@@ -199,6 +216,29 @@ async function activateProjectContext(projectId?: string) {
         .filter((node) => node.managementState === "managed" && node.platformState === "online")
         .slice(0, 4)
         .map((node) => node.mac);
+}
+
+async function restoreActiveDeployment(projectId: string) {
+  const task = activity.tasks.find((item) =>
+    item.domainType === "aio"
+    && ["first_deploy", "full_upgrade", "service_upgrade"].includes(item.operationType)
+    && ["queued", "running", "cancelling", "finalizing_failed"].includes(item.state)
+  );
+  if (!task) return false;
+  resultTaskId.value = task.id;
+  operationProjectId.value = projectId;
+  mode.value = task.operationType as OperationMode;
+  try {
+    const restored = await workflow.loadTask(projectId, task.id);
+    step.value = restored.state === "finalizing_failed" ? 3 : 2;
+    if (step.value === 2) scheduleTaskRefresh();
+    message.info(`已恢复本项目活动任务：${task.id}`);
+    return true;
+  } catch {
+    resultTaskId.value = undefined;
+    operationProjectId.value = undefined;
+    return false;
+  }
 }
 
 function nodeName(mac: string) {
@@ -330,7 +370,6 @@ async function handleRemediation(check: DeploymentPreflightCheck) {
 async function refreshSubmittedTask() {
   const projectId = operationProjectId.value;
   if (!projectId) return;
-  if (projects.activeProjectId === projectId) await activity.refreshTasks(projectId);
   if (!resultTaskId.value) return;
   try {
     const task = await workflow.loadTask(projectId, resultTaskId.value);
@@ -374,7 +413,7 @@ function scheduleTaskRefresh() {
   taskRefreshTimer = window.setTimeout(async () => {
     await refreshSubmittedTask();
     if (step.value === 2) scheduleTaskRefresh();
-  }, 500);
+  }, 5_000);
 }
 
 function resetFlow() {

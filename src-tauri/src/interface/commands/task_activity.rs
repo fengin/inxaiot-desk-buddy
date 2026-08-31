@@ -17,6 +17,8 @@ use crate::interface::error::CommandErrorDto;
 pub struct ActivityTaskDto {
     pub id: String,
     pub project_id: String,
+    pub domain_type: String,
+    pub operation_type: String,
     pub name: String,
     pub state: String,
     pub stage: String,
@@ -322,6 +324,8 @@ async fn activity_task(
     Ok(ActivityTaskDto {
         id: task.id,
         project_id: task.local_project_id,
+        domain_type: task.domain_type,
+        operation_type: task.operation_type,
         name: task.name,
         state: task.state.as_str().into(),
         stage,

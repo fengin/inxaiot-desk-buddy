@@ -16,6 +16,8 @@ export type ActivityTaskState =
 export interface ActivityTask {
   id: string;
   projectId: string;
+  domainType: string;
+  operationType: string;
   name: string;
   state: ActivityTaskState;
   stage: string;

@@ -72,7 +72,7 @@ impl AioNodeRepository {
         let display = display_mac(&mac)?;
         let now = OffsetDateTime::now_utc();
         let mut transaction = self.pool.begin().await.map_err(|error| {
-            tracing::error!(error = ?error, "begin aio node transaction failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "begin aio node transaction failed");
             FormalError::LocalDatabase("开始一体机资产事务")
         })?;
         let (old_version, new_version, action) = if let Some(expected) = write.expected_version {
@@ -165,7 +165,7 @@ impl AioNodeRepository {
         .await
         .map_err(|error| map_error("记录一体机资产审计", error))?;
         transaction.commit().await.map_err(|error| {
-            tracing::error!(error = ?error, "commit aio node transaction failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "commit aio node transaction failed");
             FormalError::LocalDatabase("提交一体机资产事务")
         })?;
         self.get(&mac).await
@@ -216,7 +216,7 @@ impl AioNodeRepository {
     pub async fn delete_test_node(&self, mac: &str) -> FormalResult<()> {
         let mac = normalize_mac(mac)?;
         let mut transaction = self.pool.begin().await.map_err(|error| {
-            tracing::error!(error = ?error, "begin aio node cleanup failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "begin aio node cleanup failed");
             FormalError::LocalDatabase("开始测试一体机清理事务")
         })?;
         sqlx::query("DELETE FROM audit_event WHERE object_type = 'aio_node' AND object_key = ?")
@@ -230,7 +230,7 @@ impl AioNodeRepository {
             .await
             .map_err(|error| map_error("清理一体机资产", error))?;
         transaction.commit().await.map_err(|error| {
-            tracing::error!(error = ?error, "commit aio node cleanup failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "commit aio node cleanup failed");
             FormalError::LocalDatabase("提交测试一体机清理事务")
         })?;
         Ok(())
@@ -281,6 +281,6 @@ fn map_node(row: sqlx::mysql::MySqlRow) -> FormalResult<AioNodeRecord> {
 }
 
 fn map_error(operation: &'static str, error: sqlx::Error) -> FormalError {
-    tracing::error!(operation, error = ?error, "aio node mysql operation failed");
+    tracing::error!(operation, error = ?crate::core::log_safety::safe_error(&error), "aio node mysql operation failed");
     FormalError::LocalDatabase(operation)
 }

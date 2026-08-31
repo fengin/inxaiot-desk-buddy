@@ -153,7 +153,7 @@ impl LocalProjectRepository {
         .await;
         if let Err(error) = result {
             let _ = self.secrets.delete(&secret_ref);
-            tracing::error!(error = ?error, "insert local project failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "insert local project failed");
             return Err(FormalError::LocalDatabase("创建本地项目入口"));
         }
         self.get(&id).await
@@ -167,7 +167,7 @@ impl LocalProjectRepository {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| {
-            tracing::error!(error = ?error, "list local projects failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "list local projects failed");
             FormalError::LocalDatabase("读取本地项目入口")
         })?;
         rows.into_iter().map(map_project).collect()
@@ -186,7 +186,7 @@ impl LocalProjectRepository {
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| {
-            tracing::error!(error = ?error, "read local project before update failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "read local project before update failed");
             FormalError::LocalDatabase("读取待编辑项目")
         })?
         .ok_or_else(|| FormalError::NotFound(format!("项目不存在：{project_id}")))?;
@@ -206,7 +206,7 @@ impl LocalProjectRepository {
         }
         let secret_ref = new_secret_ref.as_deref().unwrap_or(&old_secret_ref);
         let mut transaction = self.pool.begin().await.map_err(|error| {
-            tracing::error!(error = ?error, "begin local project update failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "begin local project update failed");
             FormalError::LocalDatabase("开始编辑项目事务")
         })?;
         let result = sqlx::query(
@@ -251,12 +251,12 @@ impl LocalProjectRepository {
                 .execute(&mut *transaction)
                 .await
                 .map_err(|error| {
-                    tracing::error!(error = ?error, "invalidate project session after update failed");
+                    tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "invalidate project session after update failed");
                     FormalError::LocalDatabase("使项目会话失效")
                 })?;
         }
         transaction.commit().await.map_err(|error| {
-            tracing::error!(error = ?error, "commit local project update failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "commit local project update failed");
             FormalError::LocalDatabase("提交编辑项目事务")
         })?;
         if new_secret_ref.is_some() {
@@ -278,7 +278,7 @@ impl LocalProjectRepository {
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| {
-            tracing::error!(error = ?error, "get local project failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "get local project failed");
             FormalError::LocalDatabase("读取本地项目入口")
         })?
         .ok_or_else(|| FormalError::NotFound(format!("项目不存在：{project_id}")))?;
@@ -297,7 +297,7 @@ impl LocalProjectRepository {
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| {
-            tracing::error!(error = ?error, "load project connection failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "load project connection failed");
             FormalError::LocalDatabase("读取项目连接")
         })?
         .ok_or_else(|| FormalError::NotFound(format!("项目不存在：{project_id}")))?;
@@ -323,7 +323,7 @@ impl LocalProjectRepository {
                 .execute(&self.pool)
                 .await
                 .map_err(|error| {
-                    tracing::error!(error = ?error, "touch local project failed");
+                    tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "touch local project failed");
                     FormalError::LocalDatabase("更新项目打开时间")
                 })?;
         if result.rows_affected() == 0 {
@@ -363,7 +363,7 @@ impl LocalProjectRepository {
         .await;
         if let Err(error) = result {
             let _ = self.secrets.delete(&token_ref);
-            tracing::error!(error = ?error, "save project session failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "save project session failed");
             return Err(FormalError::LocalDatabase("保存项目会话"));
         }
         Ok(LocalProjectSession {
@@ -383,7 +383,7 @@ impl LocalProjectRepository {
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| {
-            tracing::error!(error = ?error, "load project session failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "load project session failed");
             FormalError::LocalDatabase("读取项目会话")
         })?
         .ok_or_else(|| FormalError::NotFound(format!("项目会话不存在：{project_id}")))?;
@@ -418,7 +418,7 @@ impl LocalProjectRepository {
             .execute(&self.pool)
             .await
             .map_err(|error| {
-                tracing::error!(error = ?error, "clear project session failed");
+                tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "clear project session failed");
                 FormalError::LocalDatabase("退出项目会话")
             })?;
         let token_ref = format!("project/{project_id}/platform-access-token");
@@ -432,7 +432,7 @@ impl LocalProjectRepository {
             .fetch_optional(&self.pool)
             .await
             .map_err(|error| {
-                tracing::error!(error = ?error, "read project before delete failed");
+                tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "read project before delete failed");
                 FormalError::LocalDatabase("读取待删除项目")
             })?
             .ok_or_else(|| FormalError::NotFound(format!("项目不存在：{project_id}")))?;
@@ -465,7 +465,7 @@ fn map_project_mutation_error(
     }) {
         return FormalError::Conflict("项目存在活动任务，任务进入终态前不能编辑或删除".into());
     }
-    tracing::error!(error = ?error, operation = log_message, "project mutation failed");
+    tracing::error!(error = ?crate::core::log_safety::safe_error(&error), operation = log_message, "project mutation failed");
     FormalError::LocalDatabase(operation)
 }
 

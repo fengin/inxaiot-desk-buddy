@@ -401,7 +401,7 @@ pub async fn apply_inventory_import(
             tracing::error!(
                 session_id,
                 operation_id = result.operation_id,
-                error = ?error,
+                error = ?crate::core::log_safety::safe_error(&error),
                 "project import committed but local session finalization failed"
             );
             false

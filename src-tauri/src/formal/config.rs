@@ -45,7 +45,7 @@ impl AppPaths {
             &self.runtime_agent_dir,
         ] {
             std::fs::create_dir_all(directory).map_err(|error| {
-                tracing::error!(path = %directory.display(), error = ?error, "create app directory failed");
+                tracing::error!(path = %directory.display(), error = ?crate::core::log_safety::safe_error(&error), "create app directory failed");
                 FormalError::LocalIo("创建工作台目录")
             })?;
         }

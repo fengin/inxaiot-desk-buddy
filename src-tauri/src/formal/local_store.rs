@@ -30,11 +30,11 @@ impl LocalStore {
             .connect_with(options)
             .await
             .map_err(|error| {
-                tracing::error!(error = ?error, "open local sqlite failed");
+                tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "open local sqlite failed");
                 FormalError::LocalDatabase("打开本地数据库")
             })?;
         LOCAL_MIGRATOR.run(&pool).await.map_err(|error| {
-            tracing::error!(error = ?error, "run local sqlite migration failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "run local sqlite migration failed");
             FormalError::LocalDatabase("执行本地数据库迁移")
         })?;
         Ok(Self { pool })

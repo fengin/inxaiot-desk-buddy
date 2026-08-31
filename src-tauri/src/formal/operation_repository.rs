@@ -223,7 +223,7 @@ impl OperationRepository {
             .map_err(|_| FormalError::InvalidConfig("操作摘要无法序列化".into()))?;
         let targets = input.targets.into_iter().collect::<BTreeSet<_>>();
         let mut transaction = self.pool.begin().await.map_err(|error| {
-            tracing::error!(error = ?error, "begin operation transaction failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "begin operation transaction failed");
             FormalError::LocalDatabase("开始操作记录事务")
         })?;
         sqlx::query(
@@ -263,7 +263,7 @@ impl OperationRepository {
             .map_err(|error| map_error("创建操作目标结果", error))?;
         }
         transaction.commit().await.map_err(|error| {
-            tracing::error!(error = ?error, "commit operation transaction failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "commit operation transaction failed");
             FormalError::LocalDatabase("提交操作记录事务")
         })?;
         self.get(&id).await
@@ -314,7 +314,7 @@ impl OperationRepository {
     pub async fn finalize(&self, result: OperationFinalResult) -> FormalResult<OperationRecord> {
         validate_operation_state(&result.state)?;
         let mut transaction = self.pool.begin().await.map_err(|error| {
-            tracing::error!(error = ?error, "begin operation finalization failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "begin operation finalization failed");
             FormalError::LocalDatabase("开始操作最终化事务")
         })?;
         let rows = sqlx::query(
@@ -371,7 +371,7 @@ impl OperationRepository {
             return Err(FormalError::Conflict("操作记录已被其他实例更新".into()));
         }
         transaction.commit().await.map_err(|error| {
-            tracing::error!(error = ?error, "commit operation finalization failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "commit operation finalization failed");
             FormalError::LocalDatabase("提交操作最终化事务")
         })?;
         self.get(&result.operation_id).await
@@ -457,7 +457,7 @@ impl OperationRepository {
     ) -> FormalResult<OperationRecord> {
         let stale_seconds = stale_after.as_secs().max(1) as i64;
         let mut transaction = self.pool.begin().await.map_err(|error| {
-            tracing::error!(error = ?error, "begin stale operation recovery failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "begin stale operation recovery failed");
             FormalError::LocalDatabase("开始中断操作恢复事务")
         })?;
         let eligible = sqlx::query_scalar::<_, i8>(
@@ -542,7 +542,7 @@ impl OperationRepository {
             return Err(FormalError::Conflict("操作恢复期间状态已变化".into()));
         }
         transaction.commit().await.map_err(|error| {
-            tracing::error!(error = ?error, "commit stale operation recovery failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "commit stale operation recovery failed");
             FormalError::LocalDatabase("提交中断操作恢复事务")
         })?;
         self.get(operation_id).await
@@ -726,6 +726,6 @@ fn validate_operation_state(state: &str) -> FormalResult<()> {
 }
 
 fn map_error(operation: &'static str, error: sqlx::Error) -> FormalError {
-    tracing::error!(operation, error = ?error, "operation mysql call failed");
+    tracing::error!(operation, error = ?crate::core::log_safety::safe_error(&error), "operation mysql call failed");
     FormalError::LocalDatabase(operation)
 }

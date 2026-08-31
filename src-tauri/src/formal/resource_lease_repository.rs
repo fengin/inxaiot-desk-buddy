@@ -107,7 +107,7 @@ impl ResourceLeaseRepository {
             })
             .collect::<BTreeSet<_>>();
         let mut transaction = self.pool.begin().await.map_err(|error| {
-            tracing::error!(error = ?error, "begin lease transaction failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "begin lease transaction failed");
             FormalError::LocalDatabase("开始资源租约事务")
         })?;
         let mut grants = Vec::with_capacity(unique.len());
@@ -127,7 +127,7 @@ impl ResourceLeaseRepository {
             }
         }
         transaction.commit().await.map_err(|error| {
-            tracing::error!(error = ?error, "commit lease transaction failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "commit lease transaction failed");
             FormalError::LocalDatabase("提交资源租约事务")
         })?;
         Ok(grants)
@@ -326,6 +326,6 @@ fn validate_request(request: &LeaseRequest) -> FormalResult<()> {
 }
 
 fn map_error(operation: &'static str, error: sqlx::Error) -> FormalError {
-    tracing::error!(operation, error = ?error, "resource lease mysql operation failed");
+    tracing::error!(operation, error = ?crate::core::log_safety::safe_error(&error), "resource lease mysql operation failed");
     FormalError::LocalDatabase(operation)
 }

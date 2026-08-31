@@ -7,7 +7,7 @@ use super::error::{FormalError, FormalResult};
 
 pub fn init_file_logging(logs_dir: &Path) -> FormalResult<WorkerGuard> {
     std::fs::create_dir_all(logs_dir).map_err(|error| {
-        tracing::error!(path = %logs_dir.display(), error = ?error, "create logs directory failed");
+        tracing::error!(path = %logs_dir.display(), error = ?crate::core::log_safety::safe_error(&error), "create logs directory failed");
         FormalError::LocalIo("创建日志目录")
     })?;
     let appender = tracing_appender::rolling::daily(logs_dir, "app.log");

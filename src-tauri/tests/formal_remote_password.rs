@@ -37,11 +37,9 @@ impl russh::server::Handler for PasswordHandler {
 
 #[tokio::test]
 async fn password_authentication_and_host_key_change_are_verified_in_process() {
-    let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("project root");
-    let private_key = std::fs::read_to_string(project.join("test/id_rsa")).expect("server key");
-    let host_key = russh::keys::decode_secret_key(&private_key, None).expect("decode server key");
+    let host_key = russh::keys::PrivateKey::from(
+        russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[42_u8; 32]),
+    );
     let config = Arc::new(russh::server::Config {
         auth_rejection_time: Duration::from_millis(10),
         auth_rejection_time_initial: Some(Duration::ZERO),

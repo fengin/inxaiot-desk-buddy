@@ -249,7 +249,7 @@ fn derive_key(material: &[u8], salt: &[u8; 16]) -> FormalResult<[u8; 32]> {
     Argon2::default()
         .hash_password_into(material, salt, &mut key)
         .map_err(|error| {
-            tracing::error!(error = ?error, "derive release credential key failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "derive release credential key failed");
             FormalError::InvalidConfig("派生发布凭据密钥失败".into())
         })?;
     Ok(key)

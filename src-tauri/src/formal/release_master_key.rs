@@ -486,7 +486,7 @@ fn derive_transfer_key(passphrase: &str, salt: &[u8; 16]) -> FormalResult<[u8; 3
     Argon2::default()
         .hash_password_into(passphrase.as_bytes(), salt, &mut key)
         .map_err(|error| {
-            tracing::error!(error = ?error, "derive transfer package key failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "derive transfer package key failed");
             FormalError::InvalidConfig("派生密钥包加密密钥失败".into())
         })?;
     Ok(key)

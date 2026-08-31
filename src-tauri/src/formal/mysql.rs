@@ -234,6 +234,6 @@ fn validate_identifier(value: &str) -> FormalResult<()> {
 }
 
 fn map_database_error(operation: &'static str, error: sqlx::Error) -> FormalError {
-    tracing::error!(operation, error = ?error, "mysql operation failed");
+    tracing::error!(operation, error = ?crate::core::log_safety::safe_error(&error), "mysql operation failed");
     FormalError::LocalDatabase(operation)
 }

@@ -349,7 +349,7 @@ fn map_write_error(operation: &'static str, error: sqlx::Error) -> AppError {
     if let sqlx::Error::Database(database) = &error
         && database.is_unique_violation()
     {
-        tracing::warn!(operation, error = ?error, "aio inventory write conflict");
+        tracing::warn!(operation, error = ?crate::core::log_safety::safe_error(&error), "aio inventory write conflict");
         return AppError::Conflict("一体机 MAC、IP 或平台关联已经存在".into());
     }
     AppError::database(operation, &error)

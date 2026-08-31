@@ -125,18 +125,18 @@ pub fn run() {
                             ) {
                                 tracing::warn!(
                                     task_id = %task.id,
-                                    error = %error,
+                                    error = %crate::core::log_safety::safe_error(&error),
                                     "startup task artifact cleanup deferred"
                                 );
                             }
                         }
                     }
                     Err(error) => {
-                        tracing::warn!(error = %error, "startup task cleanup scan deferred");
+                        tracing::warn!(error = %crate::core::log_safety::safe_error(&error), "startup task cleanup scan deferred");
                     }
                 }
                 if let Err(error) = task_data_lifecycle.sweep_expired_logs() {
-                    tracing::warn!(error = %error, "startup task log retention sweep deferred");
+                    tracing::warn!(error = %crate::core::log_safety::safe_error(&error), "startup task log retention sweep deferred");
                 }
                 let job_supervisor = JobSupervisor::default();
                 let task_handler_registry = TaskHandlerRegistry::default();

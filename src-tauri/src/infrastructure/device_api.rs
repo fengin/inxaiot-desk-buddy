@@ -117,7 +117,7 @@ impl DeviceApiClient {
             .await
             .map_err(|error| AppError::platform_http("解析一体机本地API", &error))?;
         if !success_code(response.code) {
-            tracing::warn!(code = response.code, message = %response.message, "device api rejected request");
+            tracing::warn!(code = response.code, "device api rejected request");
         }
         Ok(response)
     }
@@ -126,8 +126,8 @@ impl DeviceApiClient {
 #[derive(Deserialize)]
 struct ApiEnvelope {
     code: i64,
-    #[serde(default)]
-    message: String,
+    #[serde(default, rename = "message")]
+    _message: String,
     #[serde(default)]
     data: serde_json::Value,
 }

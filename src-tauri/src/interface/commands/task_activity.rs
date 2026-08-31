@@ -262,7 +262,7 @@ pub async fn request_task_cancel(
         )
         .await
     {
-        tracing::error!(task_id, error = ?error, "persist cancellation event failed");
+        tracing::error!(task_id, error = ?crate::core::log_safety::safe_error(&error), "persist cancellation event failed");
     }
     if task.state.is_terminal() {
         let _ = TaskDataLifecycle::new(&state.paths).finalize_task(

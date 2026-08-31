@@ -73,7 +73,7 @@ impl ReleaseProfileRepository {
     ) -> FormalResult<ReleaseProfileRecord> {
         let now = OffsetDateTime::now_utc();
         let mut transaction = self.pool.begin().await.map_err(|error| {
-            tracing::error!(error = ?error, "begin release profile transaction failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "begin release profile transaction failed");
             FormalError::LocalDatabase("开始发布配置事务")
         })?;
         let (old_version, new_version, action) = if let Some(expected_version) =
@@ -178,7 +178,7 @@ impl ReleaseProfileRepository {
         .await
         .map_err(|error| map_error("记录发布配置审计", error))?;
         transaction.commit().await.map_err(|error| {
-            tracing::error!(error = ?error, "commit release profile transaction failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "commit release profile transaction failed");
             FormalError::LocalDatabase("提交发布配置事务")
         })?;
         self.get(key, &write.profile_key).await
@@ -309,7 +309,7 @@ impl ReleaseProfileRepository {
     ) -> FormalResult<ReleaseProfileRecord> {
         validate_maintenance(profile_key, operator_name, instance_id)?;
         let mut transaction = self.pool.begin().await.map_err(|error| {
-            tracing::error!(error = ?error, "begin credential migration failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "begin credential migration failed");
             FormalError::LocalDatabase("开始发布凭据迁移事务")
         })?;
         let row = sqlx::query(
@@ -351,7 +351,7 @@ impl ReleaseProfileRepository {
         )
         .await?;
         transaction.commit().await.map_err(|error| {
-            tracing::error!(error = ?error, "commit credential migration failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "commit credential migration failed");
             FormalError::LocalDatabase("提交发布凭据迁移事务")
         })?;
         self.get(new_key, profile_key).await
@@ -372,7 +372,7 @@ impl ReleaseProfileRepository {
             ));
         }
         let mut transaction = self.pool.begin().await.map_err(|error| {
-            tracing::error!(error = ?error, "begin credential rotation failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "begin credential rotation failed");
             FormalError::LocalDatabase("开始发布凭据轮换事务")
         })?;
         let row = sqlx::query(
@@ -414,7 +414,7 @@ impl ReleaseProfileRepository {
         )
         .await?;
         transaction.commit().await.map_err(|error| {
-            tracing::error!(error = ?error, "commit credential rotation failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "commit credential rotation failed");
             FormalError::LocalDatabase("提交发布凭据轮换事务")
         })?;
         self.get(new_key, profile_key).await
@@ -422,7 +422,7 @@ impl ReleaseProfileRepository {
 
     pub async fn delete_test_profile(&self, profile_key: &str) -> FormalResult<()> {
         let mut transaction = self.pool.begin().await.map_err(|error| {
-            tracing::error!(error = ?error, "begin profile cleanup failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "begin profile cleanup failed");
             FormalError::LocalDatabase("开始测试配置清理事务")
         })?;
         sqlx::query(
@@ -438,7 +438,7 @@ impl ReleaseProfileRepository {
             .await
             .map_err(|error| map_error("清理发布配置", error))?;
         transaction.commit().await.map_err(|error| {
-            tracing::error!(error = ?error, "commit profile cleanup failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "commit profile cleanup failed");
             FormalError::LocalDatabase("提交测试配置清理事务")
         })?;
         Ok(())
@@ -574,6 +574,6 @@ fn fixed_array<const N: usize>(value: Vec<u8>) -> FormalResult<[u8; N]> {
 }
 
 fn map_error(operation: &'static str, error: sqlx::Error) -> FormalError {
-    tracing::error!(operation, error = ?error, "release profile mysql operation failed");
+    tracing::error!(operation, error = ?crate::core::log_safety::safe_error(&error), "release profile mysql operation failed");
     FormalError::LocalDatabase(operation)
 }

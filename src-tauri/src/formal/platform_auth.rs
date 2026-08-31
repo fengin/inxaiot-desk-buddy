@@ -70,7 +70,7 @@ impl PlatformAuthAdapter {
             .user_agent(concat!("inxaiot-desk-buddy/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| {
-                tracing::error!(error = ?error, "build platform http client failed");
+                tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "build platform http client failed");
                 FormalError::InvalidConfig("无法创建平台HTTP客户端".into())
             })?;
         Ok(Self { client })
@@ -223,19 +223,19 @@ fn encrypt_password(public_key: &str, password: &str) -> FormalResult<String> {
             .or_else(|_| RsaPublicKey::from_pkcs1_pem(public_key))
     } else {
         let der = STANDARD.decode(public_key).map_err(|error| {
-            tracing::error!(error = ?error, "decode platform rsa key failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "decode platform rsa key failed");
             FormalError::InvalidConfig("无法解码平台RSA公钥".into())
         })?;
         RsaPublicKey::from_public_key_der(&der).or_else(|_| RsaPublicKey::from_pkcs1_der(&der))
     }
     .map_err(|error| {
-        tracing::error!(error = ?error, "parse platform rsa key failed");
+        tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "parse platform rsa key failed");
         FormalError::InvalidConfig("无法解析平台RSA公钥".into())
     })?;
     let encrypted = parsed
         .encrypt(&mut OsRng, Pkcs1v15Encrypt, password.as_bytes())
         .map_err(|error| {
-            tracing::error!(error = ?error, "encrypt platform password failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "encrypt platform password failed");
             FormalError::InvalidConfig("平台密码加密失败".into())
         })?;
     Ok(STANDARD.encode(encrypted))

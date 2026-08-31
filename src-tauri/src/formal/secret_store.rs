@@ -28,7 +28,7 @@ impl OsSecretStore {
             return Err(FormalError::InvalidConfig("凭据引用不能为空".into()));
         }
         keyring::Entry::new(&self.service, reference).map_err(|error| {
-            tracing::error!(error = ?error, "create os secret entry failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "create os secret entry failed");
             FormalError::SecretStore("创建本机凭据项")
         })
     }
@@ -37,7 +37,7 @@ impl OsSecretStore {
 impl SecretStore for OsSecretStore {
     fn save(&self, reference: &str, secret: &[u8]) -> FormalResult<()> {
         self.entry(reference)?.set_secret(secret).map_err(|error| {
-            tracing::error!(error = ?error, "save os secret failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "save os secret failed");
             FormalError::SecretStore("保存本机凭据")
         })
     }
@@ -47,7 +47,7 @@ impl SecretStore for OsSecretStore {
             Ok(secret) => Ok(secret),
             Err(keyring::Error::NoEntry) => Err(FormalError::NotFound("本机凭据引用不存在".into())),
             Err(error) => {
-                tracing::error!(error = ?error, "load os secret failed");
+                tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "load os secret failed");
                 Err(FormalError::SecretStore("读取本机凭据"))
             }
         }
@@ -57,7 +57,7 @@ impl SecretStore for OsSecretStore {
         match self.entry(reference)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(error) => {
-                tracing::error!(error = ?error, "delete os secret failed");
+                tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "delete os secret failed");
                 Err(FormalError::SecretStore("删除本机凭据"))
             }
         }

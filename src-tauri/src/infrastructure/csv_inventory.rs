@@ -98,7 +98,10 @@ fn build_header_index(headers: &StringRecord) -> AppResult<HashMap<String, usize
         .cloned()
         .collect::<Vec<_>>();
     if !unknown.is_empty() {
-        tracing::warn!(columns = ?unknown, "inventory contains ignored columns");
+        tracing::warn!(
+            column_count = unknown.len(),
+            "inventory contains ignored columns"
+        );
     }
     Ok(index)
 }
@@ -168,7 +171,7 @@ fn optional_value(
 }
 
 fn invalid_csv(operation: &'static str, error: &csv::Error) -> AppError {
-    tracing::warn!(operation, error = ?error, "invalid inventory csv");
+    tracing::warn!(operation, error = ?crate::core::log_safety::safe_error(&error), "invalid inventory csv");
     AppError::InvalidConfig(format!("{operation}失败：CSV 格式无效"))
 }
 

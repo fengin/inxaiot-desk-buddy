@@ -165,19 +165,19 @@ fn encrypt_password(public_key_text: &str, password: &str) -> AppResult<String> 
             .or_else(|_| RsaPublicKey::from_pkcs1_pem(public_key_text))
     } else {
         let der = STANDARD.decode(public_key_text).map_err(|error| {
-            tracing::error!(error = ?error, "failed to decode platform rsa public key");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "failed to decode platform rsa public key");
             AppError::Authentication("无法解码平台RSA公钥".into())
         })?;
         RsaPublicKey::from_public_key_der(&der).or_else(|_| RsaPublicKey::from_pkcs1_der(&der))
     }
     .map_err(|error| {
-        tracing::error!(error = ?error, "failed to parse platform rsa public key");
+        tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "failed to parse platform rsa public key");
         AppError::Authentication("无法解析平台RSA公钥".into())
     })?;
     let encrypted = public_key
         .encrypt(&mut OsRng, Pkcs1v15Encrypt, password.as_bytes())
         .map_err(|error| {
-            tracing::error!(error = ?error, "failed to encrypt platform password");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "failed to encrypt platform password");
             AppError::Authentication("平台密码加密失败".into())
         })?;
     Ok(STANDARD.encode(encrypted))

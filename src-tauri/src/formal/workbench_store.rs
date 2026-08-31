@@ -101,7 +101,7 @@ impl WorkbenchStore {
 
     pub async fn migrate(&self) -> FormalResult<()> {
         WORKBENCH_MIGRATOR.run(&self.pool).await.map_err(|error| {
-            tracing::error!(error = ?error, "run workbench mysql migration failed");
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "run workbench mysql migration failed");
             FormalError::LocalDatabase("执行工作台MySQL迁移")
         })
     }
@@ -303,7 +303,7 @@ fn classify_schema_status(
 }
 
 fn map_error(operation: &'static str, error: sqlx::Error) -> FormalError {
-    tracing::error!(operation, error = ?error, "workbench mysql operation failed");
+    tracing::error!(operation, error = ?crate::core::log_safety::safe_error(&error), "workbench mysql operation failed");
     FormalError::LocalDatabase(operation)
 }
 

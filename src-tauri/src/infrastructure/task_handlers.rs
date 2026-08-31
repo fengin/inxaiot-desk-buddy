@@ -71,7 +71,7 @@ pub async fn execute_aio_task(
     {
         tracing::error!(
             task_id = %task.id,
-            error = %state.task_event_pipeline.redact_text(&error.to_string()),
+            error = %crate::core::log_safety::safe_error(&error),
             "finalize task data failed"
         );
     }

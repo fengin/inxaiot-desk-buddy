@@ -11,6 +11,7 @@ describe("deployment workflow store", () => {
   beforeEach(() => setActivePinia(createPinia()));
 
   it("loads fixture task and history only through adapter contracts", async () => {
+    configureOperationsAdapter(new FixtureOperationsAdapter());
     const store = useDeploymentWorkflowStore();
     const preflight = await store.runPreflight("fixture-project", {
       mode: "full_upgrade",
@@ -36,6 +37,10 @@ describe("deployment workflow store", () => {
 
     await store.loadHistory("fixture-project");
     expect(store.history.items.length).toBeGreaterThan(0);
+    await store.loadHistory("fixture-project", { page: 2, pageSize: 1 });
+    expect(store.history.page).toBe(2);
+    expect(store.history.pageSize).toBe(1);
+    expect(store.history.total).toBeGreaterThan(0);
   });
 
   it("ignores a late preflight response from the previous project", async () => {

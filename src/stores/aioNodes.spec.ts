@@ -1,7 +1,9 @@
 import { createPinia, setActivePinia } from "pinia";
 import { nextTick } from "vue";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { FixtureAioAdapter } from "@/dev-fixtures/aioFixtureAdapter";
+import { configureAioAdapter } from "@/shared/api/aioAdapter";
 import { useAioNodesStore } from "@/stores/aioNodes";
 import { usePreferencesStore } from "@/stores/preferences";
 
@@ -47,5 +49,38 @@ describe("aio nodes store", () => {
     await nextTick();
     expect(store.pageSize).toBe(100);
     expect(store.page).toBe(1);
+  });
+
+  it("loads a complete 250-node selection set across 100-item pages", async () => {
+    const adapter = new FixtureAioAdapter();
+    const template = (await adapter.listNodes(projectId, { page: 1, pageSize: 100 })).items[0]!;
+    const all = Array.from({ length: 250 }, (_, index) => {
+      const macNormalized = index.toString(16).padStart(12, "0").toUpperCase();
+      return {
+        ...structuredClone(template),
+        mac: macNormalized.match(/.{2}/g)!.join(":"),
+        macNormalized,
+        name: `selection-node-${index}`
+      };
+    });
+    const list = vi.spyOn(adapter, "listNodes").mockImplementation(async (_id, query) => {
+      const start = (query.page - 1) * query.pageSize;
+      return {
+        items: structuredClone(all.slice(start, start + query.pageSize)),
+        total: all.length,
+        page: query.page,
+        pageSize: query.pageSize,
+        stats: { total: 250, online: 250, offline: 0, pending: 0, conflicts: 0 },
+        platformIssues: [],
+        refreshedAt: new Date().toISOString()
+      };
+    });
+    configureAioAdapter(adapter);
+    const store = useAioNodesStore();
+    const selected = await store.loadSelectionNodes(projectId);
+    expect(selected).toHaveLength(250);
+    expect(store.selectionNodes).toHaveLength(250);
+    expect(list).toHaveBeenCalledTimes(3);
+    expect(list.mock.calls.map(([, query]) => query.page)).toEqual([1, 2, 3]);
   });
 });

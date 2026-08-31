@@ -59,10 +59,11 @@ let refreshTimer: number | undefined;
 const filteredNodes = computed(() => aio.nodes);
 const stats = computed(() => aio.stats);
 const importSession = computed(() => aio.importPreview?.session);
+const versionNodes = computed(() => aio.selectionNodes.length ? aio.selectionNodes : aio.nodes);
 
 const versionRows = computed(() => {
   const rows = new Map<string, { service: string; versions: Map<string, number> }>();
-  aio.nodes.forEach((node) => node.versions.forEach((version) => {
+  versionNodes.value.forEach((node) => node.versions.forEach((version) => {
     const expected = version.expectedVersion;
     if (!expected) return;
     const item = rows.get(version.serviceName) ?? {
@@ -129,6 +130,16 @@ function scheduleRefresh() {
 async function openNode(node: AioNodeListItem) {
   selectedNode.value = node;
   await aio.loadDetail(node.mac);
+}
+
+async function openVersions() {
+  if (!projects.activeProjectId) return;
+  try {
+    await aio.loadSelectionNodes(projects.activeProjectId);
+    versionOpen.value = true;
+  } catch (cause) {
+    message.error(commandErrorText(cause, "读取项目版本分布失败"));
+  }
 }
 
 async function openDeployment() {
@@ -229,7 +240,7 @@ onBeforeUnmount(() => {
     <header class="page-header">
       <div><h1>一体机列表</h1></div>
       <div class="page-actions">
-        <n-button size="small" secondary @click="versionOpen = true">
+        <n-button size="small" secondary :loading="aio.selectionLoading" @click="openVersions">
           <template #icon><GitCompareArrows /></template>
           查看镜像和版本
         </n-button>
@@ -425,7 +436,7 @@ onBeforeUnmount(() => {
       <p class="modal-description">聚合工作台记录版本和最近一次远端观测结果，不上传任何镜像文件。</p>
       <div class="version-summary">
         <span><strong>{{ versionRows.length }}</strong> 个服务</span>
-        <span><strong>{{ aio.nodes.filter((node) => node.versions.length).length }}</strong> 台已检查</span>
+        <span><strong>{{ versionNodes.filter((node) => node.versions.length).length }}</strong> 台已检查</span>
       </div>
       <table class="workbench-table compact">
         <thead><tr><th>服务</th><th>记录版本分布</th><th>覆盖节点</th><th>状态</th></tr></thead>
@@ -438,8 +449,8 @@ onBeforeUnmount(() => {
           </tr>
         </tbody>
       </table>
-      <div v-if="!versionRows.length" class="empty-compact">当前页尚无记录版本</div>
-      <template #footer><n-space justify="end"><n-button size="small" @click="versionOpen = false">关闭</n-button><n-button size="small" secondary @click="refresh"><template #icon><RefreshCw /></template>刷新记录</n-button></n-space></template>
+      <div v-if="!versionRows.length" class="empty-compact">当前项目尚无记录版本</div>
+      <template #footer><n-space justify="end"><n-button size="small" @click="versionOpen = false">关闭</n-button><n-button size="small" secondary :loading="aio.selectionLoading" @click="openVersions"><template #icon><RefreshCw /></template>刷新项目记录</n-button></n-space></template>
     </n-modal>
 
     <n-modal :show="importOpen" preset="card" title="导入一体机清单" class="import-modal" :bordered="false" @update:show="!$event && closeImport()">

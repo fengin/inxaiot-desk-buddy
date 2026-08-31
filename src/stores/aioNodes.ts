@@ -15,6 +15,8 @@ import type {
 import { usePreferencesStore } from "@/stores/preferences";
 
 const emptyStats = (): AioNodeStats => ({ total: 0, online: 0, offline: 0, pending: 0, conflicts: 0 });
+const SELECTION_PAGE_SIZE = 100;
+const MAX_SELECTION_NODES = 10_000;
 
 export const useAioNodesStore = defineStore("aio-nodes", () => {
   const preferences = usePreferencesStore();
@@ -33,10 +35,13 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
   const detailLoading = ref(false);
   const importPreview = ref<InventoryPreview>();
   const platformIssues = ref<PlatformRecordIssue[]>([]);
+  const selectionNodes = ref<AioNodeListItem[]>([]);
+  const selectionLoading = ref(false);
   const importLoading = ref(false);
   let listRequest = 0;
   let detailRequest = 0;
   let importRequest = 0;
+  let selectionRequest = 0;
 
   watch(pageSize, () => { page.value = 1; });
 
@@ -53,6 +58,8 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
       importPreview.value = undefined;
       latestImportSessionId.value = "";
       platformIssues.value = [];
+      selectionRequest += 1;
+      selectionNodes.value = [];
     }
     projectId.value = nextProjectId;
     loading.value = true;
@@ -82,6 +89,57 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
       }
     } finally {
       if (request === listRequest) loading.value = false;
+    }
+  }
+
+  async function loadSelectionNodes(nextProjectId = projectId.value) {
+    if (!nextProjectId) return [];
+    if (projectId.value !== nextProjectId) {
+      projectId.value = nextProjectId;
+      selectionNodes.value = [];
+    }
+    const request = ++selectionRequest;
+    selectionLoading.value = true;
+    try {
+      const adapter = useAioAdapter();
+      const first = await adapter.listNodes(nextProjectId, {
+        state: "all",
+        page: 1,
+        pageSize: SELECTION_PAGE_SIZE
+      });
+      if (first.total > MAX_SELECTION_NODES) {
+        throw new Error(`项目一体机数量 ${first.total} 超过选择上限 ${MAX_SELECTION_NODES}`);
+      }
+      const all = [...first.items];
+      const pageCount = Math.ceil(first.total / SELECTION_PAGE_SIZE);
+      for (let nextPage = 2; nextPage <= pageCount; nextPage += 1) {
+        const pageResult = await adapter.listNodes(nextProjectId, {
+          state: "all",
+          page: nextPage,
+          pageSize: SELECTION_PAGE_SIZE
+        });
+        if (request !== selectionRequest || projectId.value !== nextProjectId) return [];
+        if (pageResult.items.length === 0) {
+          throw new Error("一体机选择集分页在读取完成前出现空页");
+        }
+        all.push(...pageResult.items);
+      }
+      const unique = [...new Map(all.map((node) => [node.macNormalized, node])).values()];
+      if (unique.length !== first.total) {
+        throw new Error(`一体机选择集数量不一致：期望 ${first.total}，实际 ${unique.length}`);
+      }
+      if (request === selectionRequest && projectId.value === nextProjectId) {
+        selectionNodes.value = unique;
+      }
+      return unique;
+    } catch (cause) {
+      if (request === selectionRequest && projectId.value === nextProjectId) {
+        selectionNodes.value = [];
+        error.value = commandErrorText(cause, "读取完整一体机选择集失败");
+      }
+      throw cause;
+    } finally {
+      if (request === selectionRequest) selectionLoading.value = false;
     }
   }
 
@@ -202,6 +260,7 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
   return {
     realBackend, nodes, stats, total, page, pageSize, refreshedAt, latestImportSessionId,
     loading, error, detail, detailLoading, importPreview, importLoading, platformIssues,
-    refresh, loadDetail, resumeImport, previewImport, updateSelection, applyImport, discardImport
+    selectionNodes, selectionLoading,
+    refresh, loadSelectionNodes, loadDetail, resumeImport, previewImport, updateSelection, applyImport, discardImport
   };
 });

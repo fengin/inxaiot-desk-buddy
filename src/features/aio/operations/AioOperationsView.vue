@@ -5,6 +5,7 @@ import {
   NInput,
   NInputNumber,
   NModal,
+  NPagination,
   NProgress,
   NRadioButton,
   NRadioGroup,
@@ -69,6 +70,7 @@ const artifactPath = ref("");
 const serviceName = ref("device-edge");
 const batchSize = ref(4);
 const concurrency = ref(2);
+const targetSearch = ref("");
 const historyOpen = ref(false);
 const selectedHistoryId = ref<string>();
 const resultTaskId = ref<string>();
@@ -96,7 +98,18 @@ const currentTask = computed(() => {
 });
 const history = computed(() => workflow.history.items);
 const selectedHistory = computed(() => workflow.historyDetail?.operation);
-const eligibleNodes = computed(() => aio.nodes.filter((node) => node.managementState !== "conflict"));
+const eligibleNodes = computed(() =>
+  (aio.selectionNodes.length ? aio.selectionNodes : aio.nodes)
+    .filter((node) => node.managementState !== "conflict")
+);
+const visibleEligibleNodes = computed(() => {
+  const keyword = targetSearch.value.trim().toLocaleLowerCase();
+  if (!keyword) return eligibleNodes.value;
+  return eligibleNodes.value.filter((node) =>
+    [node.name, node.ip, node.mac, node.location]
+      .some((value) => value.toLocaleLowerCase().includes(keyword))
+  );
+});
 const modeLabel = computed(() => mode.value === "first_deploy" ? "首次部署" : mode.value === "full_upgrade" ? "整包升级" : "单服升级");
 const artifactLabel = computed(() => {
   if (mode.value === "service_upgrade") {
@@ -167,23 +180,31 @@ async function activateProjectContext(projectId?: string) {
   releaseValidation.value = undefined;
   imageInspection.value = undefined;
   selectedMacs.value = [];
+  targetSearch.value = "";
   if (!projectId || !projects.isReady) return;
   await Promise.all([
     aio.refresh(projectId),
+    aio.loadSelectionNodes(projectId),
     release.load(projectId),
     activity.start(projectId)
   ]);
   if (request !== projectContextRequest || projectId !== projects.activeProjectId) return;
   const routedTarget = typeof route.query.target === "string" ? route.query.target : "";
-  const routedNode = aio.nodes.find(
+  const routedNode = eligibleNodes.value.find(
     (node) => node.mac === routedTarget && node.managementState !== "conflict"
   );
   selectedMacs.value = routedNode
     ? [routedNode.mac]
-    : aio.nodes
+    : eligibleNodes.value
         .filter((node) => node.managementState === "managed" && node.platformState === "online")
         .slice(0, 4)
         .map((node) => node.mac);
+}
+
+function nodeName(mac: string) {
+  return eligibleNodes.value.find((node) => node.mac === mac)?.name
+    ?? aio.nodes.find((node) => node.mac === mac)?.name
+    ?? mac;
 }
 
 function toggleNode(mac: string, checked: boolean) {
@@ -377,6 +398,16 @@ async function openHistory() {
   }
 }
 
+async function changeHistoryPage(page: number) {
+  const projectId = projects.activeProjectId;
+  if (!projectId) return;
+  try {
+    await workflow.loadHistory(projectId, { page, pageSize: workflow.history.pageSize });
+  } catch {
+    if (workflow.error) message.error(workflow.error);
+  }
+}
+
 async function selectHistory(record: OperationHistoryItem) {
   selectedHistoryId.value = record.id;
   const projectId = projects.activeProjectId;
@@ -454,9 +485,10 @@ function historyArtifact(record: OperationHistoryItem) {
         <section v-if="step === 0" class="operation-stage select-stage">
           <div class="stage-main">
             <header class="stage-heading"><div><span class="feature-icon info"><PackageCheck :size="20" /></span><span><strong>选择{{ modeLabel }}范围</strong><small>当前选择只形成本机任务，执行后记录最终结果</small></span></div></header>
-            <div class="selection-toolbar"><span>目标一体机</span><b>已选 {{ selectedMacs.length }} 台</b><div></div><n-button size="tiny" quaternary @click="selectedMacs = eligibleNodes.map((node) => node.mac)">选择全部</n-button><n-button size="tiny" quaternary @click="selectedMacs = eligibleNodes.filter((node) => node.platformState === 'online').map((node) => node.mac)">选择全部在线</n-button><n-button size="tiny" quaternary @click="selectedMacs = []">清空</n-button></div>
+            <div class="selection-toolbar"><span>目标一体机</span><b>已选 {{ selectedMacs.length }} / 可选 {{ eligibleNodes.length }} 台</b><n-input v-model:value="targetSearch" size="tiny" clearable placeholder="搜索全部节点" /><n-button size="tiny" quaternary @click="selectedMacs = visibleEligibleNodes.map((node) => node.mac)">选择全部匹配</n-button><n-button size="tiny" quaternary @click="selectedMacs = visibleEligibleNodes.filter((node) => node.platformState === 'online').map((node) => node.mac)">选择匹配在线</n-button><n-button size="tiny" quaternary @click="selectedMacs = []">清空</n-button></div>
+            <div v-if="aio.selectionLoading" class="empty-state">正在读取项目完整节点选择集…</div>
             <div class="node-selection-list">
-              <label v-for="node in eligibleNodes" :key="node.mac" :class="{ selected: selectedMacs.includes(node.mac) }">
+              <label v-for="node in visibleEligibleNodes" :key="node.mac" :class="{ selected: selectedMacs.includes(node.mac) }">
                 <n-checkbox :checked="selectedMacs.includes(node.mac)" @update:checked="toggleNode(node.mac, $event)" />
                 <span><strong>{{ node.name }}</strong><small>{{ node.ip }} · {{ node.location }}</small></span>
                 <n-tag size="small" :bordered="false" :type="node.platformState === 'online' ? 'success' : node.platformState === 'offline' ? 'error' : 'default'">{{ node.platformState === 'online' ? '在线' : node.platformState === 'offline' ? '离线' : '未知' }}</n-tag>
@@ -503,7 +535,7 @@ function historyArtifact(record: OperationHistoryItem) {
               <n-tag :type="stateTone(currentTask?.state ?? 'running')" :bordered="false">{{ historyResultLabel(currentTask?.state ?? 'running') }}</n-tag>
             </div>
           </div>
-          <div v-if="currentTask?.targets.length" class="execution-nodes"><div v-for="(target, index) in currentTask.targets" :key="target.mac" :class="{ active: target.state === 'running', done: target.state === 'succeeded' }"><span><b>{{ index + 1 }}</b><strong>{{ aio.nodes.find((node) => node.mac === target.mac)?.name ?? target.mac }}</strong><small>{{ target.mac }}</small></span><span>{{ target.stage }} · {{ target.progress }}%</span><n-tag size="small" :bordered="false" :type="stateTone(target.state)">{{ historyResultLabel(target.state) }}</n-tag></div></div>
+          <div v-if="currentTask?.targets.length" class="execution-nodes"><div v-for="(target, index) in currentTask.targets" :key="target.mac" :class="{ active: target.state === 'running', done: target.state === 'succeeded' }"><span><b>{{ index + 1 }}</b><strong>{{ nodeName(target.mac) }}</strong><small>{{ target.mac }}</small></span><span>{{ target.stage }} · {{ target.progress }}%</span><n-tag size="small" :bordered="false" :type="stateTone(target.state)">{{ historyResultLabel(target.state) }}</n-tag></div></div>
           <div v-else class="empty-state">任务已提交，正在等待本地Task记录和目标进度。</div>
           <footer class="stage-footer"><span>切换项目不会停止当前任务，可在底部任务与日志面板持续查看。</span><n-button v-if="currentTask?.cancellable" size="small" type="error" secondary data-testid="operation-cancel" @click="cancelCurrentTask">请求取消</n-button><n-button size="small" secondary @click="openCurrentLogs">打开完整日志</n-button></footer>
         </section>
@@ -511,7 +543,7 @@ function historyArtifact(record: OperationHistoryItem) {
         <section v-else class="operation-stage result-stage" data-testid="operation-result">
           <div class="result-hero"><span class="result-icon" :class="resultState === 'succeeded' ? 'success' : 'warning'"><CheckCircle2 :size="32" /></span><div><strong>{{ modeLabel }}已形成最终结果</strong><p>成功 {{ resultSuccessCount }} 台，失败 {{ resultFailureCount }} 台，取消 {{ resultCancelledCount }} 台；以下统计只来自真实Task或执行摘要。</p></div><n-tag :type="stateTone(resultState)" :bordered="false">{{ historyResultLabel(resultState) }}</n-tag></div>
           <div class="result-metrics"><span><small>目标数量</small><strong>{{ resultTargetCount }}</strong></span><span><small>成功</small><strong class="success-text">{{ resultSuccessCount }}</strong></span><span><small>失败/异常</small><strong>{{ resultFailureCount }}</strong></span><span><small>发布版本</small><strong>{{ artifactLabel }}</strong></span></div>
-          <div v-if="resultTargets.length" class="result-list"><div v-for="target in resultTargets" :key="target.mac"><CheckCircle2 :size="17" /><span><strong>{{ aio.nodes.find((node) => node.mac === target.mac)?.name ?? target.mac }}</strong><small>{{ target.mac }}</small></span><span>{{ target.message ?? target.stage }}</span><n-tag size="small" :type="stateTone(target.state)" :bordered="false">{{ historyResultLabel(target.state) }}</n-tag></div></div>
+          <div v-if="resultTargets.length" class="result-list"><div v-for="target in resultTargets" :key="target.mac"><CheckCircle2 :size="17" /><span><strong>{{ nodeName(target.mac) }}</strong><small>{{ target.mac }}</small></span><span>{{ target.message ?? target.stage }}</span><n-tag size="small" :type="stateTone(target.state)" :bordered="false">{{ historyResultLabel(target.state) }}</n-tag></div></div>
           <div v-else class="empty-state">没有可验证的节点最终结果，未按成功处理。</div>
           <p v-if="resultState === 'finalizing_failed'" class="modal-description">项目侧原子最终化或本地投影尚未安全收敛，任务制品已保留；重启工作台会在确认共享操作终态后自动重试本地投影。</p>
           <footer class="stage-footer"><n-button size="small" secondary @click="openHistory">查看操作记录</n-button><n-button v-if="['failed', 'cancelled', 'interrupted', 'check_failed'].includes(resultState)" size="small" secondary @click="retryOperation"><template #icon><RotateCcw /></template>按当前参数重新检查</n-button><n-button size="small" type="primary" :disabled="resultState === 'finalizing_failed'" @click="resetFlow"><template #icon><RotateCcw /></template>创建下一次任务</n-button></footer>
@@ -530,6 +562,7 @@ function historyArtifact(record: OperationHistoryItem) {
             <time>{{ record.endedAt ?? record.startedAt }}</time><ChevronRight :size="16" />
           </button>
         </div>
+        <n-pagination v-if="workflow.history.total > workflow.history.pageSize" :page="workflow.history.page" :page-size="workflow.history.pageSize" :item-count="workflow.history.total" size="small" @update:page="changeHistoryPage" />
         <div v-else class="empty-state">{{ workflow.historyLoading ? '正在读取共享操作历史…' : '当前项目没有共享部署操作记录。' }}</div>
       </template>
       <div v-else class="history-detail">
@@ -543,7 +576,7 @@ function historyArtifact(record: OperationHistoryItem) {
         <div class="history-detail__nodes">
           <header><strong>节点最终结果</strong><span>项目侧记录</span></header>
           <div v-for="target in workflow.historyDetail?.targets ?? []" :key="target.resourceType + ':' + target.resourceKey">
-            <span><strong>{{ aio.nodes.find((node) => node.mac === target.resourceKey)?.name ?? target.resourceKey }}</strong><small>{{ target.resourceKey }}</small></span><span>{{ target.resultSummary ?? target.errorSummary ?? '未记录摘要' }}</span><n-tag size="small" :bordered="false" :type="stateTone(target.state)">{{ historyResultLabel(target.state) }}</n-tag>
+            <span><strong>{{ nodeName(target.resourceKey) }}</strong><small>{{ target.resourceKey }}</small></span><span>{{ target.resultSummary ?? target.errorSummary ?? '未记录摘要' }}</span><n-tag size="small" :bordered="false" :type="stateTone(target.state)">{{ historyResultLabel(target.state) }}</n-tag>
           </div>
           <div v-if="!(workflow.historyDetail?.targets.length)" class="empty-state">此操作没有节点最终结果记录。</div>
         </div>

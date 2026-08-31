@@ -461,6 +461,8 @@ Vue Page
 - 同一账号同时建立平台和工作台Pool；平台只读依赖session设置和代码纪律。
 - 修复：固定/受控Schema策略、明确不等约束、生产数据库最小授权门禁，最好分离只读/读写账号。
 
+整改结论（检查点`b5d8690`）：ProjectInput强制工作台Schema使用`inxaiot_desk_buddy*`且不等于业务库；DualMySqlPools为平台连接逐连接执行`SET SESSION TRANSACTION READ ONLY`，工作台连接保持读写。授权开发MySQL只读查询兼容`transaction_read_only/tx_read_only`，实证平台标志1、工作台0，未执行平台写入。生产环境是否使用独立只读账号及实际GRANT仍属于部署门禁，不能由代码替代。
+
 ### P1-10 OS SecretStore与SQLite补偿不完整
 
 - 项目更新事务或commit失败时可能遗留新凭据。
@@ -665,6 +667,7 @@ Vue Page
 - P1-04/P1-05：所有SFTP部署上传启用SHA-256；覆盖采用可恢复备份切换；敏感staging清理失败不能返回成功。
 - P1-06：schema/runtime语义、Release归档与镜像tar资源上限完成；runtime进入逐节点OS/架构/Docker/Compose真实预检。
 - P1-07：非JSON模板变量含CR/LF/NUL立即拒绝。
+- P1-09：工作台Schema边界和平台session只读完成，开发真实标志通过；生产GRANT待部署门禁。
 - P1-10：密码/Token版本化引用、主密钥本地登记、SecretStore清理Outbox、启动重试和About待清理诊断通过故障注入。
 - P1-11：SQLite部分唯一索引确保每项目只有一个开放导入预览，并发测试通过。
 - P1-12：平台/工作台/SQLite事实字段严格映射，真实平台只读与隔离写入/清理验证通过。

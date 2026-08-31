@@ -501,6 +501,8 @@ Vue Page
 - 镜像版本聚合也只聚合当前页，却显示为项目级摘要。
 - 操作历史UI固定读取前20条，没有分页入口。
 
+整改结论（检查点`84a105b`）：AIO Store增加独立完整选择集，按100条分页读取、MAC去重、后端total一致性校验和项目代次隔离，最大10000台；Operations的搜索、全部匹配、匹配在线和节点名称均使用完整集，选择不再受当前列表页限制。镜像版本分布打开时读取完整项目集。共享操作历史按后端page/pageSize/total显示分页控件。250节点跨3页与历史第2页测试通过。
+
 ### P1-16 服务“正常”是历史版本相等，不是实时健康
 
 - 只要expectedVersion等于observedVersion就标healthy；observed值在成功最终化时直接写成expected。
@@ -661,16 +663,17 @@ Vue Page
 - P1-12：平台/工作台/SQLite事实字段严格映射，真实平台只读与隔离写入/清理验证通过。
 - P1-13/P1-16/P1-17/P1-18：本地Schema读取实际迁移版本；服务正常要求15分钟内真实观测；系统对话框统一Adapter；四类Store完成项目/请求代次隔离。
 - P1-14：60秒Token验证、非法过期fail-closed、单项目列表故障隔离和初始化可见重试完成。
+- P1-15：完整节点选择集、全项目搜索/全选、项目级版本聚合和共享历史分页完成，250节点跨页测试通过。
 - P1-20：本地scripts/quality-gate.ps1已建立；外部GitHub CI未获授权，不视为关闭。
 
 ### 12.4 本轮门禁证据
 
-- 前端：typecheck、严格Lint、17个测试文件35项测试、生产构建通过；新增Real Adapter三项主密钥Command、系统保存对话框、Store版本操作、缺钥恢复和项目初始化重试契约。
+- 前端：typecheck、严格Lint、17个测试文件36项测试、生产构建通过；新增Real Adapter主密钥Command、系统保存对话框、缺钥恢复、项目初始化重试、250节点跨页选择和历史第2页契约。
 - Rust：cargo fmt --check、全目标全Feature严格Clippy通过；默认Feature全部非忽略单元/集成测试通过（库单测57项）；新增SSH依赖/原始日志契约、SecretStore补偿、Release runtime/tar上限和非法会话过期测试通过。
 - 故障注入：真实双进程锁、本地最终化中途失败全回滚/重试、并发导入唯一约束、payload篡改、旧项目响应晚到、会话校验不可用fail-closed均通过。
 - 真实平台：只执行授权测试登录和Token只读菜单校验，未连接、未执行SQL、未修改平台业务库结构或数据。
 - 主密钥真实集成：仅在授权隔离工作台Schema写入`key-poc-*`唯一配置/审计，覆盖迁移、数据库密码解耦、轮换失败回滚、成功轮换和跨电脑导入，结束后按唯一键删除并复查总数为0；Windows Credential Manager唯一测试引用已删除。
-- 最近已验证默认Feature生产Release基于`6f82de8`，大小11929088字节，SHA-256为`BA96809AD7D0D53A64BD79A791EDDE0BB37AF88998622A78F7313C7E817EB6E1`；包含主密钥Command，无WebDriver/Fixture标记。依赖树不存在`rsa 0.10.0-rc.18`，`chacha20`为0.10.2。`1668896`、`33708a1`、`78bea8b`、`233b9cf`及后续P1整改尚未重建Release，最终收口时统一重建并替换本条证据。
+- 最近已验证默认Feature生产Release基于`6f82de8`，大小11929088字节，SHA-256为`BA96809AD7D0D53A64BD79A791EDDE0BB37AF88998622A78F7313C7E817EB6E1`；包含主密钥Command，无WebDriver/Fixture标记。依赖树不存在`rsa 0.10.0-rc.18`，`chacha20`为0.10.2。`1668896`、`33708a1`、`78bea8b`、`233b9cf`、`84a105b`及后续P1整改尚未重建Release，最终收口时统一重建并替换本条证据。
 - 未执行真实SSH/Docker门禁：现有test/id_rsa为RSA 4096，已被新策略明确拒绝；不得为了复用旧门禁而绕过算法限制。
 
 ### 12.5 当前准入结论

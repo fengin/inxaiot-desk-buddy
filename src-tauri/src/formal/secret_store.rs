@@ -43,17 +43,24 @@ impl SecretStore for OsSecretStore {
     }
 
     fn load(&self, reference: &str) -> FormalResult<Vec<u8>> {
-        self.entry(reference)?.get_secret().map_err(|error| {
-            tracing::error!(error = ?error, "load os secret failed");
-            FormalError::SecretStore("读取本机凭据")
-        })
+        match self.entry(reference)?.get_secret() {
+            Ok(secret) => Ok(secret),
+            Err(keyring::Error::NoEntry) => Err(FormalError::NotFound("本机凭据引用不存在".into())),
+            Err(error) => {
+                tracing::error!(error = ?error, "load os secret failed");
+                Err(FormalError::SecretStore("读取本机凭据"))
+            }
+        }
     }
 
     fn delete(&self, reference: &str) -> FormalResult<()> {
-        self.entry(reference)?.delete_credential().map_err(|error| {
-            tracing::error!(error = ?error, "delete os secret failed");
-            FormalError::SecretStore("删除本机凭据")
-        })
+        match self.entry(reference)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => {
+                tracing::error!(error = ?error, "delete os secret failed");
+                Err(FormalError::SecretStore("删除本机凭据"))
+            }
+        }
     }
 }
 

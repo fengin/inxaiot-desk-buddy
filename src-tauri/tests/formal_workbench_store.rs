@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use inxaiot_desk_buddy_lib::formal::credential_crypto::{self, ReleaseCredentials};
+use inxaiot_desk_buddy_lib::formal::credential_crypto::{
+    self, ProjectMasterKey, ReleaseCredentials,
+};
 use inxaiot_desk_buddy_lib::formal::error::FormalError;
 use inxaiot_desk_buddy_lib::formal::mysql::{MySqlConnectionSpec, MySqlTlsMode, ProjectMySqlPools};
 use inxaiot_desk_buddy_lib::formal::release_profile_repository::{
@@ -108,14 +110,14 @@ fn release_values(config: &TestConfig) -> (ReleaseProfileValues, ReleaseCredenti
 fn encrypted_release_credentials_round_trip_and_wrong_key_rejection() {
     let config = config();
     let (_, credentials) = release_values(&config);
-    let envelope =
-        credential_crypto::encrypt_release_credentials(&config.mysql.password, &credentials)
-            .expect("encrypt credentials");
-    let decrypted =
-        credential_crypto::decrypt_release_credentials(&config.mysql.password, &envelope)
-            .expect("decrypt credentials");
+    let key = ProjectMasterKey::generate(1).expect("project master key");
+    let envelope = credential_crypto::encrypt_release_credentials(&key, &credentials)
+        .expect("encrypt credentials");
+    let decrypted = credential_crypto::decrypt_release_credentials(&key, &envelope)
+        .expect("decrypt credentials");
     assert_eq!(decrypted, credentials);
-    assert!(credential_crypto::decrypt_release_credentials("wrong-password", &envelope).is_err());
+    let wrong_key = ProjectMasterKey::generate(1).expect("wrong project master key");
+    assert!(credential_crypto::decrypt_release_credentials(&wrong_key, &envelope).is_err());
 }
 
 #[tokio::test]
@@ -168,9 +170,10 @@ async fn release_profile_uses_optimistic_version_and_encrypted_credentials() {
     let repository = ReleaseProfileRepository::new(pools.workbench().clone());
     let profile_key = format!("poc-{}", &Uuid::now_v7().simple().to_string()[..20]);
     let (values, credentials) = release_values(&config);
+    let key = ProjectMasterKey::generate(1).expect("project master key");
     let first = repository
         .save(
-            &config.mysql.password,
+            &key,
             ReleaseProfileWrite {
                 profile_key: profile_key.clone(),
                 values: values.clone(),
@@ -187,7 +190,7 @@ async fn release_profile_uses_optimistic_version_and_encrypted_credentials() {
 
     let stale = repository
         .save(
-            &config.mysql.password,
+            &key,
             ReleaseProfileWrite {
                 profile_key: profile_key.clone(),
                 values: values.clone(),
@@ -202,7 +205,7 @@ async fn release_profile_uses_optimistic_version_and_encrypted_credentials() {
 
     let second = repository
         .save(
-            &config.mysql.password,
+            &key,
             ReleaseProfileWrite {
                 profile_key: profile_key.clone(),
                 values,

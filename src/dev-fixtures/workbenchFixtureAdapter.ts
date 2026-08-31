@@ -11,6 +11,7 @@ import type {
   WorkbenchSchemaStatus
 } from "@/shared/model/project";
 import type {
+  ReleaseMasterKeyOperationResult,
   ReleaseProfileDraft,
   ReleaseProfileView
 } from "@/shared/model/releaseProfile";
@@ -93,6 +94,7 @@ export class FixtureWorkbenchAdapter implements WorkbenchAdapter {
   private projects = demoProjects.map((_, index) => fixtureProject(index));
   private profiles = new Map<string, ReleaseProfileView>([[this.projects[0]!.id, fixtureRelease()]]);
   private hostKeys = new Map<string, HostKeyObservation[]>();
+  private keyVersions = new Map<string, number>();
   private idCounter = 0;
 
   async listProjects() { return structuredClone(this.projects); }
@@ -223,6 +225,23 @@ export class FixtureWorkbenchAdapter implements WorkbenchAdapter {
     };
     this.profiles.set(projectId, profile);
     return structuredClone(profile);
+  }
+
+  async exportReleaseMasterKey(projectId: string): Promise<ReleaseMasterKeyOperationResult> {
+    this.requiredProject(projectId);
+    const keyVersion = this.keyVersions.get(projectId) ?? 1;
+    return { keyVersion, message: `Fixture 项目主密钥v${keyVersion}已导出` };
+  }
+  async importReleaseMasterKey(projectId: string): Promise<ReleaseMasterKeyOperationResult> {
+    this.requiredProject(projectId);
+    const keyVersion = this.keyVersions.get(projectId) ?? 1;
+    return { keyVersion, message: `Fixture 项目主密钥v${keyVersion}已导入` };
+  }
+  async rotateReleaseMasterKey(projectId: string): Promise<ReleaseMasterKeyOperationResult> {
+    this.requiredProject(projectId);
+    const keyVersion = (this.keyVersions.get(projectId) ?? 1) + 1;
+    this.keyVersions.set(projectId, keyVersion);
+    return { keyVersion, message: `Fixture 项目主密钥已轮换到v${keyVersion}` };
   }
 
   async listHostKeys(projectId: string) { return structuredClone(this.hostKeys.get(projectId) ?? []); }

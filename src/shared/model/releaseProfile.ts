@@ -43,6 +43,16 @@ export interface ReleaseProfileValidation {
   warnings: string[];
 }
 
+export interface ReleaseMasterKeyTransferRequest {
+  filePath: string;
+  passphrase: string;
+}
+
+export interface ReleaseMasterKeyOperationResult {
+  keyVersion: number;
+  message: string;
+}
+
 export const emptyReleaseProfileDraft = (): ReleaseProfileDraft => ({
   values: {
     envTemplate: "",

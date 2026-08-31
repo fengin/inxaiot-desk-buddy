@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
-use sqlx::{MySqlPool, Row};
+use sqlx::mysql::MySqlRow;
+use sqlx::{MySql, MySqlPool, Row, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::credential_crypto::{
-    CredentialEnvelope, ReleaseCredentials, decrypt_release_credentials,
-    encrypt_release_credentials,
+    CredentialEnvelope, CredentialMetadata, ProjectMasterKey, ReleaseCredentials,
+    decrypt_release_credentials, decrypt_release_credentials_legacy, encrypt_release_credentials,
 };
 use super::error::{FormalError, FormalResult};
 
@@ -56,11 +57,20 @@ impl ReleaseProfileRepository {
 
     pub async fn save(
         &self,
-        database_password: &str,
+        key: &ProjectMasterKey,
         write: ReleaseProfileWrite,
     ) -> FormalResult<ReleaseProfileRecord> {
         validate_write(&write)?;
-        let envelope = encrypt_release_credentials(database_password, &write.credentials)?;
+        let envelope = encrypt_release_credentials(key, &write.credentials)?;
+        self.save_envelope(write, envelope, key).await
+    }
+
+    async fn save_envelope(
+        &self,
+        write: ReleaseProfileWrite,
+        envelope: CredentialEnvelope,
+        key: &ProjectMasterKey,
+    ) -> FormalResult<ReleaseProfileRecord> {
         let now = OffsetDateTime::now_utc();
         let mut transaction = self.pool.begin().await.map_err(|error| {
             tracing::error!(error = ?error, "begin release profile transaction failed");
@@ -171,12 +181,12 @@ impl ReleaseProfileRepository {
             tracing::error!(error = ?error, "commit release profile transaction failed");
             FormalError::LocalDatabase("提交发布配置事务")
         })?;
-        self.get(database_password, &write.profile_key).await
+        self.get(key, &write.profile_key).await
     }
 
     pub async fn get(
         &self,
-        database_password: &str,
+        key: &ProjectMasterKey,
         profile_key: &str,
     ) -> FormalResult<ReleaseProfileRecord> {
         let row = sqlx::query(
@@ -251,7 +261,7 @@ impl ReleaseProfileRepository {
                     .try_get("aio_deploy_root")
                     .map_err(|_| FormalError::LocalDatabase("解析一体机部署目录"))?,
             },
-            credentials: decrypt_release_credentials(database_password, &envelope)?,
+            credentials: decrypt_release_credentials(key, &envelope)?,
             version: row
                 .try_get("version")
                 .map_err(|_| FormalError::LocalDatabase("解析发布配置版本"))?,
@@ -262,6 +272,152 @@ impl ReleaseProfileRepository {
                 .try_get("updated_at")
                 .map_err(|_| FormalError::LocalDatabase("解析发布配置时间"))?,
         })
+    }
+
+    pub async fn credential_metadata(
+        &self,
+        profile_key: &str,
+    ) -> FormalResult<Option<CredentialMetadata>> {
+        let row = sqlx::query(
+            "SELECT credential_scheme, credential_key_version \
+             FROM aio_release_profile WHERE profile_key = ?",
+        )
+        .bind(profile_key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| map_error("读取发布凭据元数据", error))?;
+        row.map(|row| {
+            Ok(CredentialMetadata {
+                scheme: row
+                    .try_get("credential_scheme")
+                    .map_err(|_| FormalError::LocalDatabase("解析凭据加密格式"))?,
+                key_version: row
+                    .try_get("credential_key_version")
+                    .map_err(|_| FormalError::LocalDatabase("解析凭据密钥版本"))?,
+            })
+        })
+        .transpose()
+    }
+
+    pub async fn migrate_legacy_credentials(
+        &self,
+        profile_key: &str,
+        database_password: &str,
+        new_key: &ProjectMasterKey,
+        operator_name: &str,
+        instance_id: &str,
+    ) -> FormalResult<ReleaseProfileRecord> {
+        validate_maintenance(profile_key, operator_name, instance_id)?;
+        let mut transaction = self.pool.begin().await.map_err(|error| {
+            tracing::error!(error = ?error, "begin credential migration failed");
+            FormalError::LocalDatabase("开始发布凭据迁移事务")
+        })?;
+        let row = sqlx::query(
+            "SELECT credential_scheme, credential_key_version, credential_salt, \
+             credential_nonce, credential_ciphertext, version \
+             FROM aio_release_profile WHERE profile_key = ? FOR UPDATE",
+        )
+        .bind(profile_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| map_error("锁定待迁移发布凭据", error))?
+        .ok_or_else(|| FormalError::NotFound(format!("发布配置不存在：{profile_key}")))?;
+        let old_envelope = envelope_from_row(&row)?;
+        let metadata = CredentialMetadata {
+            scheme: old_envelope.scheme.clone(),
+            key_version: old_envelope.key_version,
+        };
+        if !metadata.is_legacy() {
+            return Err(FormalError::Conflict(
+                "发布凭据已由其他实例迁移，请重新加载项目主密钥".into(),
+            ));
+        }
+        let credentials = decrypt_release_credentials_legacy(database_password, &old_envelope)?;
+        let new_envelope = encrypt_release_credentials(new_key, &credentials)?;
+        let profile_version: u64 = row
+            .try_get("version")
+            .map_err(|_| FormalError::LocalDatabase("解析发布配置版本"))?;
+        update_credential_envelope(&mut transaction, profile_key, &new_envelope, operator_name)
+            .await?;
+        insert_credential_audit(
+            &mut transaction,
+            profile_key,
+            "credential_key_migrate",
+            operator_name,
+            instance_id,
+            profile_version,
+            old_envelope.key_version,
+            new_envelope.key_version,
+        )
+        .await?;
+        transaction.commit().await.map_err(|error| {
+            tracing::error!(error = ?error, "commit credential migration failed");
+            FormalError::LocalDatabase("提交发布凭据迁移事务")
+        })?;
+        self.get(new_key, profile_key).await
+    }
+
+    pub async fn rotate_credentials(
+        &self,
+        profile_key: &str,
+        old_key: &ProjectMasterKey,
+        new_key: &ProjectMasterKey,
+        operator_name: &str,
+        instance_id: &str,
+    ) -> FormalResult<ReleaseProfileRecord> {
+        validate_maintenance(profile_key, operator_name, instance_id)?;
+        if new_key.version() != old_key.version().saturating_add(1) {
+            return Err(FormalError::InvalidConfig(
+                "项目主密钥必须按连续版本轮换".into(),
+            ));
+        }
+        let mut transaction = self.pool.begin().await.map_err(|error| {
+            tracing::error!(error = ?error, "begin credential rotation failed");
+            FormalError::LocalDatabase("开始发布凭据轮换事务")
+        })?;
+        let row = sqlx::query(
+            "SELECT credential_scheme, credential_key_version, credential_salt, \
+             credential_nonce, credential_ciphertext, version \
+             FROM aio_release_profile WHERE profile_key = ? FOR UPDATE",
+        )
+        .bind(profile_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| map_error("锁定待轮换发布凭据", error))?
+        .ok_or_else(|| FormalError::NotFound(format!("发布配置不存在：{profile_key}")))?;
+        let old_envelope = envelope_from_row(&row)?;
+        let metadata = CredentialMetadata {
+            scheme: old_envelope.scheme.clone(),
+            key_version: old_envelope.key_version,
+        };
+        if !metadata.is_project_key() || metadata.key_version != old_key.version() {
+            return Err(FormalError::Conflict(
+                "发布凭据密钥版本已变化，请刷新后重试".into(),
+            ));
+        }
+        let credentials = decrypt_release_credentials(old_key, &old_envelope)?;
+        let new_envelope = encrypt_release_credentials(new_key, &credentials)?;
+        let profile_version: u64 = row
+            .try_get("version")
+            .map_err(|_| FormalError::LocalDatabase("解析发布配置版本"))?;
+        update_credential_envelope(&mut transaction, profile_key, &new_envelope, operator_name)
+            .await?;
+        insert_credential_audit(
+            &mut transaction,
+            profile_key,
+            "credential_key_rotate",
+            operator_name,
+            instance_id,
+            profile_version,
+            old_envelope.key_version,
+            new_envelope.key_version,
+        )
+        .await?;
+        transaction.commit().await.map_err(|error| {
+            tracing::error!(error = ?error, "commit credential rotation failed");
+            FormalError::LocalDatabase("提交发布凭据轮换事务")
+        })?;
+        self.get(new_key, profile_key).await
     }
 
     pub async fn delete_test_profile(&self, profile_key: &str) -> FormalResult<()> {
@@ -305,6 +461,109 @@ fn validate_write(write: &ReleaseProfileWrite) -> FormalResult<()> {
     {
         return Err(FormalError::InvalidConfig("发布配置参数不完整".into()));
     }
+    Ok(())
+}
+
+fn validate_maintenance(
+    profile_key: &str,
+    operator_name: &str,
+    instance_id: &str,
+) -> FormalResult<()> {
+    if profile_key.trim().is_empty()
+        || operator_name.trim().is_empty()
+        || instance_id.trim().is_empty()
+    {
+        return Err(FormalError::InvalidConfig("发布凭据维护参数不完整".into()));
+    }
+    Ok(())
+}
+
+fn envelope_from_row(row: &MySqlRow) -> FormalResult<CredentialEnvelope> {
+    Ok(CredentialEnvelope {
+        scheme: row
+            .try_get("credential_scheme")
+            .map_err(|_| FormalError::LocalDatabase("解析凭据加密格式"))?,
+        key_version: row
+            .try_get("credential_key_version")
+            .map_err(|_| FormalError::LocalDatabase("解析凭据密钥版本"))?,
+        salt: fixed_array::<16>(
+            row.try_get("credential_salt")
+                .map_err(|_| FormalError::LocalDatabase("解析发布凭据盐值"))?,
+        )?,
+        nonce: fixed_array::<12>(
+            row.try_get("credential_nonce")
+                .map_err(|_| FormalError::LocalDatabase("解析发布凭据随机数"))?,
+        )?,
+        ciphertext: row
+            .try_get("credential_ciphertext")
+            .map_err(|_| FormalError::LocalDatabase("解析发布凭据密文"))?,
+    })
+}
+
+async fn update_credential_envelope(
+    transaction: &mut Transaction<'_, MySql>,
+    profile_key: &str,
+    envelope: &CredentialEnvelope,
+    operator_name: &str,
+) -> FormalResult<()> {
+    let result = sqlx::query(
+        "UPDATE aio_release_profile SET credential_scheme = ?, credential_key_version = ?, \
+         credential_salt = ?, credential_nonce = ?, credential_ciphertext = ?, \
+         updated_by = ?, updated_at = ? WHERE profile_key = ?",
+    )
+    .bind(&envelope.scheme)
+    .bind(envelope.key_version)
+    .bind(envelope.salt.as_slice())
+    .bind(envelope.nonce.as_slice())
+    .bind(&envelope.ciphertext)
+    .bind(operator_name)
+    .bind(OffsetDateTime::now_utc())
+    .bind(profile_key)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| map_error("更新发布凭据密文", error))?;
+    if result.rows_affected() != 1 {
+        return Err(FormalError::Conflict(
+            "发布配置在凭据维护期间发生变化".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_credential_audit(
+    transaction: &mut Transaction<'_, MySql>,
+    profile_key: &str,
+    action: &str,
+    operator_name: &str,
+    instance_id: &str,
+    profile_version: u64,
+    old_key_version: u32,
+    new_key_version: u32,
+) -> FormalResult<()> {
+    let changed_fields = serde_json::json!({
+        "fields": ["credential_scheme", "credential_key_version", "credentials"],
+        "oldKeyVersion": old_key_version,
+        "newKeyVersion": new_key_version,
+    });
+    sqlx::query(
+        "INSERT INTO audit_event \
+         (id, domain_type, object_type, object_key, action, operator_name, instance_id, \
+          old_version, new_version, changed_fields_json, created_at) \
+         VALUES (?, 'aio', 'aio_release_profile', ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(profile_key)
+    .bind(action)
+    .bind(operator_name)
+    .bind(instance_id)
+    .bind(profile_version)
+    .bind(profile_version)
+    .bind(changed_fields.to_string())
+    .bind(OffsetDateTime::now_utc())
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| map_error("记录发布凭据维护审计", error))?;
     Ok(())
 }
 

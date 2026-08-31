@@ -4,13 +4,17 @@ use argon2::Argon2;
 use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::error::{FormalError, FormalResult};
 
-const SCHEME: &str = "argon2id-aes256gcm";
-const KEY_VERSION: u32 = 1;
-const ASSOCIATED_DATA: &[u8] = b"inxaiot-desk-buddy:aio-release-profile:v1";
+pub const LEGACY_CREDENTIAL_SCHEME: &str = "argon2id-aes256gcm";
+pub const PROJECT_KEY_CREDENTIAL_SCHEME: &str = "argon2id-aes256gcm-project-key";
+pub const PROJECT_MASTER_KEY_BYTES: usize = 32;
+const LEGACY_KEY_VERSION: u32 = 1;
+const LEGACY_ASSOCIATED_DATA: &[u8] = b"inxaiot-desk-buddy:aio-release-profile:v1";
+const PROJECT_KEY_ASSOCIATED_DATA_PREFIX: &str =
+    "inxaiot-desk-buddy:aio-release-profile:project-key:v1";
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +35,56 @@ impl std::fmt::Debug for ReleaseCredentials {
     }
 }
 
+#[derive(Clone)]
+pub struct ProjectMasterKey {
+    version: u32,
+    material: Zeroizing<Vec<u8>>,
+}
+
+impl ProjectMasterKey {
+    pub fn generate(version: u32) -> FormalResult<Self> {
+        if version == 0 {
+            return Err(FormalError::InvalidConfig("项目主密钥版本必须大于0".into()));
+        }
+        let mut material = vec![0_u8; PROJECT_MASTER_KEY_BYTES];
+        OsRng.fill_bytes(&mut material);
+        Ok(Self {
+            version,
+            material: Zeroizing::new(material),
+        })
+    }
+
+    pub fn from_bytes(version: u32, material: Vec<u8>) -> FormalResult<Self> {
+        if version == 0 || material.len() != PROJECT_MASTER_KEY_BYTES {
+            return Err(FormalError::InvalidConfig(
+                "项目主密钥版本或长度无效".into(),
+            ));
+        }
+        Ok(Self {
+            version,
+            material: Zeroizing::new(material),
+        })
+    }
+
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+
+    pub fn material(&self) -> &[u8] {
+        self.material.as_slice()
+    }
+}
+
+impl std::fmt::Debug for ProjectMasterKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProjectMasterKey")
+            .field("version", &self.version)
+            .field("material", &"[REDACTED]")
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CredentialEnvelope {
     pub scheme: String,
@@ -40,18 +94,97 @@ pub struct CredentialEnvelope {
     pub ciphertext: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CredentialMetadata {
+    pub scheme: String,
+    pub key_version: u32,
+}
+
+impl CredentialMetadata {
+    pub fn is_legacy(&self) -> bool {
+        self.scheme == LEGACY_CREDENTIAL_SCHEME && self.key_version == LEGACY_KEY_VERSION
+    }
+
+    pub fn is_project_key(&self) -> bool {
+        self.scheme == PROJECT_KEY_CREDENTIAL_SCHEME && self.key_version > 0
+    }
+}
+
 pub fn encrypt_release_credentials(
+    key: &ProjectMasterKey,
+    credentials: &ReleaseCredentials,
+) -> FormalResult<CredentialEnvelope> {
+    let associated_data = project_key_associated_data(key.version());
+    encrypt_with_material(
+        key.material(),
+        PROJECT_KEY_CREDENTIAL_SCHEME,
+        key.version(),
+        associated_data.as_bytes(),
+        credentials,
+    )
+}
+
+pub fn encrypt_release_credentials_legacy(
     database_password: &str,
     credentials: &ReleaseCredentials,
 ) -> FormalResult<CredentialEnvelope> {
     if database_password.is_empty() {
         return Err(FormalError::InvalidConfig("数据库密码不能为空".into()));
     }
+    encrypt_with_material(
+        database_password.as_bytes(),
+        LEGACY_CREDENTIAL_SCHEME,
+        LEGACY_KEY_VERSION,
+        LEGACY_ASSOCIATED_DATA,
+        credentials,
+    )
+}
+
+pub fn decrypt_release_credentials(
+    key: &ProjectMasterKey,
+    envelope: &CredentialEnvelope,
+) -> FormalResult<ReleaseCredentials> {
+    if envelope.scheme != PROJECT_KEY_CREDENTIAL_SCHEME
+        || envelope.key_version == 0
+        || envelope.key_version != key.version()
+    {
+        return Err(FormalError::InvalidConfig(
+            "发布凭据与项目主密钥版本不匹配".into(),
+        ));
+    }
+    let associated_data = project_key_associated_data(envelope.key_version);
+    decrypt_with_material(key.material(), envelope, associated_data.as_bytes())
+}
+
+pub fn decrypt_release_credentials_legacy(
+    database_password: &str,
+    envelope: &CredentialEnvelope,
+) -> FormalResult<ReleaseCredentials> {
+    if envelope.scheme != LEGACY_CREDENTIAL_SCHEME || envelope.key_version != LEGACY_KEY_VERSION {
+        return Err(FormalError::InvalidConfig("不支持的旧凭据加密格式".into()));
+    }
+    decrypt_with_material(
+        database_password.as_bytes(),
+        envelope,
+        LEGACY_ASSOCIATED_DATA,
+    )
+}
+
+fn encrypt_with_material(
+    material: &[u8],
+    scheme: &str,
+    key_version: u32,
+    associated_data: &[u8],
+    credentials: &ReleaseCredentials,
+) -> FormalResult<CredentialEnvelope> {
+    if material.is_empty() {
+        return Err(FormalError::InvalidConfig("凭据加密密钥不能为空".into()));
+    }
     let mut salt = [0_u8; 16];
     let mut nonce = [0_u8; 12];
     OsRng.fill_bytes(&mut salt);
     OsRng.fill_bytes(&mut nonce);
-    let mut key = derive_key(database_password, &salt)?;
+    let mut key = derive_key(material, &salt)?;
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| {
         key.zeroize();
         FormalError::InvalidConfig("初始化凭据加密器失败".into())
@@ -65,29 +198,30 @@ pub fn encrypt_release_credentials(
             &nonce_value,
             aes_gcm::aead::Payload {
                 msg: &plaintext,
-                aad: ASSOCIATED_DATA,
+                aad: associated_data,
             },
         )
         .map_err(|_| FormalError::InvalidConfig("加密发布凭据失败".into()))?;
     plaintext.zeroize();
     key.zeroize();
     Ok(CredentialEnvelope {
-        scheme: SCHEME.into(),
-        key_version: KEY_VERSION,
+        scheme: scheme.into(),
+        key_version,
         salt,
         nonce,
         ciphertext,
     })
 }
 
-pub fn decrypt_release_credentials(
-    database_password: &str,
+fn decrypt_with_material(
+    material: &[u8],
     envelope: &CredentialEnvelope,
+    associated_data: &[u8],
 ) -> FormalResult<ReleaseCredentials> {
-    if envelope.scheme != SCHEME || envelope.key_version != KEY_VERSION {
-        return Err(FormalError::InvalidConfig("不支持的凭据加密格式".into()));
+    if material.is_empty() {
+        return Err(FormalError::InvalidConfig("凭据解密密钥不能为空".into()));
     }
-    let mut key = derive_key(database_password, &envelope.salt)?;
+    let mut key = derive_key(material, &envelope.salt)?;
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| {
         key.zeroize();
         FormalError::InvalidConfig("初始化凭据解密器失败".into())
@@ -99,7 +233,7 @@ pub fn decrypt_release_credentials(
             &nonce_value,
             aes_gcm::aead::Payload {
                 msg: &envelope.ciphertext,
-                aad: ASSOCIATED_DATA,
+                aad: associated_data,
             },
         )
         .map_err(|_| FormalError::InvalidConfig("发布凭据解密失败".into()))?;
@@ -110,10 +244,10 @@ pub fn decrypt_release_credentials(
     result
 }
 
-fn derive_key(database_password: &str, salt: &[u8; 16]) -> FormalResult<[u8; 32]> {
+fn derive_key(material: &[u8], salt: &[u8; 16]) -> FormalResult<[u8; 32]> {
     let mut key = [0_u8; 32];
     Argon2::default()
-        .hash_password_into(database_password.as_bytes(), salt, &mut key)
+        .hash_password_into(material, salt, &mut key)
         .map_err(|error| {
             tracing::error!(error = ?error, "derive release credential key failed");
             FormalError::InvalidConfig("派生发布凭据密钥失败".into())
@@ -121,9 +255,18 @@ fn derive_key(database_password: &str, salt: &[u8; 16]) -> FormalResult<[u8; 32]
     Ok(key)
 }
 
+fn project_key_associated_data(version: u32) -> String {
+    format!("{PROJECT_KEY_ASSOCIATED_DATA_PREFIX}:key-version:{version}")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ReleaseCredentials, decrypt_release_credentials, encrypt_release_credentials};
+    use super::{
+        CredentialMetadata, LEGACY_CREDENTIAL_SCHEME, PROJECT_KEY_CREDENTIAL_SCHEME,
+        ProjectMasterKey, ReleaseCredentials, decrypt_release_credentials,
+        decrypt_release_credentials_legacy, encrypt_release_credentials,
+        encrypt_release_credentials_legacy,
+    };
 
     fn fixture() -> ReleaseCredentials {
         ReleaseCredentials {
@@ -139,19 +282,47 @@ mod tests {
     }
 
     #[test]
-    fn credential_round_trip_uses_authenticated_encryption() {
+    fn project_master_key_round_trip_is_version_bound() {
         let credentials = fixture();
-        let envelope = encrypt_release_credentials("database-password", &credentials)
-            .expect("encrypt credentials");
+        let key = ProjectMasterKey::generate(3).expect("generate project key");
+        let envelope =
+            encrypt_release_credentials(&key, &credentials).expect("encrypt credentials");
         let cipher_text = String::from_utf8_lossy(&envelope.ciphertext);
+        assert_eq!(envelope.scheme, PROJECT_KEY_CREDENTIAL_SCHEME);
+        assert_eq!(envelope.key_version, 3);
         assert!(!cipher_text.contains("auth-key-secret"));
         assert!(!cipher_text.contains("private-key-secret"));
         assert_eq!(
-            decrypt_release_credentials("database-password", &envelope)
-                .expect("decrypt credentials"),
+            decrypt_release_credentials(&key, &envelope).expect("decrypt credentials"),
             credentials
         );
-        assert!(decrypt_release_credentials("wrong-password", &envelope).is_err());
+        let wrong_key = ProjectMasterKey::generate(3).expect("generate wrong key");
+        assert!(decrypt_release_credentials(&wrong_key, &envelope).is_err());
+        let wrong_version =
+            ProjectMasterKey::from_bytes(4, key.material().to_vec()).expect("wrong version key");
+        assert!(decrypt_release_credentials(&wrong_version, &envelope).is_err());
+        assert!(!format!("{key:?}").contains(&hex::encode(key.material())));
+    }
+
+    #[test]
+    fn legacy_envelope_remains_readable_only_by_legacy_path() {
+        let credentials = fixture();
+        let envelope = encrypt_release_credentials_legacy("database-password", &credentials)
+            .expect("encrypt legacy credentials");
+        assert_eq!(envelope.scheme, LEGACY_CREDENTIAL_SCHEME);
+        assert_eq!(
+            decrypt_release_credentials_legacy("database-password", &envelope)
+                .expect("decrypt legacy credentials"),
+            credentials
+        );
+        assert!(decrypt_release_credentials_legacy("wrong-password", &envelope).is_err());
+        assert!(
+            CredentialMetadata {
+                scheme: envelope.scheme,
+                key_version: envelope.key_version,
+            }
+            .is_legacy()
+        );
         assert!(!format!("{credentials:?}").contains("auth-key-secret"));
     }
 }

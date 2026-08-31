@@ -6,10 +6,13 @@ use crate::application::project_management::{
     confirm_host_key as confirm_host_key_use_case,
     create_login_challenge as create_login_challenge_use_case,
     create_project as create_project_use_case, delete_project as delete_project_use_case,
+    export_release_master_key as export_release_master_key_use_case,
     get_project_session as get_project_session_use_case,
-    get_release_profile as get_release_profile_use_case, list_host_keys as list_host_keys_use_case,
-    list_projects as list_projects_use_case, login_project as login_project_use_case,
-    logout_project as logout_project_use_case,
+    get_release_profile as get_release_profile_use_case,
+    import_release_master_key as import_release_master_key_use_case,
+    list_host_keys as list_host_keys_use_case, list_projects as list_projects_use_case,
+    login_project as login_project_use_case, logout_project as logout_project_use_case,
+    rotate_release_master_key as rotate_release_master_key_use_case,
     save_release_profile as save_release_profile_use_case,
     switch_project as switch_project_use_case,
     test_project_connection as test_project_connection_use_case,
@@ -17,7 +20,8 @@ use crate::application::project_management::{
     validate_release_profile as validate_release_profile_use_case,
 };
 use crate::domain::aio::release_profile::{
-    ReleaseProfileDraft, ReleaseProfileValidation, ReleaseProfileView,
+    ReleaseMasterKeyOperationResult, ReleaseMasterKeyTransferRequest, ReleaseProfileDraft,
+    ReleaseProfileValidation, ReleaseProfileView,
 };
 use crate::domain::common::project::{
     ConfirmHostKeyRequest, HostKeyCaptureRequest, HostKeyObservation, PlatformLoginChallenge,
@@ -163,6 +167,38 @@ pub async fn save_release_profile(
     draft: ReleaseProfileDraft,
 ) -> Result<ReleaseProfileView, CommandErrorDto> {
     save_release_profile_use_case(&Stage75Adapter::new(&state), &project_id, draft)
+        .await
+        .map_err(CommandErrorDto::from)
+}
+
+#[tauri::command]
+pub async fn export_release_master_key(
+    state: State<'_, FormalAppState>,
+    project_id: String,
+    request: ReleaseMasterKeyTransferRequest,
+) -> Result<ReleaseMasterKeyOperationResult, CommandErrorDto> {
+    export_release_master_key_use_case(&Stage75Adapter::new(&state), &project_id, request)
+        .await
+        .map_err(CommandErrorDto::from)
+}
+
+#[tauri::command]
+pub async fn import_release_master_key(
+    state: State<'_, FormalAppState>,
+    project_id: String,
+    request: ReleaseMasterKeyTransferRequest,
+) -> Result<ReleaseMasterKeyOperationResult, CommandErrorDto> {
+    import_release_master_key_use_case(&Stage75Adapter::new(&state), &project_id, request)
+        .await
+        .map_err(CommandErrorDto::from)
+}
+
+#[tauri::command]
+pub async fn rotate_release_master_key(
+    state: State<'_, FormalAppState>,
+    project_id: String,
+) -> Result<ReleaseMasterKeyOperationResult, CommandErrorDto> {
+    rotate_release_master_key_use_case(&Stage75Adapter::new(&state), &project_id)
         .await
         .map_err(CommandErrorDto::from)
 }

@@ -66,6 +66,44 @@ pub struct ReleaseProfileValidation {
     pub warnings: Vec<String>,
 }
 
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseMasterKeyTransferRequest {
+    pub file_path: String,
+    pub passphrase: String,
+}
+
+impl std::fmt::Debug for ReleaseMasterKeyTransferRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReleaseMasterKeyTransferRequest")
+            .field("file_path", &self.file_path)
+            .field("passphrase", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl ReleaseMasterKeyTransferRequest {
+    pub fn validate(&self) -> AppResult<()> {
+        if self.file_path.trim().is_empty() {
+            return Err(AppError::InvalidConfig("项目主密钥包路径不能为空".into()));
+        }
+        if !(12..=1024).contains(&self.passphrase.len()) {
+            return Err(AppError::InvalidConfig(
+                "密钥包口令长度必须为12到1024个字节".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseMasterKeyOperationResult {
+    pub key_version: u32,
+    pub message: String,
+}
+
 impl ReleaseProfileDraft {
     pub fn validate(&self) -> AppResult<ReleaseProfileValidation> {
         let values = &self.values;

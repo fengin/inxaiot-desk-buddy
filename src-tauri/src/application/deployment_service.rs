@@ -37,6 +37,7 @@ use crate::domain::aio::release::{
 use crate::domain::common::task::{StepState, TargetState, TaskEventLevel};
 use crate::formal::app_state::FormalAppState;
 use crate::formal::project_repository::LocalProjectRepository;
+use crate::formal::release_master_key::ReleaseMasterKeyManager;
 use crate::formal::release_profile_repository::{ReleaseProfileRecord, ReleaseProfileRepository};
 use crate::formal::resource_lease_repository::ResourceLeaseRepository;
 use crate::formal::runtime_registry::ConnectionHealth;
@@ -110,8 +111,15 @@ async fn launch_deployment_inner(
         .connection_secrets(local_project_id)
         .await
         .map_err(map_formal_error)?;
-    let profile = ReleaseProfileRepository::new(pools.workbench.clone())
-        .get(&connection.db_password, "default")
+    let profile = ReleaseMasterKeyManager::new(state.secret_store.clone())
+        .load_profile(
+            &ReleaseProfileRepository::new(pools.workbench.clone()),
+            local_project_id,
+            "default",
+            &connection.db_password,
+            &operator,
+            &instance_id,
+        )
         .await
         .map_err(map_formal_error)?;
     if profile.version != snapshot.profile_version {

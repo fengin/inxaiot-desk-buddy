@@ -30,4 +30,22 @@ describe("release profile store", () => {
     expect(confirmed.state).toBe("confirmed");
     expect(store.hostKeys).toHaveLength(1);
   });
+
+  it("exports, rotates and imports a versioned project master key through the adapter", async () => {
+    const store = useReleaseProfileStore();
+    await store.load("project-shenzhen-bay");
+    const exported = await store.exportMasterKey(
+      "D:\\secure\\project-key.inxkey",
+      "strong-passphrase"
+    );
+    expect(exported.keyVersion).toBe(1);
+    const rotated = await store.rotateMasterKey();
+    expect(rotated.keyVersion).toBe(2);
+    const imported = await store.importMasterKey(
+      "D:\\secure\\project-key.inxkey",
+      "strong-passphrase"
+    );
+    expect(imported.keyVersion).toBe(2);
+    expect(store.keyOperationLoading).toBe(false);
+  });
 });

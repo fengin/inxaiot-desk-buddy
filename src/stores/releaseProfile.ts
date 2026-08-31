@@ -21,6 +21,7 @@ export const useReleaseProfileStore = defineStore("release-profile", () => {
   const loading = ref(false);
   const saving = ref(false);
   const hostKeyLoading = ref(false);
+  const keyOperationLoading = ref(false);
   const error = ref("");
   const conflict = ref(false);
   let loadRequest = 0;
@@ -177,6 +178,53 @@ export const useReleaseProfileStore = defineStore("release-profile", () => {
     }
   }
 
+  async function exportMasterKey(filePath: string, passphrase: string) {
+    if (!projectId.value) throw new Error("没有活动项目");
+    const expectedProjectId = projectId.value;
+    keyOperationLoading.value = true;
+    error.value = "";
+    try {
+      return await useWorkbenchAdapter().exportReleaseMasterKey(expectedProjectId, { filePath, passphrase });
+    } catch (cause) {
+      error.value = commandErrorText(cause, "导出项目主密钥失败");
+      throw cause;
+    } finally {
+      keyOperationLoading.value = false;
+    }
+  }
+
+  async function importMasterKey(filePath: string, passphrase: string) {
+    if (!projectId.value) throw new Error("没有活动项目");
+    const expectedProjectId = projectId.value;
+    keyOperationLoading.value = true;
+    error.value = "";
+    try {
+      const result = await useWorkbenchAdapter().importReleaseMasterKey(expectedProjectId, { filePath, passphrase });
+      if (projectId.value === expectedProjectId) await load(expectedProjectId);
+      return result;
+    } catch (cause) {
+      error.value = commandErrorText(cause, "导入项目主密钥失败");
+      throw cause;
+    } finally {
+      keyOperationLoading.value = false;
+    }
+  }
+
+  async function rotateMasterKey() {
+    if (!projectId.value) throw new Error("没有活动项目");
+    const expectedProjectId = projectId.value;
+    keyOperationLoading.value = true;
+    error.value = "";
+    try {
+      return await useWorkbenchAdapter().rotateReleaseMasterKey(expectedProjectId);
+    } catch (cause) {
+      error.value = commandErrorText(cause, "轮换项目主密钥失败");
+      throw cause;
+    } finally {
+      keyOperationLoading.value = false;
+    }
+  }
+
   return {
     projectId,
     profile,
@@ -187,6 +235,7 @@ export const useReleaseProfileStore = defineStore("release-profile", () => {
     loading,
     saving,
     hostKeyLoading,
+    keyOperationLoading,
     error,
     conflict,
     load,
@@ -195,5 +244,8 @@ export const useReleaseProfileStore = defineStore("release-profile", () => {
     save,
     captureHostKey,
     confirmHostKey
+    ,exportMasterKey,
+    importMasterKey,
+    rotateMasterKey
   };
 });

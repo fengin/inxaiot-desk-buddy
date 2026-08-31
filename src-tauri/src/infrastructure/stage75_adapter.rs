@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -5,6 +6,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use time::OffsetDateTime;
 
+use crate::application::aio_assets::application_instance_id;
 use crate::application::ports::project_access::ProjectAccessPort;
 use crate::application::ports::project_management::{
     HostKeyManagementPort, ProjectManagementPort, ReleaseProfileManagementPort,
@@ -16,7 +18,8 @@ use crate::application::project_access::ProjectAccessRequirement;
 use crate::core::error::{AppError, AppResult};
 use crate::core::secret::SecretValue;
 use crate::domain::aio::release_profile::{
-    ReleaseProfileCredentials, ReleaseProfileDraft, ReleaseProfileValues, ReleaseProfileView,
+    ReleaseMasterKeyOperationResult, ReleaseMasterKeyTransferRequest, ReleaseProfileCredentials,
+    ReleaseProfileDraft, ReleaseProfileValues, ReleaseProfileView,
 };
 use crate::domain::common::project::{
     ConfirmHostKeyRequest, DatabaseConnectionState, HostKeyCaptureRequest, HostKeyObservation,
@@ -31,6 +34,7 @@ use crate::formal::platform_auth::{PlatformAuthAdapter, PlatformLoginSpec};
 use crate::formal::project_repository::{
     CreateLocalProject, LocalProjectRecord, LocalProjectRepository, UpdateLocalProject,
 };
+use crate::formal::release_master_key::{ReleaseKeyProjectBinding, ReleaseMasterKeyManager};
 use crate::formal::release_profile_repository::{
     ReleaseProfileRecord, ReleaseProfileRepository,
     ReleaseProfileValues as StoredReleaseProfileValues, ReleaseProfileWrite,
@@ -66,6 +70,10 @@ impl<'a> Stage75Adapter<'a> {
             self.state.local_store.pool().clone(),
             self.state.secret_store.clone(),
         )
+    }
+
+    fn release_master_keys(&self) -> ReleaseMasterKeyManager {
+        ReleaseMasterKeyManager::new(self.state.secret_store.clone())
     }
 
     async fn session_view(&self, project_id: &str) -> AppResult<ProjectSessionView> {
@@ -307,19 +315,19 @@ impl ProjectManagementPort for Stage75Adapter<'_> {
                 .map_err(map_formal_error)?;
             if new_password != existing.db_password {
                 let pools = self.ready_pools(project_id).await?;
-                match ReleaseProfileRepository::new(pools.workbench.clone())
-                    .get(&existing.db_password, "default")
+                let session = self.session_view(project_id).await?;
+                let operator = session.username.as_deref().unwrap_or("local-workbench");
+                self.release_master_keys()
+                    .migrate_if_needed(
+                        &ReleaseProfileRepository::new(pools.workbench.clone()),
+                        project_id,
+                        "default",
+                        &existing.db_password,
+                        operator,
+                        application_instance_id(),
+                    )
                     .await
-                {
-                    Ok(_) => {
-                        return Err(AppError::Conflict(
-                            "当前发布凭据仍由原数据库密码加密；稳定项目主密钥迁移完成前禁止修改数据库密码"
-                                .into(),
-                        ));
-                    }
-                    Err(FormalError::NotFound(_)) => {}
-                    Err(error) => return Err(map_formal_error(error)),
-                }
+                    .map_err(map_formal_error)?;
             }
         }
         self.register_secrets(input.db_password.clone());
@@ -601,15 +609,26 @@ impl ProjectAccessPort for Stage75Adapter<'_> {
 
 impl ReleaseProfileManagementPort for Stage75Adapter<'_> {
     async fn get_release_profile(&self, project_id: &str) -> AppResult<Option<ReleaseProfileView>> {
-        self.require_active_session(project_id).await?;
+        let session = self.require_active_session(project_id).await?;
+        let operator_name = session
+            .username
+            .ok_or_else(|| AppError::Authentication("平台会话缺少用户名".into()))?;
         let pools = self.ready_pools(project_id).await?;
         let connection = self
             .projects()
             .connection_secrets(project_id)
             .await
             .map_err(map_formal_error)?;
-        match ReleaseProfileRepository::new(pools.workbench.clone())
-            .get(&connection.db_password, "default")
+        match self
+            .release_master_keys()
+            .load_profile(
+                &ReleaseProfileRepository::new(pools.workbench.clone()),
+                project_id,
+                "default",
+                &connection.db_password,
+                &operator_name,
+                application_instance_id(),
+            )
             .await
         {
             Ok(record) => {
@@ -648,8 +667,11 @@ impl ReleaseProfileManagementPort for Stage75Adapter<'_> {
             .connection_secrets(project_id)
             .await
             .map_err(map_formal_error)?;
-        let record = ReleaseProfileRepository::new(pools.workbench.clone())
-            .save(
+        let record = self
+            .release_master_keys()
+            .save_profile(
+                &ReleaseProfileRepository::new(pools.workbench.clone()),
+                project_id,
                 &connection.db_password,
                 ReleaseProfileWrite {
                     profile_key: "default".into(),
@@ -677,12 +699,112 @@ impl ReleaseProfileManagementPort for Stage75Adapter<'_> {
                     },
                     expected_version: draft.expected_version,
                     operator_name,
-                    instance_id: format!("desk-{}", std::process::id()),
+                    instance_id: application_instance_id().into(),
                 },
             )
             .await
             .map_err(map_formal_error)?;
         Ok(map_release_profile(record))
+    }
+
+    async fn export_release_master_key(
+        &self,
+        project_id: &str,
+        request: ReleaseMasterKeyTransferRequest,
+    ) -> AppResult<ReleaseMasterKeyOperationResult> {
+        self.register_secrets([request.passphrase.clone()]);
+        let session = self.require_active_session(project_id).await?;
+        let operator_name = session
+            .username
+            .ok_or_else(|| AppError::Authentication("平台会话缺少用户名".into()))?;
+        let pools = self.ready_pools(project_id).await?;
+        let connection = self
+            .projects()
+            .connection_secrets(project_id)
+            .await
+            .map_err(map_formal_error)?;
+        let key_version = self
+            .release_master_keys()
+            .export_key_package(
+                &ReleaseProfileRepository::new(pools.workbench.clone()),
+                project_id,
+                "default",
+                &connection.db_password,
+                &operator_name,
+                application_instance_id(),
+                &release_key_binding(&connection.project),
+                Path::new(request.file_path.trim()),
+                &request.passphrase,
+            )
+            .await
+            .map_err(map_formal_error)?;
+        Ok(ReleaseMasterKeyOperationResult {
+            key_version,
+            message: format!("项目主密钥v{key_version}已导出为口令保护密钥包"),
+        })
+    }
+
+    async fn import_release_master_key(
+        &self,
+        project_id: &str,
+        request: ReleaseMasterKeyTransferRequest,
+    ) -> AppResult<ReleaseMasterKeyOperationResult> {
+        self.register_secrets([request.passphrase.clone()]);
+        self.require_active_session(project_id).await?;
+        let pools = self.ready_pools(project_id).await?;
+        let project = self
+            .projects()
+            .get(project_id)
+            .await
+            .map_err(map_formal_error)?;
+        let key_version = self
+            .release_master_keys()
+            .import_key_package(
+                &ReleaseProfileRepository::new(pools.workbench.clone()),
+                project_id,
+                "default",
+                &release_key_binding(&project),
+                Path::new(request.file_path.trim()),
+                &request.passphrase,
+            )
+            .await
+            .map_err(map_formal_error)?;
+        Ok(ReleaseMasterKeyOperationResult {
+            key_version,
+            message: format!("项目主密钥v{key_version}已验证并保存到本机安全存储"),
+        })
+    }
+
+    async fn rotate_release_master_key(
+        &self,
+        project_id: &str,
+    ) -> AppResult<ReleaseMasterKeyOperationResult> {
+        let session = self.require_active_session(project_id).await?;
+        let operator_name = session
+            .username
+            .ok_or_else(|| AppError::Authentication("平台会话缺少用户名".into()))?;
+        let pools = self.ready_pools(project_id).await?;
+        let connection = self
+            .projects()
+            .connection_secrets(project_id)
+            .await
+            .map_err(map_formal_error)?;
+        let key_version = self
+            .release_master_keys()
+            .rotate(
+                &ReleaseProfileRepository::new(pools.workbench.clone()),
+                project_id,
+                "default",
+                &connection.db_password,
+                &operator_name,
+                application_instance_id(),
+            )
+            .await
+            .map_err(map_formal_error)?;
+        Ok(ReleaseMasterKeyOperationResult {
+            key_version,
+            message: format!("项目主密钥已轮换到v{key_version}；其他电脑必须导入新版本密钥包"),
+        })
     }
 }
 
@@ -760,14 +882,26 @@ impl Stage75Adapter<'_> {
         project_id: &str,
         request: &HostKeyCaptureRequest,
     ) -> AppResult<(RemoteTarget, HostKeyIdentity)> {
+        let session = self.require_active_session(project_id).await?;
+        let operator_name = session
+            .username
+            .ok_or_else(|| AppError::Authentication("平台会话缺少用户名".into()))?;
         let pools = self.ready_pools(project_id).await?;
         let connection = self
             .projects()
             .connection_secrets(project_id)
             .await
             .map_err(map_formal_error)?;
-        let profile = ReleaseProfileRepository::new(pools.workbench.clone())
-            .get(&connection.db_password, "default")
+        let profile = self
+            .release_master_keys()
+            .load_profile(
+                &ReleaseProfileRepository::new(pools.workbench.clone()),
+                project_id,
+                "default",
+                &connection.db_password,
+                &operator_name,
+                application_instance_id(),
+            )
             .await
             .map_err(map_formal_error)?;
         self.register_secrets(
@@ -851,6 +985,15 @@ fn map_project(project: LocalProjectRecord) -> ProjectRecord {
         business_db: project.business_db,
         workbench_db: project.workbench_db,
         last_opened_at: project.last_opened_at,
+    }
+}
+
+fn release_key_binding(project: &LocalProjectRecord) -> ReleaseKeyProjectBinding {
+    ReleaseKeyProjectBinding {
+        platform_url: project.platform_url.clone(),
+        db_host: project.db_host.clone(),
+        db_port: project.db_port,
+        workbench_db: project.workbench_db.clone(),
     }
 }
 

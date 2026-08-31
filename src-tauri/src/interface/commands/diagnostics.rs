@@ -4,6 +4,8 @@ use crate::application::diagnostics::{
     SystemDiagnostics, SystemDiagnosticsInput, build_system_diagnostics,
 };
 use crate::formal::app_state::FormalAppState;
+use crate::formal::project_repository::LocalProjectRepository;
+use crate::formal::workbench_store::latest_workbench_schema_version;
 use crate::infrastructure::agent_asset::{
     AGENT_COMPATIBILITY, AGENT_PROTOCOL_VERSION, AGENT_SHA256, AGENT_VERSION,
 };
@@ -26,11 +28,16 @@ pub async fn get_system_diagnostics(
     })?
     .unwrap_or_default()
     .to_string();
+    let pending_secret_cleanup_count =
+        LocalProjectRepository::new(state.local_store.pool().clone(), state.secret_store.clone())
+            .pending_secret_cleanup_count()
+            .await
+            .map_err(|error| CommandErrorDto::from(crate::core::error::AppError::from(error)))?;
     Ok(build_system_diagnostics(SystemDiagnosticsInput {
         application_version: env!("CARGO_PKG_VERSION").into(),
         source_commit: env!("INX_BUILD_GIT_COMMIT").into(),
         local_schema_version,
-        workbench_schema_version: "2".into(),
+        workbench_schema_version: latest_workbench_schema_version().to_string(),
         agent_version: AGENT_VERSION.into(),
         agent_protocol_version: AGENT_PROTOCOL_VERSION.into(),
         agent_sha256: AGENT_SHA256.into(),
@@ -48,5 +55,6 @@ pub async fn get_system_diagnostics(
             .task_artifacts_dir
             .to_string_lossy()
             .into_owned(),
+        pending_secret_cleanup_count,
     }))
 }

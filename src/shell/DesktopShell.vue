@@ -198,6 +198,7 @@ const businessRouteMessage = computed(() => {
         <n-descriptions-item label="Agent SHA-256"><span class="diagnostic-value">{{ diagnostics.value?.agentSha256 ?? '—' }}</span></n-descriptions-item>
         <n-descriptions-item label="运行平台">{{ diagnostics.value?.operatingSystem ?? '—' }} / {{ diagnostics.value?.architecture ?? '—' }}</n-descriptions-item>
         <n-descriptions-item label="实际数据目录"><span class="diagnostic-value">{{ diagnostics.value?.dataDirectory ?? dataDirectory.activeDirectory ?? '—' }}</span></n-descriptions-item>
+        <n-descriptions-item label="待清理本机凭据">{{ diagnostics.value?.pendingSecretCleanupCount ?? '—' }}</n-descriptions-item>
       </n-descriptions>
       <div class="about-notice"><CircleHelp :size="16" />原 Go/Wails 工作台仅在阶段 8 全量用户验收和替换决策后退役。</div>
     </n-modal>

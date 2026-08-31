@@ -13,4 +13,5 @@ export interface SystemDiagnostics {
   applicationLogsDirectory: string;
   taskLogsDirectory: string;
   taskArtifactsDirectory: string;
+  pendingSecretCleanupCount: number;
 }

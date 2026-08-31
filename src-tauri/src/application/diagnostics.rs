@@ -17,6 +17,7 @@ pub struct SystemDiagnostics {
     pub application_logs_directory: String,
     pub task_logs_directory: String,
     pub task_artifacts_directory: String,
+    pub pending_secret_cleanup_count: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -35,6 +36,7 @@ pub struct SystemDiagnosticsInput {
     pub application_logs_directory: String,
     pub task_logs_directory: String,
     pub task_artifacts_directory: String,
+    pub pending_secret_cleanup_count: usize,
 }
 
 pub fn build_system_diagnostics(input: SystemDiagnosticsInput) -> SystemDiagnostics {
@@ -53,5 +55,6 @@ pub fn build_system_diagnostics(input: SystemDiagnosticsInput) -> SystemDiagnost
         application_logs_directory: input.application_logs_directory,
         task_logs_directory: input.task_logs_directory,
         task_artifacts_directory: input.task_artifacts_directory,
+        pending_secret_cleanup_count: input.pending_secret_cleanup_count,
     }
 }

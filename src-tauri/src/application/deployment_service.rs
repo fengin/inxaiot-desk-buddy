@@ -111,17 +111,20 @@ async fn launch_deployment_inner(
         .connection_secrets(local_project_id)
         .await
         .map_err(map_formal_error)?;
-    let profile = ReleaseMasterKeyManager::new(state.secret_store.clone())
-        .load_profile(
-            &ReleaseProfileRepository::new(pools.workbench.clone()),
-            local_project_id,
-            "default",
-            &connection.db_password,
-            &operator,
-            &instance_id,
-        )
-        .await
-        .map_err(map_formal_error)?;
+    let profile = ReleaseMasterKeyManager::with_local_registry(
+        state.secret_store.clone(),
+        state.local_store.pool().clone(),
+    )
+    .load_profile(
+        &ReleaseProfileRepository::new(pools.workbench.clone()),
+        local_project_id,
+        "default",
+        &connection.db_password,
+        &operator,
+        &instance_id,
+    )
+    .await
+    .map_err(map_formal_error)?;
     if profile.version != snapshot.profile_version {
         return Err(AppError::Conflict(format!(
             "发布参数已从v{}变更为v{}，任务未执行；请重新预检",

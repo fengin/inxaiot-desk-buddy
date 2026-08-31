@@ -157,7 +157,7 @@ impl WorkbenchStore {
             } else {
                 (None, 0, 0)
             };
-        let latest_available_version = latest_available_version();
+        let latest_available_version = latest_workbench_schema_version();
         Ok(classify_schema_status(
             migration_table_exists,
             current_version,
@@ -239,7 +239,7 @@ impl WorkbenchStore {
     }
 }
 
-fn latest_available_version() -> i64 {
+pub fn latest_workbench_schema_version() -> i64 {
     WORKBENCH_MIGRATOR
         .iter()
         .map(|migration| migration.version)

@@ -45,6 +45,8 @@ async fn local_store_runs_migrations_and_respects_data_boundary() {
         "local_aio_import_item",
         "local_recent_artifact",
         "local_host_key",
+        "local_secret_cleanup",
+        "local_project_master_key",
     ] {
         assert!(
             tables.iter().any(|table| table == required),

@@ -16,6 +16,7 @@ use crate::formal::config::AppPaths;
 use crate::formal::job_supervisor::JobSupervisor;
 use crate::formal::local_store::LocalStore;
 use crate::formal::logging::init_file_logging;
+use crate::formal::project_repository::LocalProjectRepository;
 use crate::formal::runtime_registry::ProjectRuntimeRegistry;
 use crate::formal::secret_store::OsSecretStore;
 use crate::infrastructure::agent_asset::verify_embedded_agent;
@@ -165,6 +166,25 @@ pub fn run() {
                     task_event_pipeline,
                     paths,
                 };
+                match LocalProjectRepository::new(
+                    state.local_store.pool().clone(),
+                    state.secret_store.clone(),
+                )
+                .retry_pending_secret_cleanup()
+                .await
+                {
+                    Ok(report) if report.pending > 0 => tracing::warn!(
+                        attempted = report.attempted,
+                        deleted = report.deleted,
+                        pending = report.pending,
+                        "pending local secret cleanup remains"
+                    ),
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(
+                        error = %crate::core::log_safety::safe_error(&error),
+                        "startup local secret cleanup deferred"
+                    ),
+                }
                 retry_pending_local_finalizations(&state).await;
                 Ok::<_, Box<dyn std::error::Error>>(state)
             })?;

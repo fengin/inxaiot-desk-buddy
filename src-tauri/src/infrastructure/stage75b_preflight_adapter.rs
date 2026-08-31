@@ -141,16 +141,19 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
             ));
             return Ok(report(checks, normalized, None, checked_at));
         };
-        let profile = match ReleaseMasterKeyManager::new(self.state.secret_store.clone())
-            .load_profile(
-                &ReleaseProfileRepository::new(pools.workbench.clone()),
-                project_id,
-                "default",
-                &connection.db_password,
-                &operator,
-                application_instance_id(),
-            )
-            .await
+        let profile = match ReleaseMasterKeyManager::with_local_registry(
+            self.state.secret_store.clone(),
+            self.state.local_store.pool().clone(),
+        )
+        .load_profile(
+            &ReleaseProfileRepository::new(pools.workbench.clone()),
+            project_id,
+            "default",
+            &connection.db_password,
+            &operator,
+            application_instance_id(),
+        )
+        .await
         {
             Ok(value) => {
                 checks.push(passed(

@@ -11,11 +11,14 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sqlx::SqlitePool;
+use time::OffsetDateTime;
 use tokio::sync::Mutex;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::credential_crypto::{CredentialMetadata, ProjectMasterKey};
 use super::error::{FormalError, FormalResult};
+use super::project_repository::LocalProjectRepository;
 use super::release_profile_repository::{
     ReleaseProfileRecord, ReleaseProfileRepository, ReleaseProfileWrite,
 };
@@ -85,11 +88,22 @@ struct KeyResolutionContext<'a> {
 #[derive(Clone)]
 pub struct ReleaseMasterKeyManager {
     secrets: Arc<dyn SecretStore>,
+    local_pool: Option<SqlitePool>,
 }
 
 impl ReleaseMasterKeyManager {
     pub fn new(secrets: Arc<dyn SecretStore>) -> Self {
-        Self { secrets }
+        Self {
+            secrets,
+            local_pool: None,
+        }
+    }
+
+    pub fn with_local_registry(secrets: Arc<dyn SecretStore>, local_pool: SqlitePool) -> Self {
+        Self {
+            secrets,
+            local_pool: Some(local_pool),
+        }
     }
 
     pub async fn load_profile(
@@ -147,11 +161,11 @@ impl ReleaseMasterKeyManager {
                 .await?,
                 false,
             ),
-            None => self.ensure_key(project_id, 1)?,
+            None => self.ensure_key(project_id, 1).await?,
         };
         let result = repository.save(&key, write).await;
         if result.is_err() && created {
-            let _ = self.delete_key(project_id, key.version());
+            let _ = self.delete_key_tracked(project_id, key.version()).await;
         }
         result
     }
@@ -216,15 +230,15 @@ impl ReleaseMasterKeyManager {
             .checked_add(1)
             .ok_or_else(|| FormalError::Conflict("项目主密钥版本已达到上限".into()))?;
         let new_key = ProjectMasterKey::generate(new_version)?;
-        self.save_key(project_id, &new_key)?;
+        self.save_key_tracked(project_id, &new_key).await?;
         let result = repository
             .rotate_credentials(profile_key, &old_key, &new_key, operator_name, instance_id)
             .await;
         if result.is_err() {
-            let _ = self.delete_key(project_id, new_version);
+            let _ = self.delete_key_tracked(project_id, new_version).await;
             return result.map(|_| new_version);
         }
-        if let Err(error) = self.delete_key(project_id, old_key.version()) {
+        if let Err(error) = self.delete_key_tracked(project_id, old_key.version()).await {
             tracing::warn!(
                 project_id,
                 old_key_version = old_key.version(),
@@ -311,7 +325,7 @@ impl ReleaseMasterKeyManager {
             .get(&key, profile_key)
             .await
             .map_err(|_| FormalError::Conflict("密钥包无法解密当前发布凭据，导入已阻止".into()))?;
-        self.save_key(project_id, &key)?;
+        self.save_key_tracked(project_id, &key).await?;
         Ok(key.version())
     }
 
@@ -331,13 +345,21 @@ impl ReleaseMasterKeyManager {
         self.secrets.save(&reference, key.material())
     }
 
-    fn ensure_key(&self, project_id: &str, version: u32) -> FormalResult<(ProjectMasterKey, bool)> {
+    async fn ensure_key(
+        &self,
+        project_id: &str,
+        version: u32,
+    ) -> FormalResult<(ProjectMasterKey, bool)> {
         let reference = key_reference(project_id, version)?;
         match self.secrets.load(&reference) {
-            Ok(bytes) => Ok((ProjectMasterKey::from_bytes(version, bytes)?, false)),
+            Ok(bytes) => {
+                let key = ProjectMasterKey::from_bytes(version, bytes)?;
+                self.track_key(project_id, version, &reference).await?;
+                Ok((key, false))
+            }
             Err(FormalError::NotFound(_)) => {
                 let key = ProjectMasterKey::generate(version)?;
-                self.secrets.save(&reference, key.material())?;
+                self.save_key_tracked(project_id, &key).await?;
                 Ok((key, true))
             }
             Err(error) => Err(error),
@@ -351,7 +373,14 @@ impl ReleaseMasterKeyManager {
         metadata: CredentialMetadata,
     ) -> FormalResult<ProjectMasterKey> {
         if metadata.is_project_key() {
-            return self.load_key(context.project_id, metadata.key_version);
+            let key = self.load_key(context.project_id, metadata.key_version)?;
+            self.track_key(
+                context.project_id,
+                metadata.key_version,
+                &key_reference(context.project_id, metadata.key_version)?,
+            )
+            .await?;
+            return Ok(key);
         }
         if !metadata.is_legacy() {
             return Err(FormalError::InvalidConfig(format!(
@@ -359,7 +388,7 @@ impl ReleaseMasterKeyManager {
                 metadata.scheme, metadata.key_version
             )));
         }
-        let (key, created) = self.ensure_key(context.project_id, 1)?;
+        let (key, created) = self.ensure_key(context.project_id, 1).await?;
         let migration = repository
             .migrate_legacy_credentials(
                 context.profile_key,
@@ -371,15 +400,69 @@ impl ReleaseMasterKeyManager {
             .await;
         if let Err(error) = migration {
             if created {
-                let _ = self.delete_key(context.project_id, key.version());
+                let _ = self
+                    .delete_key_tracked(context.project_id, key.version())
+                    .await;
             }
             return Err(error);
         }
         Ok(key)
     }
 
-    fn delete_key(&self, project_id: &str, version: u32) -> FormalResult<()> {
-        self.secrets.delete(&key_reference(project_id, version)?)
+    async fn save_key_tracked(&self, project_id: &str, key: &ProjectMasterKey) -> FormalResult<()> {
+        let reference = key_reference(project_id, key.version())?;
+        self.secrets.save(&reference, key.material())?;
+        self.track_key(project_id, key.version(), &reference).await
+    }
+
+    async fn track_key(&self, project_id: &str, version: u32, reference: &str) -> FormalResult<()> {
+        let Some(pool) = &self.local_pool else {
+            return Ok(());
+        };
+        sqlx::query(
+            "INSERT INTO local_project_master_key \
+             (local_project_id, key_version, secret_ref, created_at) VALUES (?, ?, ?, ?) \
+             ON CONFLICT(local_project_id, key_version) DO UPDATE SET secret_ref = excluded.secret_ref",
+        )
+        .bind(project_id)
+        .bind(i64::from(version))
+        .bind(reference)
+        .bind(OffsetDateTime::now_utc().unix_timestamp_nanos().to_string())
+        .execute(pool)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "track project master key failed");
+            FormalError::LocalDatabase("登记项目主密钥引用")
+        })?;
+        Ok(())
+    }
+
+    async fn delete_key_tracked(&self, project_id: &str, version: u32) -> FormalResult<()> {
+        let reference = key_reference(project_id, version)?;
+        if let Err(error) = self.secrets.delete(&reference) {
+            if let Some(pool) = &self.local_pool {
+                LocalProjectRepository::new(pool.clone(), self.secrets.clone())
+                    .delete_secret_or_enqueue(&reference, "release_master_key_retired")
+                    .await?;
+                return Ok(());
+            }
+            return Err(error);
+        }
+        if let Some(pool) = &self.local_pool {
+            sqlx::query(
+                "DELETE FROM local_project_master_key \
+                 WHERE local_project_id = ? AND key_version = ?",
+            )
+            .bind(project_id)
+            .bind(i64::from(version))
+            .execute(pool)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "untrack project master key failed");
+                FormalError::LocalDatabase("清理项目主密钥引用")
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -602,7 +685,10 @@ mod tests {
         encrypt_transfer_package, key_reference,
     };
     use crate::formal::credential_crypto::ProjectMasterKey;
+    use crate::formal::local_store::LocalStore;
+    use crate::formal::project_repository::{CreateLocalProject, LocalProjectRepository};
     use crate::formal::secret_store::MemorySecretStore;
+    use crate::formal::secret_store::SecretStore;
 
     #[test]
     fn project_key_reference_is_scoped_and_material_is_not_exposed() {
@@ -669,5 +755,60 @@ mod tests {
             first.fingerprint().expect("first binding"),
             other_schema.fingerprint().expect("other binding")
         );
+    }
+
+    #[tokio::test]
+    async fn tracked_master_key_is_removed_with_the_local_project() {
+        let temporary = tempfile::tempdir().expect("temporary data directory");
+        let local_store = LocalStore::open(temporary.path().join("local.db"))
+            .await
+            .expect("local store");
+        let secrets = Arc::new(MemorySecretStore::default());
+        let projects = LocalProjectRepository::new(local_store.pool().clone(), secrets.clone());
+        let project = projects
+            .create(CreateLocalProject {
+                name: "tracked-key-project".into(),
+                platform_url: "http://platform.test:8055".into(),
+                db_host: "database.test".into(),
+                db_port: 3306,
+                db_user: "workbench".into(),
+                db_password: "database-password".into(),
+                business_db: "inxvision_iot_dev".into(),
+                workbench_db: "inxaiot_desk_buddy".into(),
+            })
+            .await
+            .expect("create project");
+        let manager = ReleaseMasterKeyManager::with_local_registry(
+            secrets.clone(),
+            local_store.pool().clone(),
+        );
+        let key = ProjectMasterKey::generate(1).expect("master key");
+        manager
+            .save_key_tracked(&project.id, &key)
+            .await
+            .expect("save tracked master key");
+        let reference = key_reference(&project.id, 1).expect("key reference");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM local_project_master_key WHERE local_project_id = ?",
+            )
+            .bind(&project.id)
+            .fetch_one(local_store.pool())
+            .await
+            .expect("tracked key count"),
+            1
+        );
+        assert!(secrets.load(&reference).is_ok());
+
+        projects.delete(&project.id).await.expect("delete project");
+        assert!(secrets.load(&reference).is_err());
+        assert_eq!(
+            projects
+                .pending_secret_cleanup_count()
+                .await
+                .expect("pending cleanup"),
+            0
+        );
+        local_store.close().await;
     }
 }

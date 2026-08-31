@@ -1,4 +1,6 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use inxaiot_desk_buddy_lib::domain::common::task::TaskState;
 use inxaiot_desk_buddy_lib::formal::error::FormalError;
@@ -6,7 +8,7 @@ use inxaiot_desk_buddy_lib::formal::local_store::LocalStore;
 use inxaiot_desk_buddy_lib::formal::project_repository::{
     CreateLocalProject, LocalProjectRepository, UpdateLocalProject,
 };
-use inxaiot_desk_buddy_lib::formal::secret_store::MemorySecretStore;
+use inxaiot_desk_buddy_lib::formal::secret_store::{MemorySecretStore, SecretStore};
 use inxaiot_desk_buddy_lib::infrastructure::local_sqlite::task_repository::{
     CreateTask, TaskRepository,
 };
@@ -34,6 +36,67 @@ fn update(name: &str, platform_url: &str, database_password: Option<&str>) -> Up
         db_password: database_password.map(str::to_string),
         business_db: "inxvision_iot_dev".into(),
         workbench_db: "inxaiot_desk_buddy".into(),
+    }
+}
+
+#[derive(Clone, Default)]
+struct FailableSecretStore {
+    values: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    fail_delete: Arc<AtomicBool>,
+}
+
+impl FailableSecretStore {
+    fn set_fail_delete(&self, value: bool) {
+        self.fail_delete.store(value, Ordering::SeqCst);
+    }
+
+    fn contains(&self, reference: &str) -> bool {
+        self.values
+            .lock()
+            .expect("secret values")
+            .contains_key(reference)
+    }
+
+    fn references(&self) -> Vec<String> {
+        let mut references = self
+            .values
+            .lock()
+            .expect("secret values")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        references.sort();
+        references
+    }
+}
+
+impl SecretStore for FailableSecretStore {
+    fn save(&self, reference: &str, secret: &[u8]) -> Result<(), FormalError> {
+        self.values
+            .lock()
+            .map_err(|_| FormalError::SecretStore("锁定测试凭据存储"))?
+            .insert(reference.into(), secret.to_vec());
+        Ok(())
+    }
+
+    fn load(&self, reference: &str) -> Result<Vec<u8>, FormalError> {
+        self.values
+            .lock()
+            .map_err(|_| FormalError::SecretStore("锁定测试凭据存储"))?
+            .get(reference)
+            .cloned()
+            .ok_or_else(|| FormalError::NotFound("测试凭据引用不存在".into()))
+    }
+
+    fn delete(&self, reference: &str) -> Result<(), FormalError> {
+        if self.fail_delete.load(Ordering::SeqCst) {
+            return Err(FormalError::SecretStore("注入测试凭据删除失败"));
+        }
+        self.values
+            .lock()
+            .map_err(|_| FormalError::SecretStore("锁定测试凭据存储"))?
+            .remove(reference);
+        Ok(())
     }
 }
 
@@ -186,6 +249,146 @@ async fn project_update_keeps_or_rotates_secret_and_invalidates_changed_platform
         .await
         .expect("clear session");
     assert!(repository.load_session(&project.id).await.is_err());
+    store.close().await;
+}
+
+#[tokio::test]
+async fn versioned_secrets_preserve_old_values_and_cleanup_failures_are_retried() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let store = LocalStore::open(temp.path().join("local.db"))
+        .await
+        .expect("local store");
+    let secrets = Arc::new(FailableSecretStore::default());
+    let repository = LocalProjectRepository::new(store.pool().clone(), secrets.clone());
+    let project = repository
+        .create(input("Compensated Project", "password-a"))
+        .await
+        .expect("create project");
+    let database_ref: String =
+        sqlx::query_scalar("SELECT db_password_secret_ref FROM local_project WHERE id = ?")
+            .bind(&project.id)
+            .fetch_one(store.pool())
+            .await
+            .expect("database secret ref");
+    assert!(database_ref.contains("/database-password/"));
+
+    repository
+        .save_session(&project.id, "user-a", "token-a", None)
+        .await
+        .expect("save first session");
+    let first_token_ref: String = sqlx::query_scalar(
+        "SELECT token_secret_ref FROM local_project_session WHERE local_project_id = ?",
+    )
+    .bind(&project.id)
+    .fetch_one(store.pool())
+    .await
+    .expect("first token ref");
+    assert!(first_token_ref.contains("/platform-access-token/"));
+
+    sqlx::query(
+        "CREATE TRIGGER fail_session_update BEFORE UPDATE ON local_project_session \
+         BEGIN SELECT RAISE(ABORT, 'SESSION_UPDATE_INJECTED'); END",
+    )
+    .execute(store.pool())
+    .await
+    .expect("create session failure trigger");
+    assert!(
+        repository
+            .save_session(&project.id, "user-b", "token-b", None)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        repository
+            .load_session(&project.id)
+            .await
+            .expect("old session remains")
+            .access_token,
+        "token-a"
+    );
+    assert_eq!(secrets.references().len(), 2);
+    assert!(secrets.contains(&database_ref));
+    assert!(secrets.contains(&first_token_ref));
+    sqlx::query("DROP TRIGGER fail_session_update")
+        .execute(store.pool())
+        .await
+        .expect("drop session failure trigger");
+
+    repository
+        .save_session(&project.id, "user-b", "token-b", None)
+        .await
+        .expect("replace session");
+    let second_token_ref: String = sqlx::query_scalar(
+        "SELECT token_secret_ref FROM local_project_session WHERE local_project_id = ?",
+    )
+    .bind(&project.id)
+    .fetch_one(store.pool())
+    .await
+    .expect("second token ref");
+    assert_ne!(first_token_ref, second_token_ref);
+    assert!(!secrets.contains(&first_token_ref));
+    assert!(secrets.contains(&second_token_ref));
+
+    sqlx::query(
+        "CREATE TRIGGER fail_project_update BEFORE UPDATE ON local_project \
+         WHEN NEW.name = 'FAIL' BEGIN SELECT RAISE(ABORT, 'PROJECT_UPDATE_INJECTED'); END",
+    )
+    .execute(store.pool())
+    .await
+    .expect("create project failure trigger");
+    assert!(
+        repository
+            .update(
+                &project.id,
+                update("FAIL", "http://platform.test:8055", Some("password-b")),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        repository
+            .connection_secrets(&project.id)
+            .await
+            .expect("old database password remains")
+            .db_password,
+        "password-a"
+    );
+    assert!(secrets.contains(&database_ref));
+    assert_eq!(secrets.references().len(), 2);
+    sqlx::query("DROP TRIGGER fail_project_update")
+        .execute(store.pool())
+        .await
+        .expect("drop project failure trigger");
+
+    secrets.set_fail_delete(true);
+    repository
+        .clear_session(&project.id)
+        .await
+        .expect("session row clears and failed secret delete is queued");
+    assert!(secrets.contains(&second_token_ref));
+    assert_eq!(
+        repository
+            .pending_secret_cleanup_count()
+            .await
+            .expect("pending cleanup count"),
+        1
+    );
+    secrets.set_fail_delete(false);
+    let report = repository
+        .retry_pending_secret_cleanup()
+        .await
+        .expect("retry secret cleanup");
+    assert_eq!(report.attempted, 1);
+    assert_eq!(report.deleted, 1);
+    assert_eq!(report.pending, 0);
+    assert!(!secrets.contains(&second_token_ref));
+    assert_eq!(
+        repository
+            .pending_secret_cleanup_count()
+            .await
+            .expect("cleanup drained"),
+        0
+    );
     store.close().await;
 }
 

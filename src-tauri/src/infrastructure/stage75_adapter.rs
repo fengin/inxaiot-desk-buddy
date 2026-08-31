@@ -73,7 +73,10 @@ impl<'a> Stage75Adapter<'a> {
     }
 
     fn release_master_keys(&self) -> ReleaseMasterKeyManager {
-        ReleaseMasterKeyManager::new(self.state.secret_store.clone())
+        ReleaseMasterKeyManager::with_local_registry(
+            self.state.secret_store.clone(),
+            self.state.local_store.pool().clone(),
+        )
     }
 
     async fn session_view(&self, project_id: &str) -> AppResult<ProjectSessionView> {

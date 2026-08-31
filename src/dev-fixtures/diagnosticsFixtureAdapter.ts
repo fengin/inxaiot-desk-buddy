@@ -16,7 +16,8 @@ export class FixtureDiagnosticsAdapter implements DiagnosticsAdapter {
       dataDirectory: "D:\\INX\\DeskBuddy-Fixture",
       applicationLogsDirectory: "fixture://logs",
       taskLogsDirectory: "fixture://task-logs",
-      taskArtifactsDirectory: "fixture://task-artifacts"
+      taskArtifactsDirectory: "fixture://task-artifacts",
+      pendingSecretCleanupCount: 0
     };
   }
 }

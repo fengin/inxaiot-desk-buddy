@@ -4,6 +4,8 @@ use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::core::error::AppError;
+
 pub type FormalResult<T> = Result<T, FormalError>;
 
 #[derive(Debug, Error)]
@@ -48,6 +50,20 @@ impl FormalError {
             message_key: message_key.into(),
             params,
             trace_id: Uuid::now_v7().to_string(),
+        }
+    }
+}
+
+impl From<FormalError> for AppError {
+    fn from(error: FormalError) -> Self {
+        match error {
+            FormalError::InvalidConfig(message) => Self::InvalidConfig(message),
+            FormalError::Conflict(message) => Self::Conflict(message),
+            FormalError::NotFound(message) => Self::NotFound(message),
+            FormalError::LocalDatabase(operation) => Self::Database { operation },
+            FormalError::SecretStore(operation) | FormalError::LocalIo(operation) => {
+                Self::Io { operation }
+            }
         }
     }
 }

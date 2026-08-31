@@ -69,6 +69,28 @@ fn formal_connection_specs_never_debug_secrets() {
 #[tokio::test]
 #[ignore = "requires authorized project databases"]
 async fn formal_dual_pool_and_schema_capabilities() {
+    async fn session_read_only(pool: &sqlx::MySqlPool) -> i64 {
+        match sqlx::query_scalar("SELECT @@session.transaction_read_only")
+            .fetch_one(pool)
+            .await
+        {
+            Ok(value) => value,
+            Err(error)
+                if error
+                    .as_database_error()
+                    .and_then(|item| item.code())
+                    .as_deref()
+                    == Some("HY000") =>
+            {
+                sqlx::query_scalar("SELECT @@session.tx_read_only")
+                    .fetch_one(pool)
+                    .await
+                    .expect("legacy session read-only flag")
+            }
+            Err(error) => panic!("session read-only flag: {error}"),
+        }
+    }
+
     let config = config();
     let pools = ProjectMySqlPools::connect(&config.mysql)
         .await
@@ -81,6 +103,10 @@ async fn formal_dual_pool_and_schema_capabilities() {
     assert!(!capabilities.connection_encrypted);
     assert!(capabilities.missing_platform_aio_columns.is_empty());
     assert!(capabilities.workbench_charset.is_some());
+    let platform_read_only = session_read_only(pools.platform()).await;
+    let workbench_read_only = session_read_only(pools.workbench()).await;
+    assert_eq!(platform_read_only, 1);
+    assert_eq!(workbench_read_only, 0);
     pools.close().await;
 }
 

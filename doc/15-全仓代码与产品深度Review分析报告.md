@@ -408,6 +408,8 @@ Vue Page
 - `aio_assets.rs`直接SQL，`deployment_service.rs`和`deployment_control.rs`直接创建Repository/SSH等具体实现。
 - 修复：以业务端口重构AIO资产、项目上下文和AIO执行Lifecycle；具体组合进入infrastructure/bootstrapping。
 
+整改结论（检查点`940566c`）：项目上下文、部署控制和具体部署服务物理迁入Infrastructure；AIO资产与Release文件入口新增Application Port和纯用例，Tauri Command作为组合根注入具体服务；AIO会话/版本/操作/平台问题等DTO及Release渲染DTO迁入Domain。Application目录对formal/infrastructure/sqlx直接依赖从45处降为0，`stage75d_contract`扫描全部Application源码阻止回退。57项库单测、全部集成测试及全Feature严格Clippy通过。
+
 ### P1-02 没有真正的全局节点并发上限
 
 - TaskQueue worker 4只限制任务数；每任务concurrency最大5，理论可同时20个SSH/SFTP目标。
@@ -653,6 +655,7 @@ Vue Page
 
 ### 12.3 已随P0关闭的P1问题
 
+- P1-01：具体服务物理归位Infrastructure，AIO/Release建立Application Port，Domain DTO独立，Application具体依赖归零。
 - P1-02全局节点并发：进程级远端节点Semaphore固定上限5，不再按4个Task worker各自放大。
 - P1-03资源上限：每条远端命令输出1MiB、单条任务日志64KiB、单任务日志32MiB。
 - P1-04/P1-05：所有SFTP部署上传启用SHA-256；覆盖采用可恢复备份切换；敏感staging清理失败不能返回成功。
@@ -673,11 +676,11 @@ Vue Page
 - 故障注入：真实双进程锁、本地最终化中途失败全回滚/重试、并发导入唯一约束、payload篡改、旧项目响应晚到、会话校验不可用fail-closed均通过。
 - 真实平台：只执行授权测试登录和Token只读菜单校验，未连接、未执行SQL、未修改平台业务库结构或数据。
 - 主密钥真实集成：仅在授权隔离工作台Schema写入`key-poc-*`唯一配置/审计，覆盖迁移、数据库密码解耦、轮换失败回滚、成功轮换和跨电脑导入，结束后按唯一键删除并复查总数为0；Windows Credential Manager唯一测试引用已删除。
-- 最近已验证默认Feature生产Release基于`6f82de8`，大小11929088字节，SHA-256为`BA96809AD7D0D53A64BD79A791EDDE0BB37AF88998622A78F7313C7E817EB6E1`；包含主密钥Command，无WebDriver/Fixture标记。依赖树不存在`rsa 0.10.0-rc.18`，`chacha20`为0.10.2。`1668896`、`33708a1`、`78bea8b`、`233b9cf`、`84a105b`及后续P1整改尚未重建Release，最终收口时统一重建并替换本条证据。
+- 最近已验证默认Feature生产Release基于`6f82de8`，大小11929088字节，SHA-256为`BA96809AD7D0D53A64BD79A791EDDE0BB37AF88998622A78F7313C7E817EB6E1`；包含主密钥Command，无WebDriver/Fixture标记。依赖树不存在`rsa 0.10.0-rc.18`，`chacha20`为0.10.2。`1668896`、`33708a1`、`78bea8b`、`233b9cf`、`84a105b`、`940566c`及后续P1整改尚未重建Release，最终收口时统一重建并替换本条证据。
 - 未执行真实SSH/Docker门禁：现有test/id_rsa为RSA 4096，已被新策略明确拒绝；不得为了复用旧门禁而绕过算法限制。
 
 ### 12.5 当前准入结论
 
 - 阶段7.5-D仍为“整改中”，阶段8继续暂停。
-- P0-13与P0-15代码根因已经关闭；下一真实环境前置条件是授权Ed25519/ECDSA测试密钥。后续代码整改转向P1-01应用层基础设施依赖等高优先级可维护性问题，不把它们伪装成已完成的真实门禁。
+- P0-13、P0-15代码根因和P1-01分层根因已经关闭；下一真实环境前置条件是授权Ed25519/ECDSA测试密钥。后续继续处理P1-19恢复/轮询等产品高优先级问题，不把代码门禁伪装成已完成的真实门禁。
 - 外部CI、安装包签名和产物上传需要用户明确指定可信基础设施与证书；未授权前只运行本地门禁。

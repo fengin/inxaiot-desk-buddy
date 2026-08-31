@@ -44,3 +44,18 @@ fn production_logs_do_not_emit_raw_errors_or_untrusted_response_text() {
         violations.join("；")
     );
 }
+
+#[test]
+fn ssh_dependency_contract_disables_rsa_and_rejects_yanked_chacha20() {
+    let manifest = include_str!("../Cargo.toml");
+    assert!(manifest.contains(
+        "russh = { version = \"0.63.1\", default-features = false, features = [\"aws-lc-rs\", \"flate2\"] }"
+    ));
+    let lock = include_str!("../Cargo.lock");
+    let chacha = lock
+        .split("[[package]]")
+        .find(|package| package.contains("name = \"chacha20\""))
+        .expect("chacha20 lock entry");
+    assert!(chacha.contains("version = \"0.10.2\""));
+    assert!(!lock.contains("version = \"0.10.0-rc.18\""));
+}

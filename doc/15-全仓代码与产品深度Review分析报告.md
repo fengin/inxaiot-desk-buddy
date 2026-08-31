@@ -464,6 +464,8 @@ Vue Page
 - 删除和旧凭据清理均忽略SecretStore删除失败。
 - 修复：版本化ref、commit后切换、失败补偿表和孤儿凭据GC。
 
+整改结论（检查点`1668896`）：数据库密码与平台Token改为UUID版本化引用；创建、项目更新和会话upsert发生错误时读取SQLite当前引用判定是否已提交，仅清理未引用新值。旧密码/Token、项目删除以及主密钥轮换/回滚删除失败统一写入`local_secret_cleanup`，启动幂等重试；`local_project_master_key`登记所有生产主密钥版本，项目删除前读取并精确清理。About显示待清理数量。SQLite Trigger与可失败SecretStore测试证明旧Token/密码保留、新值无孤儿、Outbox从1归零。
+
 ### P1-11 导入预览缺少数据库唯一打开约束
 
 - “一个项目一个preview”依靠先查再插，双请求可同时创建。
@@ -647,6 +649,7 @@ Vue Page
 - P1-03资源上限：每条远端命令输出1MiB、单条任务日志64KiB、单任务日志32MiB。
 - P1-04/P1-05：所有SFTP部署上传启用SHA-256；覆盖采用可恢复备份切换；敏感staging清理失败不能返回成功。
 - P1-07：非JSON模板变量含CR/LF/NUL立即拒绝。
+- P1-10：密码/Token版本化引用、主密钥本地登记、SecretStore清理Outbox、启动重试和About待清理诊断通过故障注入。
 - P1-11：SQLite部分唯一索引确保每项目只有一个开放导入预览，并发测试通过。
 - P1-13/P1-16/P1-17/P1-18：本地Schema读取实际迁移版本；服务正常要求15分钟内真实观测；系统对话框统一Adapter；四类Store完成项目/请求代次隔离。
 - P1-20：本地scripts/quality-gate.ps1已建立；外部GitHub CI未获授权，不视为关闭。
@@ -654,11 +657,11 @@ Vue Page
 ### 12.4 本轮门禁证据
 
 - 前端：typecheck、严格Lint、17个测试文件34项测试、生产构建通过；新增Real Adapter三项主密钥Command、系统保存对话框、Store版本操作和缺钥界面恢复契约。
-- Rust：cargo fmt --check、全目标全Feature严格Clippy通过；默认Feature全部非忽略单元/集成测试通过（库单测53项）；新增SSH依赖和原始日志静态契约3项通过。
+- Rust：cargo fmt --check、全目标全Feature严格Clippy通过；默认Feature全部非忽略单元/集成测试通过（库单测54项）；新增SSH依赖/原始日志契约及SecretStore补偿故障注入通过。
 - 故障注入：真实双进程锁、本地最终化中途失败全回滚/重试、并发导入唯一约束、payload篡改、旧项目响应晚到、会话校验不可用fail-closed均通过。
 - 真实平台：只执行授权测试登录和Token只读菜单校验，未连接、未执行SQL、未修改平台业务库结构或数据。
 - 主密钥真实集成：仅在授权隔离工作台Schema写入`key-poc-*`唯一配置/审计，覆盖迁移、数据库密码解耦、轮换失败回滚、成功轮换和跨电脑导入，结束后按唯一键删除并复查总数为0；Windows Credential Manager唯一测试引用已删除。
-- 默认Feature生产Release基于`6f82de8`，大小11929088字节，SHA-256为`BA96809AD7D0D53A64BD79A791EDDE0BB37AF88998622A78F7313C7E817EB6E1`；包含主密钥Command，无WebDriver/Fixture标记。依赖树不存在`rsa 0.10.0-rc.18`，`chacha20`为0.10.2。
+- 最近已验证默认Feature生产Release基于`6f82de8`，大小11929088字节，SHA-256为`BA96809AD7D0D53A64BD79A791EDDE0BB37AF88998622A78F7313C7E817EB6E1`；包含主密钥Command，无WebDriver/Fixture标记。依赖树不存在`rsa 0.10.0-rc.18`，`chacha20`为0.10.2。`1668896`及后续P1整改尚未重建Release，最终收口时统一重建并替换本条证据。
 - 未执行真实SSH/Docker门禁：现有test/id_rsa为RSA 4096，已被新策略明确拒绝；不得为了复用旧门禁而绕过算法限制。
 
 ### 12.5 当前准入结论

@@ -9,12 +9,6 @@ describe("deployment workflow store", () => {
 
   it("loads fixture task and history only through adapter contracts", async () => {
     const adapter = useOperationsAdapter();
-    const fixture = adapter.startFixtureTask(
-      "full_upgrade",
-      "fixture-project",
-      ["001122334455"],
-      "Release fixture"
-    );
     const store = useDeploymentWorkflowStore();
     const preflight = await store.runPreflight("fixture-project", {
       mode: "full_upgrade",
@@ -34,7 +28,7 @@ describe("deployment workflow store", () => {
     expect(submission.taskId).toContain("fixture-task-");
     expect(store.currentTask?.id).toBe(submission.taskId);
 
-    await store.loadTask("fixture-project", fixture.id);
+    await store.loadTask("fixture-project", submission.taskId);
     expect(store.currentTask?.successCount).toBe(1);
     expect(store.currentTask?.targets[0]?.state).toBe("succeeded");
 

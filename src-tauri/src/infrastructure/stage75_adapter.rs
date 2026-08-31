@@ -152,6 +152,20 @@ impl<'a> Stage75Adapter<'a> {
         }
     }
 
+    async fn ensure_project_mutable(&self, project_id: &str) -> AppResult<()> {
+        if self
+            .state
+            .task_repository
+            .has_active_for_project(project_id)
+            .await?
+        {
+            return Err(AppError::Conflict(
+                "项目存在活动任务，任务进入终态前不能编辑或删除".into(),
+            ));
+        }
+        Ok(())
+    }
+
     async fn pools_and_schema(
         &self,
         project_id: &str,
@@ -280,6 +294,7 @@ impl ProjectManagementPort for Stage75Adapter<'_> {
         project_id: &str,
         input: ProjectInput,
     ) -> AppResult<ProjectOverview> {
+        self.ensure_project_mutable(project_id).await?;
         self.register_secrets(input.db_password.clone());
         self.close_runtime_if_open(project_id).await;
         let record = self
@@ -303,6 +318,7 @@ impl ProjectManagementPort for Stage75Adapter<'_> {
     }
 
     async fn delete_project(&self, project_id: &str) -> AppResult<()> {
+        self.ensure_project_mutable(project_id).await?;
         self.close_runtime_if_open(project_id).await;
         self.projects()
             .delete(project_id)

@@ -53,18 +53,6 @@ pub struct LaunchDeploymentInput {
     pub plan: DeploymentPlanInput,
 }
 
-pub async fn launch_deployment(
-    state: &FormalAppState,
-    local_project_id: &str,
-    input: LaunchDeploymentInput,
-) -> AppResult<DeploymentExecutionSummary> {
-    let local_task_id = uuid::Uuid::now_v7().to_string();
-    let result =
-        launch_deployment_inner(state, local_project_id, &local_task_id, input, None).await;
-    state.job_supervisor.finish(&local_task_id).await;
-    result
-}
-
 pub fn prepare_launch_input(
     mut input: LaunchDeploymentInput,
 ) -> AppResult<(LaunchDeploymentInput, DeploymentPlan)> {

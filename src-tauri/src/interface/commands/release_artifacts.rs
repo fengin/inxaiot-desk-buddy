@@ -5,7 +5,6 @@ use crate::application::release_artifacts::{
 };
 use crate::domain::aio::deployment::{DeploymentPlan, DeploymentPlanInput};
 use crate::domain::aio::release::ReleaseValidation;
-use crate::formal::app_state::FormalAppState;
 use crate::infrastructure::release_template::{ReleaseRenderContext, RenderedReleaseFiles};
 use crate::interface::error::CommandErrorDto;
 
@@ -57,18 +56,3 @@ pub async fn build_deployment_plan(
 ) -> Result<DeploymentPlan, CommandErrorDto> {
     build_plan(input).map_err(CommandErrorDto::from)
 }
-
-#[tauri::command]
-pub async fn execute_deployment(
-    state: State<'_, FormalAppState>,
-    local_project_id: String,
-    input: LaunchDeploymentInput,
-) -> Result<DeploymentExecutionSummary, CommandErrorDto> {
-    launch_deployment(&state, &local_project_id, input)
-        .await
-        .map_err(CommandErrorDto::from)
-}
-use tauri::State;
-
-use crate::application::deployment_executor::DeploymentExecutionSummary;
-use crate::application::deployment_service::{LaunchDeploymentInput, launch_deployment};

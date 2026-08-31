@@ -1,8 +1,7 @@
-import type { DemoTask, OperationHistoryItem, OperationMode } from "@/shared/model/demo";
+import type { OperationMode } from "@/shared/model/demo";
 import type {
   DeploymentPreflightReport,
   DeploymentTaskSubmission,
-  DeploymentExecutionSummary,
   DeploymentPlanInput,
   ReleaseValidation,
   ServiceImageInspection
@@ -24,12 +23,9 @@ export interface OperationsAdapter {
   inspectArtifact(mode: OperationMode, path: string): Promise<ArtifactInspection>;
   preflight(projectId: string, plan: DeploymentPlanInput): Promise<DeploymentPreflightReport>;
   submit(projectId: string, plan: DeploymentPlanInput): Promise<DeploymentTaskSubmission>;
-  execute(projectId: string, plan: DeploymentPlanInput): Promise<DeploymentExecutionSummary>;
   getTask(projectId: string, taskId: string): Promise<DeploymentTaskView>;
   listHistory(projectId: string, query: OperationHistoryQuery): Promise<OperationHistoryPage>;
   getHistoryDetail(projectId: string, operationId: string): Promise<OperationHistoryDetail>;
-  initialHistory(): OperationHistoryItem[];
-  startFixtureTask(mode: OperationMode, projectId: string, targetMacs: string[], artifact: string): DemoTask;
 }
 
 let adapter: OperationsAdapter | undefined;

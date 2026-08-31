@@ -23,6 +23,7 @@ use crate::infrastructure::data_directory::DataDirectoryManager;
 use crate::infrastructure::local_sqlite::task_repository::TaskRepository;
 use crate::infrastructure::logging::redactor::SensitiveValueRedactor;
 use crate::infrastructure::logging::task_event_pipeline::TaskEventPipeline;
+use crate::infrastructure::process_lock::DataDirectoryProcessLock;
 use crate::infrastructure::task_data_lifecycle::TaskDataLifecycle;
 use crate::infrastructure::task_handlers::register_production_task_handlers;
 use crate::infrastructure::task_runtime::{prepare_shutdown_tasks, reconcile_shutdown_outcomes};
@@ -52,8 +53,7 @@ use crate::interface::commands::project_management::{
     switch_project, test_project_connection, update_local_project, validate_release_profile,
 };
 use crate::interface::commands::release_artifacts::{
-    build_deployment_plan, execute_deployment, inspect_service_image, render_release_preview,
-    validate_release_package,
+    build_deployment_plan, inspect_service_image, render_release_preview, validate_release_package,
 };
 use crate::interface::commands::task_activity::{
     cancel_local_task, list_local_tasks, list_task_logs,
@@ -99,6 +99,8 @@ pub fn run() {
                 DataDirectoryManager::resolve(app.path().app_data_dir()?)?;
             let paths = AppPaths::from_data_dir(data_directory)?;
             paths.ensure()?;
+            let data_directory_process_lock =
+                DataDirectoryProcessLock::acquire(&paths.process_lock)?;
             verify_embedded_agent()?;
             let logging_guard = init_file_logging(&paths.logs_dir)?;
             let task_event_bus = TaskEventBus::new(512)?;
@@ -159,6 +161,7 @@ pub fn run() {
             });
             app.manage(state);
             app.manage(data_directory_manager);
+            app.manage(data_directory_process_lock);
             app.manage(ExitConfirmationState::default());
             app.manage(Mutex::new(logging_guard));
             Ok(())
@@ -194,7 +197,6 @@ pub fn run() {
             inspect_service_image,
             render_release_preview,
             build_deployment_plan,
-            execute_deployment,
             preflight_deployment,
             submit_deployment,
             get_deployment_task,
@@ -209,8 +211,14 @@ pub fn run() {
             schedule_data_directory_rollback,
             get_system_diagnostics
         ])
-        .build(tauri::generate_context!())
-        .expect("failed to build INX implementation workbench");
+        .build(tauri::generate_context!());
+    let application = match application {
+        Ok(application) => application,
+        Err(error) => {
+            show_startup_error(&format!("工作台启动失败：{error}"));
+            return;
+        }
+    };
     application.run(|app_handle, event| match event {
         tauri::RunEvent::ExitRequested { api, .. } => {
             let confirmation = app_handle.state::<ExitConfirmationState>();
@@ -248,4 +256,31 @@ pub fn run() {
         }
         _ => {}
     });
+}
+
+#[cfg(windows)]
+fn show_startup_error(message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+
+    let title = "INX 实施工作台"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let message = message
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            message.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn show_startup_error(message: &str) {
+    eprintln!("{message}");
 }

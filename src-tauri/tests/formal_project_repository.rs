@@ -1,10 +1,15 @@
 use std::sync::Arc;
 
+use inxaiot_desk_buddy_lib::domain::common::task::TaskState;
+use inxaiot_desk_buddy_lib::formal::error::FormalError;
 use inxaiot_desk_buddy_lib::formal::local_store::LocalStore;
 use inxaiot_desk_buddy_lib::formal::project_repository::{
     CreateLocalProject, LocalProjectRepository, UpdateLocalProject,
 };
 use inxaiot_desk_buddy_lib::formal::secret_store::MemorySecretStore;
+use inxaiot_desk_buddy_lib::infrastructure::local_sqlite::task_repository::{
+    CreateTask, TaskRepository,
+};
 
 fn input(name: &str, database_password: &str) -> CreateLocalProject {
     CreateLocalProject {
@@ -181,5 +186,90 @@ async fn project_update_keeps_or_rotates_secret_and_invalidates_changed_platform
         .await
         .expect("clear session");
     assert!(repository.load_session(&project.id).await.is_err());
+    store.close().await;
+}
+
+#[tokio::test]
+async fn active_task_blocks_project_update_and_delete_at_the_sqlite_boundary() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let store = LocalStore::open(temp.path().join("local.db"))
+        .await
+        .expect("local store");
+    let repository =
+        LocalProjectRepository::new(store.pool().clone(), Arc::new(MemorySecretStore::default()));
+    let project = repository
+        .create(input("Protected Project", "password-a"))
+        .await
+        .expect("create project");
+    let tasks = TaskRepository::new(store.pool().clone());
+    tasks
+        .create(CreateTask {
+            id: "active-project-task".into(),
+            local_project_id: project.id.clone(),
+            remote_operation_record_id: None,
+            domain_type: "aio".into(),
+            operation_type: "full_upgrade".into(),
+            name: "Protected deployment".into(),
+            priority: 0,
+            batch_size: 1,
+            concurrency: 1,
+            payload_ref: Some("payload".into()),
+            log_path: "task.jsonl".into(),
+            targets: vec![("aio".into(), "001122334455".into())],
+        })
+        .await
+        .expect("create task");
+    for (expected, next) in [
+        (TaskState::Draft, TaskState::Checking),
+        (TaskState::Checking, TaskState::Ready),
+        (TaskState::Ready, TaskState::Queued),
+    ] {
+        tasks
+            .transition("active-project-task", expected, next, None, None)
+            .await
+            .expect("advance task");
+    }
+
+    assert!(
+        tasks
+            .has_active_for_project(&project.id)
+            .await
+            .expect("active project query")
+    );
+    assert!(matches!(
+        repository
+            .update(
+                &project.id,
+                update("Changed", "http://platform.test:8055", None)
+            )
+            .await,
+        Err(FormalError::Conflict(_))
+    ));
+    assert!(matches!(
+        repository.delete(&project.id).await,
+        Err(FormalError::Conflict(_))
+    ));
+    assert!(repository.get(&project.id).await.is_ok());
+
+    tasks
+        .transition(
+            "active-project-task",
+            TaskState::Queued,
+            TaskState::Cancelled,
+            None,
+            Some("test completed"),
+        )
+        .await
+        .expect("finish task");
+    assert!(
+        !tasks
+            .has_active_for_project(&project.id)
+            .await
+            .expect("terminal project query")
+    );
+    repository
+        .delete(&project.id)
+        .await
+        .expect("delete terminal project");
     store.close().await;
 }

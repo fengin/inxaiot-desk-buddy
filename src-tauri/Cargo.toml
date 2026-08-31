@@ -48,6 +48,9 @@ uuid = { version = "1.25.0", features = ["serde", "v7"] }
 walkdir = "2"
 zeroize = "1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }
+
 [profile.release]
 codegen-units = 1
 lto = true

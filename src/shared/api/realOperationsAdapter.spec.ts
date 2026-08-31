@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
@@ -49,5 +51,13 @@ describe("RealOperationsAdapter Tauri Command 契约", () => {
       localProjectId: "project-1",
       operationId: "operation-1"
     });
+  });
+
+  it("exposes only the queued deployment path and keeps the legacy execute IPC absent", () => {
+    expect("execute" in adapter).toBe(false);
+    const rustEntry = readFileSync(join(process.cwd(), "src-tauri/src/lib.rs"), "utf8");
+    const releaseApi = readFileSync(join(process.cwd(), "src/shared/api/release.ts"), "utf8");
+    expect(rustEntry).not.toContain("execute_deployment,");
+    expect(releaseApi).not.toContain('"execute_deployment"');
   });
 });

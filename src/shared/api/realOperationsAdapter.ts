@@ -1,5 +1,4 @@
 import {
-  executeDeployment,
   inspectServiceImage,
   validateReleasePackage
 } from "@/shared/api/release";
@@ -26,9 +25,6 @@ export class RealOperationsAdapter implements OperationsAdapter {
   submit(projectId: string, plan: Parameters<OperationsAdapter["submit"]>[1]) {
     return submitDeployment(projectId, plan);
   }
-  execute(projectId: string, plan: Parameters<OperationsAdapter["execute"]>[1]) {
-    return executeDeployment(projectId, plan);
-  }
   getTask(projectId: string, taskId: string) {
     return getDeploymentTask(projectId, taskId);
   }
@@ -38,6 +34,4 @@ export class RealOperationsAdapter implements OperationsAdapter {
   getHistoryDetail(projectId: string, operationId: string) {
     return getOperationHistoryDetail(projectId, operationId);
   }
-  initialHistory() { return []; }
-  startFixtureTask(): never { throw new Error("Tauri Real Adapter 不允许启动 Fixture 任务"); }
 }

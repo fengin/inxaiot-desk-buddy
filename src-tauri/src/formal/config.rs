@@ -12,6 +12,7 @@ pub struct AppPaths {
     pub task_logs_dir: PathBuf,
     pub task_artifacts_dir: PathBuf,
     pub runtime_agent_dir: PathBuf,
+    pub process_lock: PathBuf,
 }
 
 impl AppPaths {
@@ -29,6 +30,7 @@ impl AppPaths {
             task_logs_dir: data_dir.join("task-logs"),
             task_artifacts_dir: data_dir.join("task-artifacts"),
             runtime_agent_dir: data_dir.join("runtime/agent"),
+            process_lock: data_dir.join(".inxaiot-desk-buddy.lock"),
             data_dir,
         })
     }

@@ -8,6 +8,8 @@ use uuid::Uuid;
 use super::error::{FormalError, FormalResult};
 use super::secret_store::SecretStore;
 
+const ACTIVE_PROJECT_TASK_CONSTRAINT: &str = "ACTIVE_PROJECT_TASK";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateLocalProject {
@@ -230,8 +232,11 @@ impl LocalProjectRepository {
                 if let Some(secret_ref) = &new_secret_ref {
                     let _ = self.secrets.delete(secret_ref);
                 }
-                tracing::error!(error = ?error, "update local project failed");
-                return Err(FormalError::LocalDatabase("编辑本地项目入口"));
+                return Err(map_project_mutation_error(
+                    error,
+                    "编辑本地项目入口",
+                    "update local project failed",
+                ));
             }
         };
         if result.rows_affected() != 1 {
@@ -440,13 +445,28 @@ impl LocalProjectRepository {
             .execute(&self.pool)
             .await
             .map_err(|error| {
-                tracing::error!(error = ?error, "delete local project failed");
-                FormalError::LocalDatabase("删除本地项目入口")
+                map_project_mutation_error(error, "删除本地项目入口", "delete local project failed")
             })?;
         let _ = self.secrets.delete(&password_ref);
         let _ = self.secrets.delete(&token_ref);
         Ok(())
     }
+}
+
+fn map_project_mutation_error(
+    error: sqlx::Error,
+    operation: &'static str,
+    log_message: &'static str,
+) -> FormalError {
+    if error.as_database_error().is_some_and(|database_error| {
+        database_error
+            .message()
+            .contains(ACTIVE_PROJECT_TASK_CONSTRAINT)
+    }) {
+        return FormalError::Conflict("项目存在活动任务，任务进入终态前不能编辑或删除".into());
+    }
+    tracing::error!(error = ?error, operation = log_message, "project mutation failed");
+    FormalError::LocalDatabase(operation)
 }
 
 fn map_project(row: sqlx::sqlite::SqliteRow) -> FormalResult<LocalProjectRecord> {

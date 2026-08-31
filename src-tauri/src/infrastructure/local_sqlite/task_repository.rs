@@ -120,6 +120,22 @@ impl TaskRepository {
         Ok(counts)
     }
 
+    pub async fn has_active_for_project(&self, local_project_id: &str) -> AppResult<bool> {
+        if local_project_id.trim().is_empty() {
+            return Err(AppError::InvalidConfig("项目ID不能为空".into()));
+        }
+        let active = sqlx::query_scalar::<_, i64>(concat!(
+            "SELECT COUNT(*) FROM local_task WHERE local_project_id = ? AND state IN ",
+            "('draft', 'checking', 'ready', 'queued', 'running', 'cancelling', ",
+            "'finalizing_failed')"
+        ))
+        .bind(local_project_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| AppError::database("检查项目活动任务", &error))?;
+        Ok(active > 0)
+    }
+
     pub async fn list_active(&self) -> AppResult<Vec<TaskRecord>> {
         let rows = sqlx::query(concat!(
             "SELECT id, local_project_id, remote_operation_record_id, domain_type, operation_type, ",

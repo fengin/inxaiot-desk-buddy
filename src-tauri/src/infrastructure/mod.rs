@@ -10,6 +10,7 @@ pub mod local_sqlite;
 pub mod logging;
 pub mod platform_aio;
 pub mod platform_auth;
+pub mod process_lock;
 pub mod release_archive;
 pub mod release_template;
 pub mod remote;

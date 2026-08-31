@@ -68,7 +68,6 @@ export class FixtureOperationsAdapter implements OperationsAdapter {
       submittedAt: task.updatedAt
     };
   }
-  async execute() { return { targets: [], successCount: 0, failureCount: 0, cancelledCount: 0 }; }
   async getTask(_projectId: string, taskId: string) {
     const task = this.tasks.get(taskId);
     if (!task) throw new Error("Fixture任务不存在：" + taskId);
@@ -105,8 +104,7 @@ export class FixtureOperationsAdapter implements OperationsAdapter {
     if (!operation) throw new Error("Fixture操作不存在：" + operationId);
     return { operation, targets: [] };
   }
-  initialHistory() { return structuredClone(demoHistory); }
-  startFixtureTask(mode: OperationMode, projectId: string, targetMacs: string[], artifact: string): DemoTask {
+  private startFixtureTask(mode: OperationMode, projectId: string, targetMacs: string[], artifact: string): DemoTask {
     const task: DemoTask = {
       id: `fixture-task-${Date.now()}`,
       projectId,

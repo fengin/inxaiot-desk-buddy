@@ -11,13 +11,12 @@ use inxaiot_desk_buddy_lib::domain::aio::release::{
     ReleaseImage, ReleaseManifest, ReleaseTemplates, inspect_image_archive,
     inspect_release_directory,
 };
+use inxaiot_desk_buddy_lib::domain::aio::release_render::ReleaseRenderContext;
 use inxaiot_desk_buddy_lib::infrastructure::deployment_remote::{
     RemoteDeploymentConfig, RemoteDeploymentFiles, execute_connected_deployment,
 };
 use inxaiot_desk_buddy_lib::infrastructure::release_archive::create_release_tar;
-use inxaiot_desk_buddy_lib::infrastructure::release_template::{
-    ReleaseRenderContext, render_release_templates,
-};
+use inxaiot_desk_buddy_lib::infrastructure::release_template::render_release_templates;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 

@@ -6,7 +6,6 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use time::OffsetDateTime;
 
-use crate::application::aio_assets::application_instance_id;
 use crate::application::ports::project_access::ProjectAccessPort;
 use crate::application::ports::project_management::{
     HostKeyManagementPort, ProjectManagementPort, ReleaseProfileManagementPort,
@@ -41,6 +40,7 @@ use crate::formal::release_profile_repository::{
 };
 use crate::formal::runtime_registry::ConnectionHealth;
 use crate::formal::workbench_store::{WorkbenchSchemaStatus, WorkbenchStore};
+use crate::infrastructure::aio_assets_service::application_instance_id;
 use crate::infrastructure::database::{DatabaseTlsMode, DualMySqlPools, MySqlProjectConfig};
 use crate::infrastructure::local_sqlite::host_key_repository::{HostKeyRecord, HostKeyRepository};
 use crate::infrastructure::remote::{RusshConnector, validate_private_key_algorithm};

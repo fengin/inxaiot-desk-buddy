@@ -1,33 +1,12 @@
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::core::error::{AppError, AppResult};
+use crate::domain::aio::assets::{AioImportSession, ImportSelection};
 use crate::domain::aio::inventory::{ImportCounts, ReconciledImportItem};
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AioImportSession {
-    pub id: String,
-    pub local_project_id: String,
-    pub file_name: String,
-    pub file_path: String,
-    pub state: String,
-    pub counts: ImportCounts,
-    pub created_at: String,
-    pub updated_at: String,
-    pub items: Vec<ReconciledImportItem>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportSelection {
-    pub row_number: u32,
-    pub selected: bool,
-}
 
 #[derive(Clone)]
 pub struct AioImportRepository {
@@ -316,7 +295,8 @@ mod tests {
     };
     use crate::formal::local_store::LocalStore;
 
-    use super::{AioImportRepository, ImportSelection};
+    use super::AioImportRepository;
+    use crate::domain::aio::assets::ImportSelection;
 
     async fn setup() -> (tempfile::TempDir, LocalStore, AioImportRepository) {
         let directory = tempdir().expect("temp dir");

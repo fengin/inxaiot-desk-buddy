@@ -6,7 +6,6 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::application::deployment_executor::{DeploymentExecutionSummary, DeploymentTargetState};
-use crate::application::project_context::{map_formal_error, project_database};
 use crate::core::error::{AppError, AppResult};
 use crate::domain::aio::deployment::{DeploymentMode, DeploymentPlan};
 use crate::domain::common::task::{StepState, TargetState, TaskRecord, TaskState};
@@ -23,6 +22,7 @@ use crate::infrastructure::deployment_finalization::{
 use crate::infrastructure::local_sqlite::task_repository::{
     CreateTask, TargetUpdate, TaskStepWrite,
 };
+use crate::infrastructure::project_context::{map_formal_error, project_database};
 
 #[derive(Clone)]
 pub struct DeploymentControlHandle {

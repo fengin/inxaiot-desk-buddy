@@ -1,8 +1,6 @@
-use crate::application::aio_assets::project_operator;
 use crate::application::ports::deployment_workflow::{
     DeploymentTaskQueryPort, OperationHistoryQueryPort,
 };
-use crate::application::project_context::{map_formal_error, project_database};
 use crate::core::error::{AppError, AppResult};
 use crate::domain::aio::deployment_workflow::{
     DeploymentTaskStepView, DeploymentTaskTargetView, DeploymentTaskView, OperationHistoryDetail,
@@ -13,6 +11,8 @@ use crate::formal::app_state::FormalAppState;
 use crate::formal::operation_repository::{
     OperationHistoryRecord, OperationHistoryTargetRecord, OperationRepository,
 };
+use crate::infrastructure::aio_assets_service::project_operator;
+use crate::infrastructure::project_context::{map_formal_error, project_database};
 
 pub struct Stage75BQueryAdapter<'a> {
     state: &'a FormalAppState,

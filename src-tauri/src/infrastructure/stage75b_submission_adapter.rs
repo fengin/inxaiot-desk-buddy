@@ -1,5 +1,3 @@
-use crate::application::deployment_control::create_deployment_task_with_payload;
-use crate::application::deployment_service::LaunchDeploymentInput;
 use crate::application::ports::deployment_workflow::{
     DeploymentPreflightPort, DeploymentSubmissionPort,
 };
@@ -8,6 +6,8 @@ use crate::domain::aio::deployment::DeploymentPlanInput;
 use crate::domain::aio::deployment_workflow::DeploymentTaskSubmission;
 use crate::domain::common::task::{TargetState, TaskState};
 use crate::formal::app_state::FormalAppState;
+use crate::infrastructure::deployment_control::create_deployment_task_with_payload;
+use crate::infrastructure::deployment_service::LaunchDeploymentInput;
 use crate::infrastructure::local_sqlite::task_repository::TargetUpdate;
 use crate::infrastructure::stage75b_preflight_adapter::Stage75BPreflightAdapter;
 use crate::infrastructure::task_data_lifecycle::TaskDataLifecycle;
@@ -67,7 +67,7 @@ impl DeploymentSubmissionPort for Stage75BSubmissionAdapter<'_> {
             .state
             .paths
             .project_task_dir(project_id, &task_id)
-            .map_err(crate::application::project_context::map_formal_error)?;
+            .map_err(crate::infrastructure::project_context::map_formal_error)?;
         std::fs::create_dir_all(&task_dir)
             .map_err(|error| AppError::io("创建排队任务目录", &error))?;
         let payload_path = task_dir.join(deployment_payload_file());

@@ -8,11 +8,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use walkdir::WalkDir;
 
-use crate::application::aio_assets::{application_instance_id, project_operator};
-use crate::application::deployment_control::{
-    finalize_deployment_control, mark_deployment_finalizing_failed, mark_deployment_interrupted,
-    start_deployment_control, start_deployment_heartbeat,
-};
 use crate::application::deployment_executor::{
     DeploymentExecutionSummary, execute_deployment_targets,
 };
@@ -23,7 +18,6 @@ use crate::application::ports::deployment_progress::{
 use crate::application::ports::remote_session::{
     HostKeyIdentity, HostKeyPolicy, RemoteAuth, RemoteTarget,
 };
-use crate::application::project_context::{map_formal_error, project_database};
 use crate::core::error::{AppError, AppResult};
 use crate::core::secret::SecretValue;
 use crate::domain::aio::deployment::{DeploymentMode, DeploymentPlan, DeploymentPlanInput};
@@ -34,6 +28,7 @@ use crate::domain::aio::mac::MacAddress;
 use crate::domain::aio::release::{
     ReleaseManifest, inspect_image_archive, inspect_release_directory, sha256_file,
 };
+use crate::domain::aio::release_render::ReleaseRenderContext;
 use crate::domain::common::task::{StepState, TargetState, TaskEventLevel};
 use crate::formal::app_state::FormalAppState;
 use crate::formal::project_repository::LocalProjectRepository;
@@ -42,7 +37,12 @@ use crate::formal::release_profile_repository::{ReleaseProfileRecord, ReleasePro
 use crate::formal::resource_lease_repository::ResourceLeaseRepository;
 use crate::formal::runtime_registry::ConnectionHealth;
 use crate::infrastructure::agent_asset::AGENT_SOURCE;
+use crate::infrastructure::aio_assets_service::{application_instance_id, project_operator};
 use crate::infrastructure::database::DualMySqlPools;
+use crate::infrastructure::deployment_control::{
+    finalize_deployment_control, mark_deployment_finalizing_failed, mark_deployment_interrupted,
+    start_deployment_control, start_deployment_heartbeat,
+};
 use crate::infrastructure::deployment_progress::TaskProgressGuard;
 use crate::infrastructure::deployment_progress::TaskProgressReporter;
 use crate::infrastructure::deployment_remote::{
@@ -50,8 +50,9 @@ use crate::infrastructure::deployment_remote::{
     execute_remote_deployment_observed_with_checkpoint,
 };
 use crate::infrastructure::device_api::{AioRegistrationPayload, DeviceApiClient};
+use crate::infrastructure::project_context::{map_formal_error, project_database};
 use crate::infrastructure::release_archive::create_release_tar;
-use crate::infrastructure::release_template::{ReleaseRenderContext, render_release_templates};
+use crate::infrastructure::release_template::render_release_templates;
 use crate::infrastructure::remote::RusshConnector;
 
 const GLOBAL_REMOTE_NODE_CONCURRENCY: usize = 5;
@@ -446,9 +447,9 @@ struct AioExecutionLifecycle<'a> {
 }
 
 impl ExecutionLifecyclePort for AioExecutionLifecycle<'_> {
-    type Handle = crate::application::deployment_control::DeploymentControlHandle;
+    type Handle = crate::infrastructure::deployment_control::DeploymentControlHandle;
     type Summary = DeploymentExecutionSummary;
-    type Heartbeat = crate::application::deployment_control::DeploymentHeartbeatGuard;
+    type Heartbeat = crate::infrastructure::deployment_control::DeploymentHeartbeatGuard;
 
     async fn start(&self) -> AppResult<Self::Handle> {
         start_deployment_control(
@@ -566,7 +567,7 @@ async fn execute_prepared_targets(
     plan: DeploymentPlan,
     workbench_pool: sqlx::MySqlPool,
     prepared: HashMap<String, PreparedNode>,
-    handle: &crate::application::deployment_control::DeploymentControlHandle,
+    handle: &crate::infrastructure::deployment_control::DeploymentControlHandle,
     cancellation: tokio_util::sync::CancellationToken,
     progress_sink: Arc<TaskProgressReporter>,
 ) -> AppResult<DeploymentExecutionSummary> {

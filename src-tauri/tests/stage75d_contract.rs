@@ -59,3 +59,31 @@ fn ssh_dependency_contract_disables_rsa_and_rejects_yanked_chacha20() {
     assert!(chacha.contains("version = \"0.10.2\""));
     assert!(!lock.contains("version = \"0.10.0-rc.18\""));
 }
+
+#[test]
+fn application_layer_has_no_concrete_infrastructure_or_sql_dependencies() {
+    let application_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("application");
+    let forbidden = ["crate::formal::", "crate::infrastructure::", "sqlx::"];
+    let mut violations = Vec::new();
+    for entry in walkdir::WalkDir::new(application_root) {
+        let entry = entry.expect("walk application source");
+        if !entry.file_type().is_file()
+            || entry.path().extension().and_then(|value| value.to_str()) != Some("rs")
+        {
+            continue;
+        }
+        let source = std::fs::read_to_string(entry.path()).expect("read application source");
+        for pattern in forbidden {
+            if source.contains(pattern) {
+                violations.push(format!("{}: {pattern}", entry.path().display()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "Application层出现具体基础设施依赖：{}",
+        violations.join("；")
+    );
+}

@@ -9,10 +9,9 @@ use crate::application::aio_assets::{
     preview_inventory_import as preview_import, update_inventory_selection as update_selection,
 };
 use crate::application::project_access::{ProjectAccessRequirement, require_project_access};
+use crate::domain::aio::assets::{AioImportSession, ImportSelection};
 use crate::formal::app_state::FormalAppState;
-use crate::infrastructure::local_sqlite::aio_import_repository::{
-    AioImportSession, ImportSelection,
-};
+use crate::infrastructure::aio_assets_service::AioAssetsService;
 use crate::infrastructure::stage75_adapter::Stage75Adapter;
 use crate::interface::error::CommandErrorDto;
 
@@ -29,7 +28,7 @@ pub async fn list_edge_nodes(
     )
     .await
     .map_err(CommandErrorDto::from)?;
-    list_aio_nodes(&state, &local_project_id, query)
+    list_aio_nodes(&AioAssetsService::new(&state), &local_project_id, query)
         .await
         .map_err(CommandErrorDto::from)
 }
@@ -47,7 +46,7 @@ pub async fn get_edge_node_detail(
     )
     .await
     .map_err(CommandErrorDto::from)?;
-    get_detail(&state, &local_project_id, &mac)
+    get_detail(&AioAssetsService::new(&state), &local_project_id, &mac)
         .await
         .map_err(CommandErrorDto::from)
 }
@@ -65,9 +64,13 @@ pub async fn preview_inventory_import(
     )
     .await
     .map_err(CommandErrorDto::from)?;
-    preview_import(&state, &local_project_id, Path::new(&file_path))
-        .await
-        .map_err(CommandErrorDto::from)
+    preview_import(
+        &AioAssetsService::new(&state),
+        &local_project_id,
+        Path::new(&file_path),
+    )
+    .await
+    .map_err(CommandErrorDto::from)
 }
 
 #[tauri::command]
@@ -82,7 +85,7 @@ pub async fn get_latest_inventory_import(
     )
     .await
     .map_err(CommandErrorDto::from)?;
-    latest_import(&state, &local_project_id)
+    latest_import(&AioAssetsService::new(&state), &local_project_id)
         .await
         .map_err(CommandErrorDto::from)
 }
@@ -101,9 +104,14 @@ pub async fn update_inventory_import_selection(
     )
     .await
     .map_err(CommandErrorDto::from)?;
-    update_selection(&state, &local_project_id, &session_id, &selections)
-        .await
-        .map_err(CommandErrorDto::from)
+    update_selection(
+        &AioAssetsService::new(&state),
+        &local_project_id,
+        &session_id,
+        &selections,
+    )
+    .await
+    .map_err(CommandErrorDto::from)
 }
 
 #[tauri::command]
@@ -119,9 +127,13 @@ pub async fn apply_inventory_import(
     )
     .await
     .map_err(CommandErrorDto::from)?;
-    apply_import(&state, &local_project_id, &session_id)
-        .await
-        .map_err(CommandErrorDto::from)
+    apply_import(
+        &AioAssetsService::new(&state),
+        &local_project_id,
+        &session_id,
+    )
+    .await
+    .map_err(CommandErrorDto::from)
 }
 
 #[tauri::command]
@@ -137,7 +149,11 @@ pub async fn discard_inventory_import(
     )
     .await
     .map_err(CommandErrorDto::from)?;
-    discard_import(&state, &local_project_id, &session_id)
-        .await
-        .map_err(CommandErrorDto::from)
+    discard_import(
+        &AioAssetsService::new(&state),
+        &local_project_id,
+        &session_id,
+    )
+    .await
+    .map_err(CommandErrorDto::from)
 }

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{MySqlPool, Row};
 
 use crate::core::error::{AppError, AppResult};
+use crate::domain::aio::assets::PlatformRecordIssue;
 use crate::domain::aio::inventory::PlatformNodeSnapshot;
 use crate::domain::aio::mac::MacAddress;
 
@@ -25,15 +26,6 @@ const REQUIRED_COLUMNS: &[&str] = &[
     "last_beat_time",
     "last_sync_time",
 ];
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlatformRecordIssue {
-    pub platform_aio_id: String,
-    pub code: String,
-    pub message: String,
-    pub raw_mac: String,
-}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

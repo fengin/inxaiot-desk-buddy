@@ -5,7 +5,6 @@ use std::time::Duration;
 use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 
-use crate::application::aio_assets::{application_instance_id, project_operator};
 use crate::application::ports::deployment_workflow::DeploymentPreflightPort;
 use crate::application::ports::remote_command::{
     ExecRequest, NoopRemoteOutputSink, RemoteCommandExecutor,
@@ -13,7 +12,6 @@ use crate::application::ports::remote_command::{
 use crate::application::ports::remote_session::{
     HostKeyIdentity, HostKeyPolicy, RemoteAuth, RemoteConnection, RemoteConnector, RemoteTarget,
 };
-use crate::application::project_context::{map_formal_error, project_database};
 use crate::core::error::{AppError, AppResult};
 use crate::core::secret::SecretValue;
 use crate::domain::aio::deployment::{DeploymentMode, DeploymentPlan, DeploymentPlanInput};
@@ -31,7 +29,9 @@ use crate::formal::project_repository::LocalProjectRepository;
 use crate::formal::release_master_key::ReleaseMasterKeyManager;
 use crate::formal::release_profile_repository::{ReleaseProfileRecord, ReleaseProfileRepository};
 use crate::formal::resource_lease_repository::ResourceLeaseRepository;
+use crate::infrastructure::aio_assets_service::{application_instance_id, project_operator};
 use crate::infrastructure::local_sqlite::host_key_repository::HostKeyRepository;
+use crate::infrastructure::project_context::{map_formal_error, project_database};
 use crate::infrastructure::remote::RusshConnector;
 use crate::infrastructure::workbench_aio::WorkbenchAioRepository;
 

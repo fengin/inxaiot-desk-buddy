@@ -1,4 +1,3 @@
-use crate::application::project_context::project_database;
 use crate::domain::common::task::{TargetState, TaskState};
 use crate::formal::app_state::FormalAppState;
 use crate::formal::config::AppPaths;
@@ -7,6 +6,7 @@ use crate::infrastructure::deployment_finalization::{
 };
 use crate::infrastructure::local_sqlite::task_repository::TargetUpdate;
 use crate::infrastructure::local_sqlite::task_repository::TaskRepository;
+use crate::infrastructure::project_context::project_database;
 use crate::infrastructure::task_data_lifecycle::TaskDataLifecycle;
 use crate::runtime::job_supervisor::JobOutcome;
 use crate::runtime::task_queue::{TaskQueue, TaskQueueResult};

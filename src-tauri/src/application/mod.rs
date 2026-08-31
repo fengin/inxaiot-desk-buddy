@@ -1,14 +1,11 @@
 pub mod agent_protocol;
 pub mod aio_assets;
 pub mod data_directory;
-pub mod deployment_control;
 pub mod deployment_executor;
-pub mod deployment_service;
 pub mod deployment_workflow;
 pub mod diagnostics;
 pub mod execution_coordinator;
 pub mod ports;
 pub mod project_access;
-pub mod project_context;
 pub mod project_management;
 pub mod release_artifacts;

@@ -1,6 +1,8 @@
+pub mod assets;
 pub mod deployment;
 pub mod deployment_workflow;
 pub mod inventory;
 pub mod mac;
 pub mod release;
 pub mod release_profile;
+pub mod release_render;

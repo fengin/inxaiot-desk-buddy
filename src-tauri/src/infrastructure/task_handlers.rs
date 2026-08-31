@@ -4,11 +4,11 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 use tokio_util::sync::CancellationToken;
 
-use crate::application::deployment_service::{LaunchDeploymentInput, run_submitted_deployment};
 use crate::core::error::{AppError, AppResult};
 use crate::domain::aio::deployment::{DeploymentMode, DeploymentPlan};
 use crate::domain::common::task::{TargetState, TaskState};
 use crate::formal::app_state::FormalAppState;
+use crate::infrastructure::deployment_service::{LaunchDeploymentInput, run_submitted_deployment};
 use crate::infrastructure::local_sqlite::task_repository::TargetUpdate;
 use crate::infrastructure::task_data_lifecycle::TaskDataLifecycle;
 use crate::runtime::task_queue::{TaskEnvelope, TaskHandlerRegistry};
@@ -93,7 +93,7 @@ async fn execute_aio_handler_inner(
     let expected_dir = state
         .paths
         .project_task_dir(&envelope.local_project_id, &envelope.local_task_id)
-        .map_err(crate::application::project_context::map_formal_error)?;
+        .map_err(crate::infrastructure::project_context::map_formal_error)?;
     let payload_path = Path::new(payload_ref);
     if payload_path.parent() != Some(expected_dir.as_path())
         || payload_path.file_name().and_then(|value| value.to_str())

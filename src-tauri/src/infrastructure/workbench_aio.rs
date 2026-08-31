@@ -1,34 +1,12 @@
-use serde::{Deserialize, Serialize};
 use sqlx::{MySqlPool, Row};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::core::error::{AppError, AppResult};
+use crate::domain::aio::assets::{
+    InventoryApplyResult, OperationRecordSummary, ServiceVersionRecord,
+};
 use crate::domain::aio::inventory::WorkbenchNodeSnapshot;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ServiceVersionRecord {
-    pub mac_normalized: String,
-    pub service_name: String,
-    pub expected_image_name: Option<String>,
-    pub expected_version: Option<String>,
-    pub observed_image_name: Option<String>,
-    pub observed_version: Option<String>,
-    pub observed_at: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OperationRecordSummary {
-    pub id: String,
-    pub operation_type: String,
-    pub operation_name: String,
-    pub state: String,
-    pub operator_name: String,
-    pub ended_at: Option<String>,
-    pub result_summary: Option<String>,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InventoryAssetWrite {
@@ -55,13 +33,6 @@ pub struct ApplyInventoryWrite {
     pub instance_id: String,
     pub classification_counts: serde_json::Value,
     pub assets: Vec<InventoryAssetWrite>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InventoryApplyResult {
-    pub operation_id: String,
-    pub applied_count: u32,
 }
 
 #[derive(Clone)]

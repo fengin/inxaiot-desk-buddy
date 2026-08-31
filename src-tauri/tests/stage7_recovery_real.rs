@@ -2,7 +2,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use inxaiot_desk_buddy_lib::application::deployment_control::start_deployment_heartbeat_with_timing;
 use inxaiot_desk_buddy_lib::formal::error::FormalError;
 use inxaiot_desk_buddy_lib::formal::mysql::{MySqlConnectionSpec, MySqlTlsMode, ProjectMySqlPools};
 use inxaiot_desk_buddy_lib::formal::operation_repository::{
@@ -12,6 +11,7 @@ use inxaiot_desk_buddy_lib::formal::resource_lease_repository::{
     LeaseGrant, LeaseRequest, ResourceLeaseRepository,
 };
 use inxaiot_desk_buddy_lib::formal::workbench_store::WorkbenchStore;
+use inxaiot_desk_buddy_lib::infrastructure::deployment_control::start_deployment_heartbeat_with_timing;
 use tokio::sync::Barrier;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;

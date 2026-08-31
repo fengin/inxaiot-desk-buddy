@@ -54,7 +54,7 @@ impl<'a> TaskDataLifecycle<'a> {
         let artifacts = self
             .paths
             .project_task_dir(project_id, task_id)
-            .map_err(crate::application::project_context::map_formal_error)?;
+            .map_err(crate::infrastructure::project_context::map_formal_error)?;
         if artifacts.exists() {
             fs::remove_dir_all(&artifacts)
                 .map_err(|error| AppError::io("清理任务临时制品", &error))?;
@@ -64,7 +64,7 @@ impl<'a> TaskDataLifecycle<'a> {
         let log = self
             .paths
             .project_task_log_path(project_id, task_id)
-            .map_err(crate::application::project_context::map_formal_error)?;
+            .map_err(crate::infrastructure::project_context::map_formal_error)?;
         if log.is_file() {
             let retention = match state {
                 TaskState::Succeeded | TaskState::PartiallySucceeded | TaskState::Cancelled => {

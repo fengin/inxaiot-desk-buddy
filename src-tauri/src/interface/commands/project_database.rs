@@ -1,10 +1,10 @@
 use tauri::State;
 
-use crate::application::project_context::{
-    initialize_or_upgrade_workbench_schema as upgrade_schema, workbench_schema_status,
-};
 use crate::formal::app_state::FormalAppState;
 use crate::formal::workbench_store::WorkbenchSchemaStatus;
+use crate::infrastructure::project_context::{
+    initialize_or_upgrade_workbench_schema as upgrade_schema, workbench_schema_status,
+};
 use crate::interface::error::CommandErrorDto;
 
 #[tauri::command]

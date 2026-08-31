@@ -7,13 +7,12 @@ use inxaiot_desk_buddy_lib::application::ports::remote_session::RemoteConnection
 use inxaiot_desk_buddy_lib::domain::aio::deployment::{
     DeploymentMode, DeploymentPlan, DeploymentPlanInput,
 };
+use inxaiot_desk_buddy_lib::domain::aio::release_render::ReleaseRenderContext;
 use inxaiot_desk_buddy_lib::infrastructure::deployment_remote::{
     RemoteDeploymentConfig, RemoteDeploymentFiles, execute_connected_deployment,
 };
 use inxaiot_desk_buddy_lib::infrastructure::device_api::{AioRegistrationPayload, DeviceApiClient};
-use inxaiot_desk_buddy_lib::infrastructure::release_template::{
-    ReleaseRenderContext, render_release_templates,
-};
+use inxaiot_desk_buddy_lib::infrastructure::release_template::render_release_templates;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 

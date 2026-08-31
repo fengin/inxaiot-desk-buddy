@@ -91,4 +91,23 @@ describe("project store", () => {
     expect(store.activeProject?.connectionState).toBe("connection_failed");
     expect(store.businessMenuEnabled).toBe(false);
   });
+
+  it("keeps initialization retryable after a transient project-list failure", async () => {
+    const adapter = new FixtureWorkbenchAdapter();
+    const original = adapter.listProjects.bind(adapter);
+    vi.spyOn(adapter, "listProjects")
+      .mockRejectedValueOnce(new Error("temporary list failure"))
+      .mockImplementation(original);
+    configureWorkbenchAdapter(adapter);
+    const store = useProjectStore();
+
+    await store.initialize();
+    expect(store.initialized).toBe(false);
+    expect(store.error).toContain("temporary list failure");
+
+    await store.initialize();
+    expect(store.initialized).toBe(true);
+    expect(store.error).toBe("");
+    expect(store.projects.length).toBeGreaterThan(0);
+  });
 });

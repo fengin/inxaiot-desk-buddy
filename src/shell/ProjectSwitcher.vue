@@ -57,6 +57,11 @@ const projectForm = reactive<ProjectInput>({
 
 onMounted(() => void projects.initialize());
 
+async function retryInitialize() {
+  await projects.initialize();
+  if (projects.error) message.error(projects.error);
+}
+
 function connectionTag(project: ProjectOverview) {
   if (project.connectionState === "ready") return { type: "success" as const, label: "已就绪" };
   if (project.connectionState === "login_required") return { type: "warning" as const, label: "需登录" };
@@ -298,6 +303,10 @@ async function upgradeSchema() {
         <n-button size="tiny" quaternary @click="openCreateProject"><template #icon><Plus /></template>新增</n-button>
       </div>
       <div v-if="projects.loading" class="project-empty">正在读取本地项目…</div>
+      <div v-else-if="projects.error && !projects.initialized" class="project-empty">
+        <span>{{ projects.error }}</span>
+        <n-button size="tiny" text type="primary" data-testid="project-initialize-retry" @click="retryInitialize">重新读取</n-button>
+      </div>
       <div v-else-if="!projects.projects.length" class="project-empty">还没有项目，请先新增项目入口</div>
       <button
         v-for="project in projects.projects"

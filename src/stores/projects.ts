@@ -62,10 +62,11 @@ export const useProjectStore = defineStore("projects", () => {
       }
     } catch (cause) {
       error.value = commandErrorText(cause, "读取本地项目失败");
+      initialized.value = false;
     } finally {
-      initialized.value = true;
       loading.value = false;
     }
+    if (!error.value) initialized.value = true;
   }
 
   async function refresh() {

@@ -82,12 +82,7 @@ impl<'a> Stage75Adapter<'a> {
     async fn session_view(&self, project_id: &str) -> AppResult<ProjectSessionView> {
         match self.projects().load_session(project_id).await {
             Ok(session) => {
-                let expired = session
-                    .session
-                    .expires_at
-                    .as_deref()
-                    .and_then(|value| value.parse::<i64>().ok())
-                    .is_some_and(|expires| expires <= OffsetDateTime::now_utc().unix_timestamp());
+                let expired = session_expired(session.session.expires_at.as_deref());
                 Ok(ProjectSessionView {
                     local_project_id: project_id.into(),
                     username: Some(session.session.username),
@@ -276,7 +271,40 @@ impl ProjectManagementPort for Stage75Adapter<'_> {
     async fn list_projects(&self) -> AppResult<Vec<ProjectOverview>> {
         let mut overviews = Vec::new();
         for project in self.projects().list().await.map_err(map_formal_error)? {
-            overviews.push(self.overview(project).await?);
+            match self.overview(project.clone()).await {
+                Ok(overview) => overviews.push(overview),
+                Err(error) => {
+                    tracing::warn!(
+                        project_id = %project.id,
+                        error = %crate::core::log_safety::safe_error(&error),
+                        "isolate project overview failure"
+                    );
+                    let health = self
+                        .state
+                        .runtime_registry
+                        .get(&project.id)
+                        .await
+                        .map(|runtime| async move { runtime.health().await });
+                    let health = match health {
+                        Some(health) => health.await,
+                        None => ConnectionHealth::Closed,
+                    };
+                    overviews.push(ProjectOverview {
+                        project: map_project(project),
+                        connection_state: ProjectConnectionState::ConnectionFailed,
+                        database_state: if health == ConnectionHealth::Ready {
+                            DatabaseConnectionState::Connected
+                        } else {
+                            DatabaseConnectionState::Disconnected
+                        },
+                        schema_state: None,
+                        session: None,
+                        connection_encrypted: false,
+                        status_message:
+                            "当前项目本机会话读取失败，已隔离；其他项目仍可使用，请重试连接".into(),
+                    });
+                }
+            }
         }
         Ok(overviews)
     }
@@ -1010,6 +1038,12 @@ fn missing_session(project_id: &str) -> ProjectSessionView {
     }
 }
 
+fn session_expired(expires_at: Option<&str>) -> bool {
+    expires_at
+        .and_then(|value| value.parse::<i64>().ok())
+        .is_none_or(|expires| expires <= OffsetDateTime::now_utc().unix_timestamp())
+}
+
 fn mysql_config(
     input: &ProjectInput,
     saved_password: Option<String>,
@@ -1118,5 +1152,24 @@ fn map_formal_error(error: FormalError) -> AppError {
         FormalError::SecretStore(operation) | FormalError::LocalIo(operation) => {
             AppError::Io { operation }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use time::OffsetDateTime;
+
+    use super::session_expired;
+
+    #[test]
+    fn missing_invalid_and_past_session_expiry_fail_closed() {
+        assert!(session_expired(None));
+        assert!(session_expired(Some("invalid")));
+        assert!(session_expired(Some(
+            &(OffsetDateTime::now_utc().unix_timestamp() - 1).to_string()
+        )));
+        assert!(!session_expired(Some(
+            &(OffsetDateTime::now_utc().unix_timestamp() + 60).to_string()
+        )));
     }
 }

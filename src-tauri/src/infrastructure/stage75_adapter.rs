@@ -22,7 +22,7 @@ use crate::domain::common::project::{
     ConfirmHostKeyRequest, DatabaseConnectionState, HostKeyCaptureRequest, HostKeyObservation,
     HostKeyState, PlatformLoginChallenge, PlatformLoginRequest, ProjectConnectionState,
     ProjectConnectionTestRequest, ProjectConnectionTestResult, ProjectInput, ProjectOverview,
-    ProjectRecord, ProjectSessionState, ProjectSessionView,
+    ProjectRecord, ProjectSessionState, ProjectSessionView, is_private_network_host,
 };
 use crate::formal::app_state::FormalAppState;
 use crate::formal::credential_crypto::ReleaseCredentials;
@@ -39,7 +39,7 @@ use crate::formal::runtime_registry::ConnectionHealth;
 use crate::formal::workbench_store::{WorkbenchSchemaStatus, WorkbenchStore};
 use crate::infrastructure::database::{DatabaseTlsMode, DualMySqlPools, MySqlProjectConfig};
 use crate::infrastructure::local_sqlite::host_key_repository::{HostKeyRecord, HostKeyRepository};
-use crate::infrastructure::remote::RusshConnector;
+use crate::infrastructure::remote::{RusshConnector, validate_private_key_algorithm};
 
 pub struct Stage75Adapter<'a> {
     state: &'a FormalAppState,
@@ -295,6 +295,33 @@ impl ProjectManagementPort for Stage75Adapter<'_> {
         input: ProjectInput,
     ) -> AppResult<ProjectOverview> {
         self.ensure_project_mutable(project_id).await?;
+        if let Some(new_password) = input
+            .db_password
+            .as_deref()
+            .filter(|password| !password.is_empty())
+        {
+            let existing = self
+                .projects()
+                .connection_secrets(project_id)
+                .await
+                .map_err(map_formal_error)?;
+            if new_password != existing.db_password {
+                let pools = self.ready_pools(project_id).await?;
+                match ReleaseProfileRepository::new(pools.workbench.clone())
+                    .get(&existing.db_password, "default")
+                    .await
+                {
+                    Ok(_) => {
+                        return Err(AppError::Conflict(
+                            "当前发布凭据仍由原数据库密码加密；稳定项目主密钥迁移完成前禁止修改数据库密码"
+                                .into(),
+                        ));
+                    }
+                    Err(FormalError::NotFound(_)) => {}
+                    Err(error) => return Err(map_formal_error(error)),
+                }
+            }
+        }
         self.register_secrets(input.db_password.clone());
         self.close_runtime_if_open(project_id).await;
         let record = self
@@ -496,6 +523,12 @@ impl ProjectManagementPort for Stage75Adapter<'_> {
     }
 
     async fn check_project_session(&self, project_id: &str) -> AppResult<ProjectSessionView> {
+        let stored = match self.projects().load_session(project_id).await {
+            Ok(stored) => stored,
+            Err(FormalError::NotFound(_)) => return Ok(missing_session(project_id)),
+            Err(error) => return Err(map_formal_error(error)),
+        };
+        self.register_secrets([stored.access_token.clone()]);
         let session = self.session_view(project_id).await?;
         if session.state == ProjectSessionState::Expired {
             self.projects()
@@ -505,6 +538,29 @@ impl ProjectManagementPort for Stage75Adapter<'_> {
             return Ok(ProjectSessionView {
                 state: ProjectSessionState::Expired,
                 ..session
+            });
+        }
+        let project = self
+            .projects()
+            .get(project_id)
+            .await
+            .map_err(map_formal_error)?;
+        let auth = PlatformAuthAdapter::new(Duration::from_secs(15)).map_err(map_formal_error)?;
+        if !auth
+            .validate_access_token(&project.platform_url, &stored.access_token)
+            .await
+            .map_err(map_formal_error)?
+        {
+            self.projects()
+                .clear_session(project_id)
+                .await
+                .map_err(map_formal_error)?;
+            return Ok(ProjectSessionView {
+                local_project_id: project_id.into(),
+                username: Some(stored.session.username),
+                state: ProjectSessionState::Expired,
+                expires_at: stored.session.expires_at,
+                updated_at: Some(stored.session.updated_at),
             });
         }
         Ok(session)
@@ -573,6 +629,14 @@ impl ReleaseProfileManagementPort for Stage75Adapter<'_> {
         project_id: &str,
         draft: ReleaseProfileDraft,
     ) -> AppResult<ReleaseProfileView> {
+        if let Some(private_key) = draft
+            .credentials
+            .ssh_private_key
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            validate_private_key_algorithm(private_key)?;
+        }
         self.register_secrets(profile_draft_secret_values(&draft.credentials));
         let session = self.require_active_session(project_id).await?;
         let operator_name = session
@@ -818,7 +882,11 @@ fn mysql_config(
         platform_schema: input.business_db.trim().into(),
         workbench_schema: input.workbench_db.trim().into(),
         connect_timeout: Duration::from_secs(10),
-        tls_mode: DatabaseTlsMode::Disabled,
+        tls_mode: if is_private_network_host(&input.db_host) {
+            DatabaseTlsMode::Preferred
+        } else {
+            DatabaseTlsMode::Required
+        },
     })
 }
 

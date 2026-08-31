@@ -3,7 +3,7 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use rand::rngs::OsRng;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use rsa::pkcs1::DecodeRsaPublicKey;
 use rsa::pkcs8::DecodePublicKey;
 use rsa::{Pkcs1v15Encrypt, RsaPublicKey};
@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 use time::{Duration as TimeDuration, OffsetDateTime};
 
 use super::error::{FormalError, FormalResult};
+
+const DEFAULT_SESSION_TTL: TimeDuration = TimeDuration::minutes(30);
 
 #[derive(Clone)]
 pub struct PlatformLoginSpec {
@@ -124,29 +126,64 @@ impl PlatformAuthAdapter {
             .ok_or_else(|| FormalError::InvalidConfig("平台登录响应缺少data".into()))?;
         let access_token = data["access_token"]
             .as_str()
-            .filter(|value| !value.is_empty())
+            .filter(|value| value.len() >= 3)
             .ok_or_else(|| FormalError::InvalidConfig("平台登录未返回访问令牌".into()))?;
         let expires_at = data["expires_in"]
             .as_i64()
             .filter(|seconds| *seconds > 0)
-            .map(|seconds| OffsetDateTime::now_utc() + TimeDuration::seconds(seconds));
+            .map(|seconds| OffsetDateTime::now_utc() + TimeDuration::seconds(seconds))
+            .unwrap_or_else(|| OffsetDateTime::now_utc() + DEFAULT_SESSION_TTL);
         Ok(PlatformSession {
             principal: spec.principal.clone(),
             token_type: data["token_type"].as_str().unwrap_or("Bearer").to_string(),
             access_token: access_token.to_string(),
-            expires_at,
+            expires_at: Some(expires_at),
         })
+    }
+
+    pub async fn validate_access_token(
+        &self,
+        base_url: &str,
+        access_token: &str,
+    ) -> FormalResult<bool> {
+        if base_url.trim().is_empty() || access_token.len() < 3 {
+            return Err(FormalError::InvalidConfig("平台会话校验参数不完整".into()));
+        }
+        let response = self
+            .client
+            .get(format!("{}/sys/menu/nav", normalize_base_url(base_url)))
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|error| map_http_error("校验平台会话", error))?;
+        if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            return Ok(false);
+        }
+        let envelope = response
+            .error_for_status()
+            .map_err(|error| map_http_error("校验平台会话", error))?
+            .json::<Value>()
+            .await
+            .map_err(|error| map_http_error("解析平台会话校验响应", error))?;
+        Ok(envelope
+            .get("code")
+            .is_some_and(|code| code.as_i64() == Some(200) || code.as_str() == Some("200")))
     }
 }
 
 fn validate_login_spec(spec: &PlatformLoginSpec) -> FormalResult<()> {
     if spec.base_url.trim().is_empty()
         || spec.principal.trim().is_empty()
-        || spec.password.is_empty()
+        || spec.password.len() < 3
         || spec.session_uuid.is_empty()
         || spec.image_code.is_empty()
     {
-        return Err(FormalError::InvalidConfig("平台登录参数不完整".into()));
+        return Err(FormalError::InvalidConfig(
+            "平台登录参数不完整，且密码至少需要3个字节".into(),
+        ));
     }
     Ok(())
 }
@@ -202,6 +239,7 @@ fn encrypt_password(public_key: &str, password: &str) -> FormalResult<String> {
 }
 
 fn map_http_error(operation: &'static str, error: reqwest::Error) -> FormalError {
-    tracing::error!(operation, error = ?error, "platform http operation failed");
+    let _ = error;
+    tracing::error!(operation, "platform http operation failed");
     FormalError::InvalidConfig(format!("{operation}失败"))
 }

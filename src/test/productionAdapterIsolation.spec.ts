@@ -22,11 +22,19 @@ describe("Tauri真实模式物理隔离门禁", () => {
       "RealAioAdapter",
       "RealOperationsAdapter",
       "RealDataDirectoryAdapter",
-      "RealDiagnosticsAdapter"
+      "RealDiagnosticsAdapter",
+      "RealSystemDialogAdapter"
     ]) {
       expect(main).toContain(`new ${adapter}()`);
     }
     expect(main).toContain("生产构建只能在 Tauri Runtime 中使用");
+  });
+
+  it("keeps Tauri dialog plugin access inside the Real system adapter", () => {
+    const violations = productionFiles(sourceRoot)
+      .filter((path) => !path.endsWith(join("shared", "api", "realSystemDialogAdapter.ts")))
+      .filter((path) => readFileSync(path, "utf8").includes("@tauri-apps/plugin-dialog"));
+    expect(violations).toEqual([]);
   });
 
   it("keeps feature, shell and store production modules free of Demo/Fixture imports", () => {

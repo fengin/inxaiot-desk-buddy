@@ -4,6 +4,7 @@ export class FixtureDiagnosticsAdapter implements DiagnosticsAdapter {
   async getSystemDiagnostics() {
     return {
       applicationVersion: "fixture",
+      sourceCommit: "fixture-only",
       localSchemaVersion: "fixture",
       workbenchSchemaVersion: "fixture",
       agentVersion: "fixture",

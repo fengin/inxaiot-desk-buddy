@@ -77,6 +77,7 @@ fn render_placeholders(
 ) -> AppResult<String> {
     let pattern = Regex::new(r"\{\{([^{}]+)\}\}").expect("static placeholder regex");
     let mut unknown = BTreeSet::new();
+    let mut unsafe_values = BTreeSet::new();
     let rendered = pattern.replace_all(template, |captures: &regex::Captures<'_>| {
         let key = captures[1].trim();
         match values.get(key) {
@@ -84,6 +85,10 @@ fn render_placeholders(
                 .unwrap_or_else(|_| "\"\"".into())
                 .trim_matches('"')
                 .to_string(),
+            Some(value) if value.contains('\r') || value.contains('\n') || value.contains('\0') => {
+                unsafe_values.insert(key.to_string());
+                captures[0].to_string()
+            }
             Some(value) => value.clone(),
             None => {
                 unknown.insert(key.to_string());
@@ -95,6 +100,12 @@ fn render_placeholders(
         return Err(AppError::InvalidConfig(format!(
             "存在未知模板变量：{}",
             unknown.into_iter().collect::<Vec<_>>().join("、")
+        )));
+    }
+    if !unsafe_values.is_empty() {
+        return Err(AppError::InvalidConfig(format!(
+            "模板变量包含换行或空字符：{}",
+            unsafe_values.into_iter().collect::<Vec<_>>().join("、")
         )));
     }
     Ok(rendered.into_owned())
@@ -291,5 +302,12 @@ mod tests {
             render_release_templates("A={{unknown}}\n", "{}", "services: {}", &context()).is_err()
         );
         assert!(render_release_templates("A=1\n", "{}", "image: ${MISSING}", &context()).is_err());
+
+        let mut injected = context();
+        injected.node_name = "safe\nINJECTED=value".into();
+        assert!(
+            render_release_templates("NODE_NAME={{node.name}}\n", "{}", "services: {}", &injected)
+                .is_err()
+        );
     }
 }

@@ -16,7 +16,19 @@ fn envelope(id: &str, priority: i32, operation_type: &str) -> TaskEnvelope {
         resource_keys: vec!["resource-a".into()],
         priority,
         payload_ref: None,
+        payload_sha256: None,
     }
+}
+
+#[test]
+fn task_envelope_requires_payload_reference_and_sha256_as_a_pair() {
+    let mut task = envelope("payload-task", 0, "ordered");
+    task.payload_ref = Some("payload.json".into());
+    assert!(task.validate().is_err());
+    task.payload_sha256 = Some("a".repeat(64));
+    task.validate().expect("payload reference with sha256");
+    task.payload_sha256 = Some("not-a-sha256".into());
+    assert!(task.validate().is_err());
 }
 
 #[tokio::test]

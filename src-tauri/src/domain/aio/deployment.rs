@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::core::error::{AppError, AppResult};
+use crate::domain::aio::release::validate_release_version;
 
 const SERVICE_WHITELIST: &[&str] = &["emqx", "device-edge", "rule-engine", "device-edge-web"];
 
@@ -74,6 +75,7 @@ impl DeploymentPlan {
         {
             return Err(AppError::InvalidConfig("部署发布物信息不完整".into()));
         }
+        validate_release_version(&input.artifact_version)?;
         if input.batch_size == 0 || input.concurrency == 0 || input.concurrency > input.batch_size {
             return Err(AppError::InvalidConfig(
                 "批次和并发必须大于0，且并发不能超过批次".into(),
@@ -230,5 +232,9 @@ mod tests {
         invalid.concurrency = 5;
         invalid.batch_size = 2;
         assert!(DeploymentPlan::build(invalid).is_err());
+
+        let mut traversal = input(DeploymentMode::FullUpgrade);
+        traversal.artifact_version = "../../outside".into();
+        assert!(DeploymentPlan::build(traversal).is_err());
     }
 }

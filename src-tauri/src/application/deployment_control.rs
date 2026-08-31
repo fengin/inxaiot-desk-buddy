@@ -10,16 +10,19 @@ use crate::application::project_context::{map_formal_error, project_database};
 use crate::core::error::{AppError, AppResult};
 use crate::domain::aio::deployment::{DeploymentMode, DeploymentPlan};
 use crate::domain::common::task::{StepState, TargetState, TaskRecord, TaskState};
-use crate::formal::aio_node_repository::{AioNodeRepository, ServiceVersionWrite};
+use crate::formal::aio_node_repository::ServiceVersionWrite;
 use crate::formal::app_state::FormalAppState;
 use crate::formal::operation_repository::{
     OperationFinalResult, OperationRepository, OperationStart, TargetFinalResult,
 };
 use crate::formal::resource_lease_repository::{LeaseGrant, LeaseRequest, ResourceLeaseRepository};
+use crate::infrastructure::deployment_finalization::{
+    AtomicDeploymentFinalization, AtomicTargetFinalization, PendingLocalFinalization,
+    finalize_deployment_atomically, shared_operation_state, write_pending_local_finalization,
+};
 use crate::infrastructure::local_sqlite::task_repository::{
     CreateTask, TargetUpdate, TaskStepWrite,
 };
-use crate::infrastructure::workbench_aio::WorkbenchAioRepository;
 
 #[derive(Clone)]
 pub struct DeploymentControlHandle {
@@ -374,116 +377,54 @@ pub async fn finalize_deployment_control(
     summary: DeploymentExecutionSummary,
 ) -> AppResult<()> {
     let pools = project_database(state, local_project_id).await?;
-    let operations = OperationRepository::new(pools.workbench.clone());
-    let aio_nodes = AioNodeRepository::new(pools.workbench.clone());
-    let workbench_nodes = WorkbenchAioRepository::new(pools.workbench.clone());
-    let lease_repository = ResourceLeaseRepository::new(pools.workbench.clone());
-    for lease in &handle.leases {
-        if !lease_repository
-            .validate_fencing(lease)
-            .await
-            .map_err(map_formal_error)?
-        {
-            return Err(AppError::Conflict(format!(
-                "资源租约已失效，禁止写入项目最终结果：{}/{}",
-                lease.resource_type, lease.resource_key
-            )));
-        }
-    }
+    let mut shared_targets = Vec::with_capacity(summary.targets.len());
     for target in &summary.targets {
-        let (state_name, target_state, error_code) = match target.state {
-            DeploymentTargetState::Succeeded => ("succeeded", TargetState::Succeeded, None),
-            DeploymentTargetState::Failed | DeploymentTargetState::Panicked => (
-                "failed",
-                TargetState::Failed,
-                Some("DEPLOYMENT_FAILED".into()),
-            ),
-            DeploymentTargetState::Cancelled => (
-                "cancelled",
-                TargetState::Cancelled,
-                Some("CANCELLED".into()),
-            ),
+        let (state_name, error_code) = match target.state {
+            DeploymentTargetState::Succeeded => ("succeeded", None),
+            DeploymentTargetState::Failed | DeploymentTargetState::Panicked => {
+                ("failed", Some("DEPLOYMENT_FAILED".into()))
+            }
+            DeploymentTargetState::Cancelled => ("cancelled", Some("CANCELLED".into())),
         };
-        operations
-            .finalize_target(TargetFinalResult {
-                operation_id: handle.operation_id.clone(),
-                resource_type: "aio".into(),
-                resource_key: target.mac.clone(),
-                result_state: state_name.into(),
-                before_version: None,
-                after_version: (state_name == "succeeded")
-                    .then(|| handle.plan.artifact_version.clone()),
-                result_summary: Some(if state_name == "succeeded" {
-                    "部署步骤和健康检查完成".into()
-                } else {
-                    "部署未成功".into()
-                }),
-                error_code: error_code.clone(),
-                error_summary: target.error.clone(),
-            })
-            .await
-            .map_err(map_formal_error)?;
+        let target_result = TargetFinalResult {
+            operation_id: handle.operation_id.clone(),
+            resource_type: "aio".into(),
+            resource_key: target.mac.clone(),
+            result_state: state_name.into(),
+            before_version: None,
+            after_version: (state_name == "succeeded")
+                .then(|| handle.plan.artifact_version.clone()),
+            result_summary: Some(if state_name == "succeeded" {
+                "部署步骤和健康检查完成".into()
+            } else {
+                "部署未成功".into()
+            }),
+            error_code: error_code.clone(),
+            error_summary: target.error.clone(),
+        };
+        let mut service_versions = Vec::new();
         if state_name == "succeeded" {
             for (service, image) in &handle.plan.images {
                 let (image_name, version) = image
                     .rsplit_once(':')
                     .map(|(name, version)| (name.to_string(), version.to_string()))
                     .unwrap_or_else(|| (image.clone(), image.clone()));
-                aio_nodes
-                    .save_service_version(ServiceVersionWrite {
-                        mac: target.mac.clone(),
-                        service_name: service.clone(),
-                        expected_image_name: Some(image_name.clone()),
-                        expected_version: Some(version.clone()),
-                        observed_image_name: Some(image_name),
-                        observed_version: Some(version),
-                        source_operation_id: Some(handle.operation_id.clone()),
-                    })
-                    .await
-                    .map_err(map_formal_error)?;
+                service_versions.push(ServiceVersionWrite {
+                    mac: target.mac.clone(),
+                    service_name: service.clone(),
+                    expected_image_name: Some(image_name.clone()),
+                    expected_version: Some(version.clone()),
+                    observed_image_name: Some(image_name),
+                    observed_version: Some(version),
+                    source_operation_id: Some(handle.operation_id.clone()),
+                });
             }
-            workbench_nodes
-                .mark_operation_success(&target.mac, &handle.operation_id)
-                .await?;
         }
-        state
-            .task_repository
-            .update_target(
-                &handle.local_task_id,
-                TargetUpdate {
-                    resource_type: "aio".into(),
-                    resource_key: target.mac.clone(),
-                    state: target_state,
-                    stage: "completed".into(),
-                    progress_current: 100,
-                    progress_total: 100,
-                    fencing_token: None,
-                    message_code: None,
-                    message_params_json: None,
-                },
-            )
-            .await?;
-        for step in &handle.plan.steps {
-            state
-                .task_repository
-                .save_step(
-                    &handle.local_task_id,
-                    TaskStepWrite {
-                        id: step_id(&handle.local_task_id, &target.mac, &step.code),
-                        resource_type: Some("aio".into()),
-                        resource_key: Some(target.mac.clone()),
-                        step_code: step.code.clone(),
-                        state: if state_name == "succeeded" {
-                            StepState::Succeeded
-                        } else {
-                            StepState::Failed
-                        },
-                        error_code: error_code.clone(),
-                        message: target.error.clone().or_else(|| Some(step.label.clone())),
-                    },
-                )
-                .await?;
-        }
+        shared_targets.push(AtomicTargetFinalization {
+            result: target_result,
+            service_versions,
+            mark_operation_success: state_name == "succeeded",
+        });
     }
     let final_state = if summary.failure_count == 0 && summary.cancelled_count == 0 {
         "succeeded"
@@ -494,26 +435,6 @@ pub async fn finalize_deployment_control(
     } else {
         "failed"
     };
-    operations
-        .finalize(OperationFinalResult {
-            operation_id: handle.operation_id.clone(),
-            expected_version: handle.operation_version,
-            state: final_state.into(),
-            result_summary: Some(format!(
-                "成功{}，失败{}，取消{}",
-                summary.success_count, summary.failure_count, summary.cancelled_count
-            )),
-            error_code: None,
-            error_summary: None,
-        })
-        .await
-        .map_err(map_formal_error)?;
-    for lease in &handle.leases {
-        lease_repository
-            .release(lease)
-            .await
-            .map_err(map_formal_error)?;
-    }
     let current_task = state.task_repository.get(&handle.local_task_id).await?;
     let task_final = if current_task.state == TaskState::Cancelling {
         if summary.failure_count > 0 {
@@ -524,17 +445,132 @@ pub async fn finalize_deployment_control(
     } else {
         TaskState::parse(final_state)?
     };
-    state
-        .task_repository
-        .transition(
-            &handle.local_task_id,
-            current_task.state,
-            task_final,
-            None,
-            None,
-        )
-        .await?;
-    Ok(())
+    let mut local_targets = Vec::with_capacity(summary.targets.len());
+    let mut local_steps = Vec::with_capacity(summary.targets.len() * handle.plan.steps.len());
+    for target in &summary.targets {
+        let (target_state, step_state, error_code) = match target.state {
+            DeploymentTargetState::Succeeded => {
+                (TargetState::Succeeded, StepState::Succeeded, None)
+            }
+            DeploymentTargetState::Failed | DeploymentTargetState::Panicked => (
+                TargetState::Failed,
+                StepState::Failed,
+                Some("DEPLOYMENT_FAILED".to_string()),
+            ),
+            DeploymentTargetState::Cancelled => (
+                TargetState::Cancelled,
+                StepState::Cancelled,
+                Some("CANCELLED".to_string()),
+            ),
+        };
+        local_targets.push(TargetUpdate {
+            resource_type: "aio".into(),
+            resource_key: target.mac.clone(),
+            state: target_state,
+            stage: "completed".into(),
+            progress_current: 100,
+            progress_total: 100,
+            fencing_token: None,
+            message_code: None,
+            message_params_json: None,
+        });
+        local_steps.extend(handle.plan.steps.iter().map(|step| TaskStepWrite {
+            id: step_id(&handle.local_task_id, &target.mac, &step.code),
+            resource_type: Some("aio".into()),
+            resource_key: Some(target.mac.clone()),
+            step_code: step.code.clone(),
+            state: step_state,
+            error_code: error_code.clone(),
+            message: target.error.clone().or_else(|| Some(step.label.clone())),
+        }));
+    }
+    let task_dir = state
+        .paths
+        .project_task_dir(local_project_id, &handle.local_task_id)
+        .map_err(map_formal_error)?;
+    write_pending_local_finalization(
+        &task_dir,
+        &PendingLocalFinalization {
+            operation_id: handle.operation_id.clone(),
+            final_state: task_final,
+            targets: local_targets.clone(),
+            steps: local_steps.clone(),
+        },
+    )?;
+    let atomic_finalization = AtomicDeploymentFinalization {
+        operation: OperationFinalResult {
+            operation_id: handle.operation_id.clone(),
+            expected_version: handle.operation_version,
+            state: final_state.into(),
+            result_summary: Some(format!(
+                "成功{}，失败{}，取消{}",
+                summary.success_count, summary.failure_count, summary.cancelled_count
+            )),
+            error_code: None,
+            error_summary: None,
+        },
+        targets: shared_targets,
+        leases: handle.leases.clone(),
+    };
+    let mut shared_error = None;
+    for attempt in 0..3 {
+        match finalize_deployment_atomically(&pools.workbench, atomic_finalization.clone()).await {
+            Ok(()) => {
+                shared_error = None;
+                break;
+            }
+            Err(error) => {
+                if shared_operation_state(&pools.workbench, &handle.operation_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    == Some(final_state)
+                {
+                    shared_error = None;
+                    break;
+                }
+                shared_error = Some(error);
+                if attempt < 2 {
+                    tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await;
+                }
+            }
+        }
+    }
+    if let Some(error) = shared_error {
+        return Err(error);
+    }
+    let mut last_error = None;
+    for attempt in 0..3 {
+        match state
+            .task_repository
+            .finalize_projection(
+                &handle.local_task_id,
+                current_task.state,
+                task_final,
+                &local_targets,
+                &local_steps,
+            )
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                if state
+                    .task_repository
+                    .get(&handle.local_task_id)
+                    .await
+                    .is_ok_and(|task| task.state == task_final)
+                {
+                    return Ok(());
+                }
+                last_error = Some(error);
+                if attempt < 2 {
+                    tokio::time::sleep(Duration::from_millis(50 * (attempt + 1))).await;
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| AppError::Conflict("本地最终化投影失败".into())))
 }
 
 pub async fn mark_deployment_interrupted(

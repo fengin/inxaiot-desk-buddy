@@ -19,11 +19,46 @@ export interface DeploymentPreflightCheck {
   remediation?: PreflightRemediation;
 }
 
+export interface DeploymentTargetSnapshot {
+  node: {
+    macNormalized: string;
+    name: string;
+    ip: string;
+    buildingId?: string;
+    regionId?: string;
+    addrAlias?: string;
+    floor?: string;
+    location?: string;
+    remark?: string;
+    platformAioId?: string;
+    managementState: string;
+    source: string;
+    lastOperationId?: string;
+    version: number;
+  };
+  sshHost: string;
+  sshPort: number;
+  hostKeyAlgorithm: string;
+  hostKeyFingerprint: string;
+  hostKeyAcceptedAt: string;
+}
+
+export interface DeploymentExecutionSnapshot {
+  schemaVersion: number;
+  localProjectId: string;
+  checkedAt: string;
+  profileVersion: number;
+  artifactFingerprint: string;
+  plan: DeploymentPlanInput;
+  targets: DeploymentTargetSnapshot[];
+}
+
 export interface DeploymentPreflightReport {
   ready: boolean;
   checks: DeploymentPreflightCheck[];
   normalizedPlan: DeploymentPlanInput;
   profileVersion?: number;
+  executionSnapshot?: DeploymentExecutionSnapshot | null;
   checkedAt: string;
 }
 

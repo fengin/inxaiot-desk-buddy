@@ -1,9 +1,12 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
+use walkdir::WalkDir;
 
 use crate::application::aio_assets::{application_instance_id, project_operator};
 use crate::application::deployment_control::{
@@ -17,14 +20,19 @@ use crate::application::execution_coordinator::{ExecutionCoordinator, ExecutionL
 use crate::application::ports::deployment_progress::{
     DeploymentProgressEvent, DeploymentProgressSink,
 };
-use crate::application::ports::remote_session::{HostKeyPolicy, RemoteAuth, RemoteTarget};
+use crate::application::ports::remote_session::{
+    HostKeyIdentity, HostKeyPolicy, RemoteAuth, RemoteTarget,
+};
 use crate::application::project_context::{map_formal_error, project_database};
 use crate::core::error::{AppError, AppResult};
 use crate::core::secret::SecretValue;
 use crate::domain::aio::deployment::{DeploymentMode, DeploymentPlan, DeploymentPlanInput};
+use crate::domain::aio::deployment_workflow::{
+    DeploymentExecutionSnapshot, DeploymentTargetSnapshot,
+};
 use crate::domain::aio::mac::MacAddress;
 use crate::domain::aio::release::{
-    ReleaseManifest, inspect_image_archive, inspect_release_directory,
+    ReleaseManifest, inspect_image_archive, inspect_release_directory, sha256_file,
 };
 use crate::domain::common::task::{StepState, TargetState, TaskEventLevel};
 use crate::formal::app_state::FormalAppState;
@@ -41,25 +49,23 @@ use crate::infrastructure::deployment_remote::{
     execute_remote_deployment_observed_with_checkpoint,
 };
 use crate::infrastructure::device_api::{AioRegistrationPayload, DeviceApiClient};
-use crate::infrastructure::local_sqlite::host_key_repository::HostKeyRepository;
 use crate::infrastructure::release_archive::create_release_tar;
 use crate::infrastructure::release_template::{ReleaseRenderContext, render_release_templates};
 use crate::infrastructure::remote::RusshConnector;
-use crate::infrastructure::workbench_aio::WorkbenchAioRepository;
+
+const GLOBAL_REMOTE_NODE_CONCURRENCY: usize = 5;
+
+fn global_remote_node_slots() -> Arc<Semaphore> {
+    static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SLOTS
+        .get_or_init(|| Arc::new(Semaphore::new(GLOBAL_REMOTE_NODE_CONCURRENCY)))
+        .clone()
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchDeploymentInput {
-    pub plan: DeploymentPlanInput,
-}
-
-pub fn prepare_launch_input(
-    mut input: LaunchDeploymentInput,
-) -> AppResult<(LaunchDeploymentInput, DeploymentPlan)> {
-    normalize_target_macs(&mut input.plan)?;
-    let _ = prepare_artifact(&mut input.plan)?;
-    let plan = DeploymentPlan::build(input.plan.clone())?;
-    Ok((input, plan))
+    pub snapshot: DeploymentExecutionSnapshot,
 }
 
 pub async fn run_submitted_deployment(
@@ -87,12 +93,14 @@ async fn launch_deployment_inner(
     state: &FormalAppState,
     local_project_id: &str,
     local_task_id: &str,
-    mut input: LaunchDeploymentInput,
+    input: LaunchDeploymentInput,
     registered_cancellation: Option<tokio_util::sync::CancellationToken>,
 ) -> AppResult<DeploymentExecutionSummary> {
-    normalize_target_macs(&mut input.plan)?;
-    let release_manifest = prepare_artifact(&mut input.plan)?;
-    let plan = DeploymentPlan::build(input.plan)?;
+    let snapshot = input.snapshot;
+    snapshot.validate(local_project_id)?;
+    let mut plan_input = snapshot.plan.clone();
+    normalize_target_macs(&mut plan_input)?;
+    DeploymentPlan::build(plan_input.clone())?;
     let operator = project_operator(state, local_project_id).await?;
     let instance_id = application_instance_id().to_string();
     let pools = project_database(state, local_project_id).await?;
@@ -106,44 +114,63 @@ async fn launch_deployment_inner(
         .get(&connection.db_password, "default")
         .await
         .map_err(map_formal_error)?;
+    if profile.version != snapshot.profile_version {
+        return Err(AppError::Conflict(format!(
+            "发布参数已从v{}变更为v{}，任务未执行；请重新预检",
+            snapshot.profile_version, profile.version
+        )));
+    }
     state
         .task_event_pipeline
         .register_secrets(release_secret_values(&connection.db_password, &profile))?;
-    let nodes = WorkbenchAioRepository::new(pools.workbench.clone())
-        .list_snapshots()
-        .await?
-        .into_iter()
-        .map(|node| (node.mac_normalized.clone(), node))
-        .collect::<HashMap<_, _>>();
     let task_dir = state
         .paths
         .project_task_dir(local_project_id, local_task_id)
         .map_err(map_formal_error)?;
     std::fs::create_dir_all(&task_dir).map_err(|error| AppError::io("创建部署任务目录", &error))?;
+    let artifact_task_dir = task_dir.clone();
+    let expected_fingerprint = snapshot.artifact_fingerprint.clone();
+    let (plan_input, release_manifest) = tokio::task::spawn_blocking(move || {
+        materialize_artifact_snapshot(&mut plan_input, &artifact_task_dir, &expected_fingerprint)?;
+        let (release_manifest, actual_fingerprint) = prepare_artifact(&mut plan_input)?;
+        if !actual_fingerprint.eq_ignore_ascii_case(&expected_fingerprint) {
+            return Err(AppError::Integrity {
+                operation: "校验部署发布物快照",
+            });
+        }
+        Ok::<_, AppError>((plan_input, release_manifest))
+    })
+    .await
+    .map_err(|_| AppError::Io {
+        operation: "等待发布物快照任务",
+    })??;
+    let plan = DeploymentPlan::build(plan_input)?;
+    let release_fingerprint = snapshot.artifact_fingerprint.clone();
+    let nodes = snapshot
+        .targets
+        .into_iter()
+        .map(|target| (target.node.mac_normalized.clone(), target))
+        .collect::<HashMap<String, DeploymentTargetSnapshot>>();
     let agent_path = task_dir.join("edge-node-agent.sh");
     std::fs::write(&agent_path, AGENT_SOURCE)
         .map_err(|error| AppError::io("写入内嵌Agent", &error))?;
     let shared_artifact = prepare_shared_artifact(&plan, &task_dir)?;
     let release_templates = load_release_templates(&plan, release_manifest.as_ref())?;
-    let host_keys = HostKeyRepository::new(state.local_store.pool().clone());
     let mut prepared = HashMap::new();
     for mac in &plan.target_macs {
-        let node = nodes
+        let target_snapshot = nodes
             .get(mac)
-            .ok_or_else(|| AppError::NotFound(format!("部署目标不存在：{mac}")))?;
+            .ok_or_else(|| AppError::NotFound(format!("部署目标快照不存在：{mac}")))?;
+        let node = &target_snapshot.node;
         let target = RemoteTarget {
-            host: node.ip.clone(),
-            port: profile.values.ssh_port,
+            host: target_snapshot.ssh_host.clone(),
+            port: target_snapshot.ssh_port,
             connect_timeout: Duration::from_secs(u64::from(profile.values.ssh_timeout_seconds)),
         };
-        let host_key = host_keys
-            .get(local_project_id, &target)
-            .await?
-            .ok_or_else(|| AppError::Conflict(format!("SSH主机指纹尚未确认：{}", node.ip)))?;
         let node_dir = task_dir.join(mac);
         std::fs::create_dir_all(&node_dir)
             .map_err(|error| AppError::io("创建节点渲染目录", &error))?;
-        let (env, host_info) =
+        let (env, host_info, compose) =
             if let Some((host_template, compose_template, manifest)) = release_templates.as_ref() {
                 let context = render_context(node, &profile, manifest);
                 let rendered = render_release_templates(
@@ -158,13 +185,16 @@ async fn launch_deployment_inner(
                 )?;
                 let env = node_dir.join(".env");
                 let host = node_dir.join("host-info.json");
+                let compose = node_dir.join("docker-compose.yml");
                 std::fs::write(&env, rendered.env)
                     .map_err(|error| AppError::io("写入节点env", &error))?;
                 std::fs::write(&host, rendered.host_info_json)
                     .map_err(|error| AppError::io("写入节点host-info", &error))?;
-                (Some(env), Some(host))
+                std::fs::write(&compose, rendered.compose_preview)
+                    .map_err(|error| AppError::io("写入节点Compose", &error))?;
+                (Some(env), Some(host), Some(compose))
             } else {
-                (None, None)
+                (None, None, None)
             };
         let auth = if let Some(private_key) = &profile.credentials.ssh_private_key {
             RemoteAuth::PrivateKey {
@@ -189,15 +219,20 @@ async fn launch_deployment_inner(
             PreparedNode {
                 target,
                 auth,
-                policy: HostKeyPolicy::Require(host_key.identity),
+                policy: HostKeyPolicy::Require(HostKeyIdentity {
+                    algorithm: target_snapshot.host_key_algorithm.clone(),
+                    fingerprint: target_snapshot.host_key_fingerprint.clone(),
+                }),
                 files: RemoteDeploymentFiles {
                     local_agent: agent_path.clone(),
                     local_artifact: shared_artifact.clone(),
                     local_env: env,
                     local_host_info: host_info,
+                    local_compose: compose,
                 },
                 config: RemoteDeploymentConfig {
                     operation_id: String::new(),
+                    release_fingerprint: release_fingerprint.clone(),
                     mac_normalized: mac.clone(),
                     data_root: profile.values.aio_data_root.clone(),
                     deploy_root: profile.values.aio_deploy_root.clone(),
@@ -534,6 +569,7 @@ async fn execute_prepared_targets(
     );
     let prepared = Arc::new(prepared);
     let connector = Arc::new(RusshConnector::default());
+    let global_slots = global_remote_node_slots();
     let plan_for_worker = plan.clone();
     execute_deployment_targets(plan, cancellation.clone(), {
         let prepared = prepared.clone();
@@ -544,9 +580,16 @@ async fn execute_prepared_targets(
             let lease_by_mac = lease_by_mac.clone();
             let workbench_pool = workbench_pool.clone();
             let connector = connector.clone();
+            let global_slots = global_slots.clone();
             let plan = plan_for_worker.clone();
             let progress_sink = progress_sink.clone();
             async move {
+                let _global_permit = tokio::select! {
+                    _ = cancellation.cancelled() => return Err(AppError::Cancelled),
+                    permit = global_slots.acquire_owned() => {
+                        permit.map_err(|_| AppError::Conflict("全局远端节点并发控制器已关闭".into()))?
+                    }
+                };
                 let execution = async {
                     let node = prepared
                         .get(&mac)
@@ -667,9 +710,12 @@ async fn execute_prepared_targets(
     .await
 }
 
-fn prepare_artifact(input: &mut DeploymentPlanInput) -> AppResult<Option<ReleaseManifest>> {
+fn prepare_artifact(
+    input: &mut DeploymentPlanInput,
+) -> AppResult<(Option<ReleaseManifest>, String)> {
     if input.mode == DeploymentMode::ServiceUpgrade {
         let image = inspect_image_archive(Path::new(&input.artifact_path))?;
+        let fingerprint = sha256_file(Path::new(&input.artifact_path))?;
         let tag = input
             .image_name
             .clone()
@@ -692,12 +738,15 @@ fn prepare_artifact(input: &mut DeploymentPlanInput) -> AppResult<Option<Release
                 .unwrap_or_else(|| "service".into()),
             input.image_name.clone().unwrap_or_default(),
         )]);
-        Ok(None)
+        Ok((None, fingerprint))
     } else {
         let validation = inspect_release_directory(Path::new(&input.artifact_path))?;
         if !validation.valid {
             return Err(AppError::InvalidConfig(validation.errors.join("；")));
         }
+        let fingerprint = validation.fingerprint.ok_or(AppError::Integrity {
+            operation: "读取Release指纹",
+        })?;
         let manifest = validation
             .manifest
             .ok_or_else(|| AppError::InvalidConfig("Release缺少manifest".into()))?;
@@ -708,8 +757,125 @@ fn prepare_artifact(input: &mut DeploymentPlanInput) -> AppResult<Option<Release
             .iter()
             .map(|image| (image.service.clone(), image.image.clone()))
             .collect();
-        Ok(Some(manifest))
+        Ok((Some(manifest), fingerprint))
     }
+}
+
+fn materialize_artifact_snapshot(
+    input: &mut DeploymentPlanInput,
+    task_dir: &Path,
+    expected_fingerprint: &str,
+) -> AppResult<()> {
+    let source = PathBuf::from(&input.artifact_path)
+        .canonicalize()
+        .map_err(|error| AppError::io("规范化部署发布物", &error))?;
+    if input.mode == DeploymentMode::ServiceUpgrade {
+        if std::fs::symlink_metadata(&source)
+            .map_err(|error| AppError::io("读取单服镜像属性", &error))?
+            .file_type()
+            .is_symlink()
+        {
+            return Err(AppError::InvalidConfig(
+                "单服镜像快照不允许使用符号链接".into(),
+            ));
+        }
+        let temporary = task_dir.join("service-image.tar.part");
+        let destination = task_dir.join("service-image.tar");
+        if temporary.exists() || destination.exists() {
+            return Err(AppError::Conflict("任务发布物快照已存在".into()));
+        }
+        std::fs::copy(&source, &temporary)
+            .map_err(|error| AppError::io("复制单服镜像快照", &error))?;
+        let actual = sha256_file(&temporary)?;
+        if !actual.eq_ignore_ascii_case(expected_fingerprint) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(AppError::Integrity {
+                operation: "校验单服镜像快照",
+            });
+        }
+        std::fs::rename(&temporary, &destination)
+            .map_err(|error| AppError::io("发布单服镜像快照", &error))?;
+        input.artifact_path = destination.to_string_lossy().into_owned();
+        return Ok(());
+    }
+
+    let temporary = task_dir.join("release-snapshot.part");
+    let destination = task_dir.join("release-snapshot");
+    if temporary.exists() || destination.exists() {
+        return Err(AppError::Conflict("任务Release快照已存在".into()));
+    }
+    std::fs::create_dir(&temporary)
+        .map_err(|error| AppError::io("创建Release快照临时目录", &error))?;
+    let copy_result = copy_release_directory(&source, &temporary);
+    if let Err(error) = copy_result {
+        let _ = std::fs::remove_dir_all(&temporary);
+        return Err(error);
+    }
+    let validation = inspect_release_directory(&temporary)?;
+    let actual = validation.fingerprint.ok_or(AppError::Integrity {
+        operation: "读取Release快照指纹",
+    })?;
+    if !validation.valid || !actual.eq_ignore_ascii_case(expected_fingerprint) {
+        let _ = std::fs::remove_dir_all(&temporary);
+        return Err(AppError::Integrity {
+            operation: "校验Release快照",
+        });
+    }
+    std::fs::rename(&temporary, &destination)
+        .map_err(|error| AppError::io("发布Release快照", &error))?;
+    input.artifact_path = destination.to_string_lossy().into_owned();
+    Ok(())
+}
+
+fn copy_release_directory(source: &Path, destination: &Path) -> AppResult<()> {
+    if !source.is_dir() {
+        return Err(AppError::InvalidConfig("Release快照源不是目录".into()));
+    }
+    let mut entries = WalkDir::new(source)
+        .follow_links(false)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| AppError::InvalidConfig("遍历Release快照源失败".into()))?;
+    entries.sort_by(|left, right| left.path().cmp(right.path()));
+    for entry in entries {
+        if entry.path() == source {
+            continue;
+        }
+        if entry.file_type().is_symlink() {
+            return Err(AppError::InvalidConfig(
+                "Release快照不允许包含符号链接".into(),
+            ));
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(source)
+            .map_err(|_| AppError::InvalidConfig("Release快照路径异常".into()))?;
+        if relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        }) {
+            return Err(AppError::InvalidConfig("Release快照路径不安全".into()));
+        }
+        let target = destination.join(relative);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&target)
+                .map_err(|error| AppError::io("创建Release快照目录", &error))?;
+        } else if entry.file_type().is_file() {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| AppError::io("创建Release快照父目录", &error))?;
+            }
+            std::fs::copy(entry.path(), &target)
+                .map_err(|error| AppError::io("复制Release快照文件", &error))?;
+        } else {
+            return Err(AppError::InvalidConfig(
+                "Release快照包含不支持的文件类型".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn prepare_shared_artifact(plan: &DeploymentPlan, task_dir: &Path) -> AppResult<PathBuf> {

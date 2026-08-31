@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   NButton,
   NCheckbox,
@@ -35,6 +34,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import { useOperationsAdapter } from "@/shared/api/operationsAdapter";
+import { useSystemDialogAdapter } from "@/shared/api/systemDialogAdapter";
 import type { OperationMode } from "@/shared/model/demo";
 import type {
   DeploymentTaskTargetView,
@@ -56,6 +56,7 @@ const message = useMessage();
 const route = useRoute();
 const router = useRouter();
 const adapter = useOperationsAdapter();
+const dialogs = useSystemDialogAdapter();
 const projects = useProjectStore();
 const aio = useAioNodesStore();
 const release = useReleaseProfileStore();
@@ -71,11 +72,14 @@ const concurrency = ref(2);
 const historyOpen = ref(false);
 const selectedHistoryId = ref<string>();
 const resultTaskId = ref<string>();
+const operationProjectId = ref<string>();
 const releaseValidation = ref<ReleaseValidation>();
 const imageInspection = ref<ServiceImageInspection>();
 const checking = ref(false);
 const executing = ref(false);
 let taskRefreshTimer: number | undefined;
+let projectContextMounted = false;
+let projectContextRequest = 0;
 
 const steps = [
   { title: "选择", hint: "模式、范围和发布文件" },
@@ -85,7 +89,10 @@ const steps = [
 ];
 
 const currentTask = computed(() => {
-  return workflow.currentTask?.id === resultTaskId.value ? workflow.currentTask : undefined;
+  return workflow.currentTask?.id === resultTaskId.value
+    && workflow.currentTaskProjectId === operationProjectId.value
+    ? workflow.currentTask
+    : undefined;
 });
 const history = computed(() => workflow.history.items);
 const selectedHistory = computed(() => workflow.historyDetail?.operation);
@@ -130,18 +137,43 @@ const resultState = computed(() => {
 watch(
   () => currentTask.value?.state,
   (state) => {
-    if (["succeeded", "partially_succeeded", "failed", "cancelled", "interrupted", "check_failed"].includes(state ?? "")) step.value = 3;
+    if (["succeeded", "partially_succeeded", "failed", "cancelled", "interrupted", "check_failed", "finalizing_failed"].includes(state ?? "")) step.value = 3;
   }
 );
 
 onMounted(async () => {
   await projects.initialize();
-  if (!projects.activeProjectId || !projects.isReady) return;
+  projectContextMounted = true;
+  await activateProjectContext(projects.activeProjectId);
+});
+watch(
+  () => projects.activeProjectId,
+  (projectId, previous) => {
+    if (!projectContextMounted || projectId === previous) return;
+    void activateProjectContext(projectId);
+  }
+);
+onBeforeUnmount(() => {
+  projectContextMounted = false;
+  projectContextRequest += 1;
+  if (taskRefreshTimer !== undefined) window.clearTimeout(taskRefreshTimer);
+});
+
+async function activateProjectContext(projectId?: string) {
+  const request = ++projectContextRequest;
+  workflow.bindProject(projectId);
+  selectedHistoryId.value = undefined;
+  historyOpen.value = false;
+  releaseValidation.value = undefined;
+  imageInspection.value = undefined;
+  selectedMacs.value = [];
+  if (!projectId || !projects.isReady) return;
   await Promise.all([
-    aio.refresh(projects.activeProjectId),
-    release.load(projects.activeProjectId),
-    activity.start(projects.activeProjectId)
+    aio.refresh(projectId),
+    release.load(projectId),
+    activity.start(projectId)
   ]);
+  if (request !== projectContextRequest || projectId !== projects.activeProjectId) return;
   const routedTarget = typeof route.query.target === "string" ? route.query.target : "";
   const routedNode = aio.nodes.find(
     (node) => node.mac === routedTarget && node.managementState !== "conflict"
@@ -152,10 +184,7 @@ onMounted(async () => {
         .filter((node) => node.managementState === "managed" && node.platformState === "online")
         .slice(0, 4)
         .map((node) => node.mac);
-});
-onBeforeUnmount(() => {
-  if (taskRefreshTimer !== undefined) window.clearTimeout(taskRefreshTimer);
-});
+}
 
 function toggleNode(mac: string, checked: boolean) {
   if (checked) selectedMacs.value = [...new Set([...selectedMacs.value, mac])];
@@ -167,22 +196,23 @@ async function chooseArtifact() {
     message.info("浏览器 Fixture 不读取本机文件；Tauri 模式使用真实文件选择器");
     return;
   }
-  const selected = await openFileDialog(
-    mode.value === "service_upgrade"
-      ? {
-          multiple: false,
-          directory: false,
-          filters: [{ name: "Docker镜像归档", extensions: ["tar"] }]
-        }
-      : { multiple: false, directory: true }
-  );
-  if (typeof selected !== "string") return;
+  const selected = mode.value === "service_upgrade"
+    ? await dialogs.selectFile("选择Docker镜像归档", [
+        { name: "Docker镜像归档", extensions: ["tar"] }
+      ])
+    : await dialogs.selectDirectory("选择本地Release目录");
+  if (!selected) return;
   artifactPath.value = selected;
   releaseValidation.value = undefined;
   imageInspection.value = undefined;
 }
 
 async function runCheck() {
+  const projectId = projects.activeProjectId;
+  if (!projectId) {
+    message.warning("请先选择项目");
+    return;
+  }
   if (!selectedMacs.value.length) {
     message.warning("请至少选择一台一体机");
     return;
@@ -200,9 +230,10 @@ async function runCheck() {
       throw new Error(releaseValidation.value.errors.join("；"));
     }
     const report = await workflow.runPreflight(
-      projects.activeProjectId,
+      projectId,
       buildPlanInput()
     );
+    if (projectId !== projects.activeProjectId) return;
     step.value = 1;
     if (report.ready) {
       message.success("所有真实执行条件检查通过");
@@ -218,15 +249,21 @@ async function runCheck() {
 }
 
 async function startOperation() {
+  const projectId = projects.activeProjectId;
+  if (!projectId || workflow.preflightProjectId !== projectId) {
+    message.warning("项目已切换，请在当前项目重新执行预检");
+    return;
+  }
   executing.value = true;
   step.value = 2;
   try {
     const submission = await workflow.submit(
-      projects.activeProjectId,
+      projectId,
       workflow.preflight?.normalizedPlan ?? buildPlanInput()
     );
+    operationProjectId.value = projectId;
     resultTaskId.value = submission.taskId;
-    await activity.refreshTasks(projects.activeProjectId);
+    await activity.refreshTasks(projectId);
     scheduleTaskRefresh();
     message.success("部署任务已提交：" + submission.taskId);
   } catch (error) {
@@ -270,12 +307,13 @@ async function handleRemediation(check: DeploymentPreflightCheck) {
 }
 
 async function refreshSubmittedTask() {
-  if (!projects.activeProjectId) return;
-  await activity.refreshTasks(projects.activeProjectId);
+  const projectId = operationProjectId.value;
+  if (!projectId) return;
+  if (projects.activeProjectId === projectId) await activity.refreshTasks(projectId);
   if (!resultTaskId.value) return;
   try {
-    const task = await workflow.loadTask(projects.activeProjectId, resultTaskId.value);
-    if (["succeeded", "partially_succeeded", "failed", "cancelled", "interrupted", "check_failed"].includes(task.state)) {
+    const task = await workflow.loadTask(projectId, resultTaskId.value);
+    if (["succeeded", "partially_succeeded", "failed", "cancelled", "interrupted", "check_failed", "finalizing_failed"].includes(task.state)) {
       if (taskRefreshTimer !== undefined) window.clearTimeout(taskRefreshTimer);
       taskRefreshTimer = undefined;
     }
@@ -285,8 +323,8 @@ async function refreshSubmittedTask() {
 }
 
 async function cancelCurrentTask() {
-  if (!resultTaskId.value) return;
-  await activity.refreshTasks(projects.activeProjectId);
+  if (!resultTaskId.value || !operationProjectId.value) return;
+  await activity.refreshTasks(operationProjectId.value);
   await activity.selectTask(resultTaskId.value);
   await activity.cancelSelectedTask();
   await refreshSubmittedTask();
@@ -295,8 +333,8 @@ async function cancelCurrentTask() {
 }
 
 async function openCurrentLogs() {
-  if (resultTaskId.value) {
-    await activity.refreshTasks(projects.activeProjectId);
+  if (resultTaskId.value && operationProjectId.value) {
+    await activity.refreshTasks(operationProjectId.value);
     await activity.selectTask(resultTaskId.value);
   }
   activity.openPanel("logs");
@@ -305,6 +343,7 @@ async function openCurrentLogs() {
 function retryOperation() {
   step.value = 0;
   resultTaskId.value = undefined;
+  operationProjectId.value = undefined;
   workflow.clearTask();
   workflow.clearPreflight();
 }
@@ -320,6 +359,7 @@ function scheduleTaskRefresh() {
 function resetFlow() {
   step.value = 0;
   resultTaskId.value = undefined;
+  operationProjectId.value = undefined;
   workflow.clearTask();
   workflow.clearPreflight();
 }
@@ -328,9 +368,10 @@ async function openHistory() {
   selectedHistoryId.value = undefined;
   workflow.clearHistoryDetail();
   historyOpen.value = true;
-  if (!projects.activeProjectId) return;
+  const projectId = projects.activeProjectId;
+  if (!projectId) return;
   try {
-    await workflow.loadHistory(projects.activeProjectId);
+    await workflow.loadHistory(projectId);
   } catch {
     if (workflow.error) message.error(workflow.error);
   }
@@ -338,9 +379,10 @@ async function openHistory() {
 
 async function selectHistory(record: OperationHistoryItem) {
   selectedHistoryId.value = record.id;
-  if (!projects.activeProjectId) return;
+  const projectId = projects.activeProjectId;
+  if (!projectId) return;
   try {
-    await workflow.loadHistoryDetail(projects.activeProjectId, record.id);
+    await workflow.loadHistoryDetail(projectId, record.id);
   } catch {
     selectedHistoryId.value = undefined;
     if (workflow.error) message.error(workflow.error);
@@ -365,6 +407,7 @@ function historyResultLabel(state: string) {
     failed: "失败",
     cancelled: "已取消",
     interrupted: "已中断",
+    finalizing_failed: "最终化待重试",
     running: "执行中"
   }[state] ?? state;
 }
@@ -372,7 +415,7 @@ function historyResultLabel(state: string) {
 function stateTone(state: string): "success" | "warning" | "error" | "info" {
   if (state === "succeeded") return "success";
   if (state === "partially_succeeded" || state === "cancelled" || state === "interrupted") return "warning";
-  if (state === "failed" || state === "unknown") return "error";
+  if (state === "failed" || state === "unknown" || state === "finalizing_failed") return "error";
   return "info";
 }
 
@@ -470,7 +513,8 @@ function historyArtifact(record: OperationHistoryItem) {
           <div class="result-metrics"><span><small>目标数量</small><strong>{{ resultTargetCount }}</strong></span><span><small>成功</small><strong class="success-text">{{ resultSuccessCount }}</strong></span><span><small>失败/异常</small><strong>{{ resultFailureCount }}</strong></span><span><small>发布版本</small><strong>{{ artifactLabel }}</strong></span></div>
           <div v-if="resultTargets.length" class="result-list"><div v-for="target in resultTargets" :key="target.mac"><CheckCircle2 :size="17" /><span><strong>{{ aio.nodes.find((node) => node.mac === target.mac)?.name ?? target.mac }}</strong><small>{{ target.mac }}</small></span><span>{{ target.message ?? target.stage }}</span><n-tag size="small" :type="stateTone(target.state)" :bordered="false">{{ historyResultLabel(target.state) }}</n-tag></div></div>
           <div v-else class="empty-state">没有可验证的节点最终结果，未按成功处理。</div>
-          <footer class="stage-footer"><n-button size="small" secondary @click="openHistory">查看操作记录</n-button><n-button v-if="['failed', 'cancelled', 'interrupted', 'check_failed'].includes(resultState)" size="small" secondary @click="retryOperation"><template #icon><RotateCcw /></template>按当前参数重新检查</n-button><n-button size="small" type="primary" @click="resetFlow"><template #icon><RotateCcw /></template>创建下一次任务</n-button></footer>
+          <p v-if="resultState === 'finalizing_failed'" class="modal-description">项目侧原子最终化或本地投影尚未安全收敛，任务制品已保留；重启工作台会在确认共享操作终态后自动重试本地投影。</p>
+          <footer class="stage-footer"><n-button size="small" secondary @click="openHistory">查看操作记录</n-button><n-button v-if="['failed', 'cancelled', 'interrupted', 'check_failed'].includes(resultState)" size="small" secondary @click="retryOperation"><template #icon><RotateCcw /></template>按当前参数重新检查</n-button><n-button size="small" type="primary" :disabled="resultState === 'finalizing_failed'" @click="resetFlow"><template #icon><RotateCcw /></template>创建下一次任务</n-button></footer>
         </section>
       </div>
     </section>

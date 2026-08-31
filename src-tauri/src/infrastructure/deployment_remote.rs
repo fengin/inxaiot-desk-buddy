@@ -20,6 +20,7 @@ use crate::application::ports::remote_session::{
 };
 use crate::core::error::{AppError, AppResult};
 use crate::domain::aio::deployment::{AgentInvocation, DeploymentMode, DeploymentPlan};
+use crate::domain::aio::release::sha256_file;
 use crate::domain::common::task::{StepState, TargetState, TaskEventLevel};
 
 #[derive(Clone, Debug)]
@@ -28,11 +29,13 @@ pub struct RemoteDeploymentFiles {
     pub local_artifact: PathBuf,
     pub local_env: Option<PathBuf>,
     pub local_host_info: Option<PathBuf>,
+    pub local_compose: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
 pub struct RemoteDeploymentConfig {
     pub operation_id: String,
+    pub release_fingerprint: String,
     pub mac_normalized: String,
     pub data_root: String,
     pub deploy_root: String,
@@ -261,6 +264,7 @@ where
     };
     let remote_env = format!("{staging}/.env");
     let remote_host_info = format!("{staging}/host-info.json");
+    let remote_compose = format!("{staging}/docker-compose.yml");
     let agent_bytes = local_file_size(&files.local_agent)?;
     let artifact_bytes = local_file_size(&files.local_artifact)?;
     let env_bytes = files
@@ -275,10 +279,17 @@ where
         .map(local_file_size)
         .transpose()?
         .unwrap_or_default();
+    let compose_bytes = files
+        .local_compose
+        .as_deref()
+        .map(local_file_size)
+        .transpose()?
+        .unwrap_or_default();
     let upload_total = agent_bytes
         .saturating_add(artifact_bytes)
         .saturating_add(env_bytes)
         .saturating_add(host_info_bytes)
+        .saturating_add(compose_bytes)
         .max(1);
     let mut uploaded_base = 0_u64;
     let execution: AppResult<()> = async {
@@ -373,6 +384,22 @@ where
             .await?;
             uploaded_base = uploaded_base.saturating_add(host_info_bytes);
         }
+        if let Some(compose) = &files.local_compose {
+            checkpoint().await?;
+            upload_observed(
+                session,
+                &config.operation_id,
+                compose,
+                &remote_compose,
+                cancellation,
+                progress,
+                config,
+                uploaded_base,
+                upload_total,
+            )
+            .await?;
+            uploaded_base = uploaded_base.saturating_add(compose_bytes);
+        }
         emit_progress(
             progress,
             config,
@@ -435,6 +462,12 @@ where
                 ("REMOTE_IMAGE".into(), remote_artifact.clone()),
                 ("REMOTE_ENV".into(), remote_env.clone()),
                 ("REMOTE_HOST_INFO".into(), remote_host_info.clone()),
+                ("REMOTE_COMPOSE".into(), remote_compose.clone()),
+                ("TASK_ID".into(), config.operation_id.clone()),
+                (
+                    "RELEASE_FINGERPRINT".into(),
+                    config.release_fingerprint.clone(),
+                ),
                 ("PLATFORM_API_HOST".into(), config.platform_api_host.clone()),
                 (
                     "PLATFORM_API_PORT".into(),
@@ -590,6 +623,7 @@ where
         99,
     )
     .await;
+    let cleanup_failed = cleanup.is_err();
     match (execution.as_ref(), cleanup) {
         (Ok(_), Ok(_)) => emit_progress(
             progress,
@@ -627,6 +661,11 @@ where
             "REMOTE_CLEANUP_COMPLETED",
             Some("远端执行未完成，本次临时目录已精确清理".into()),
         )?,
+    }
+    if execution.is_ok() && cleanup_failed {
+        return Err(AppError::Conflict(
+            "远端部署已执行但敏感staging清理失败，任务不能标记成功".into(),
+        ));
     }
     execution
 }
@@ -738,7 +777,7 @@ async fn upload_observed(
                 operation_id: operation_id.into(),
                 local_path: local.to_path_buf(),
                 remote_path: remote.into(),
-                expected_sha256: None,
+                expected_sha256: Some(sha256_file(local)?),
                 overwrite: true,
                 chunk_size: 1024 * 1024,
                 inactivity_timeout: Duration::from_secs(60),
@@ -809,10 +848,14 @@ fn validate_files(mode: DeploymentMode, files: &RemoteDeploymentFiles) -> AppRes
             || files
                 .local_host_info
                 .as_ref()
+                .is_none_or(|path| !path.is_file())
+            || files
+                .local_compose
+                .as_ref()
                 .is_none_or(|path| !path.is_file()))
     {
         return Err(AppError::InvalidConfig(
-            "完整部署缺少.env或host-info文件".into(),
+            "完整部署缺少.env、host-info或实际Compose文件".into(),
         ));
     }
     Ok(())

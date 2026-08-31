@@ -21,6 +21,8 @@ import { configureDataDirectoryAdapter } from "@/shared/api/dataDirectoryAdapter
 import { RealDataDirectoryAdapter } from "@/shared/api/realDataDirectoryAdapter";
 import { configureDiagnosticsAdapter } from "@/shared/api/diagnosticsAdapter";
 import { RealDiagnosticsAdapter } from "@/shared/api/realDiagnosticsAdapter";
+import { configureSystemDialogAdapter } from "@/shared/api/systemDialogAdapter";
+import { RealSystemDialogAdapter } from "@/shared/api/realSystemDialogAdapter";
 
 async function bootstrap() {
   if (isTauriRuntime()) {
@@ -30,6 +32,7 @@ async function bootstrap() {
     configureOperationsAdapter(new RealOperationsAdapter());
     configureDataDirectoryAdapter(new RealDataDirectoryAdapter());
     configureDiagnosticsAdapter(new RealDiagnosticsAdapter());
+    configureSystemDialogAdapter(new RealSystemDialogAdapter());
   } else if (import.meta.env.DEV) {
     const { FixtureWorkbenchAdapter } = await import("@/dev-fixtures/workbenchFixtureAdapter");
     const { FixtureActivityAdapter } = await import("@/dev-fixtures/activityFixtureAdapter");
@@ -37,12 +40,14 @@ async function bootstrap() {
     const { FixtureOperationsAdapter } = await import("@/dev-fixtures/operationsFixtureAdapter");
     const { FixtureDataDirectoryAdapter } = await import("@/dev-fixtures/dataDirectoryFixtureAdapter");
     const { FixtureDiagnosticsAdapter } = await import("@/dev-fixtures/diagnosticsFixtureAdapter");
+    const { FixtureSystemDialogAdapter } = await import("@/dev-fixtures/systemDialogFixtureAdapter");
     configureWorkbenchAdapter(new FixtureWorkbenchAdapter());
     configureActivityAdapter(new FixtureActivityAdapter());
     configureAioAdapter(new FixtureAioAdapter());
     configureOperationsAdapter(new FixtureOperationsAdapter());
     configureDataDirectoryAdapter(new FixtureDataDirectoryAdapter());
     configureDiagnosticsAdapter(new FixtureDiagnosticsAdapter());
+    configureSystemDialogAdapter(new FixtureSystemDialogAdapter());
   } else {
     throw new Error("生产构建只能在 Tauri Runtime 中使用，Fixture Adapter 已禁用");
   }

@@ -45,7 +45,7 @@ impl<'a> TaskDataLifecycle<'a> {
         state: TaskState,
         now: OffsetDateTime,
     ) -> AppResult<()> {
-        if !state.is_terminal() && state != TaskState::FinalizingFailed {
+        if !state.is_terminal() {
             return Err(AppError::Conflict(format!(
                 "任务尚未到安全清理边界：{}",
                 state.as_str()
@@ -257,5 +257,20 @@ mod tests {
                 .finalize_task("project", "running", TaskState::Running)
                 .is_err()
         );
+        let retry_artifacts = paths
+            .project_task_dir("project", "finalizing")
+            .expect("retry artifacts");
+        std::fs::create_dir_all(&retry_artifacts).expect("retry dir");
+        std::fs::write(
+            retry_artifacts.join("pending-local-finalization.json"),
+            b"retry",
+        )
+        .expect("retry marker");
+        assert!(
+            TaskDataLifecycle::new(&paths)
+                .finalize_task("project", "finalizing", TaskState::FinalizingFailed)
+                .is_err()
+        );
+        assert!(retry_artifacts.exists());
     }
 }

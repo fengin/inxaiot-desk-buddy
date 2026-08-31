@@ -201,7 +201,12 @@ pub fn build_test_release(version: &str) -> BuiltTestRelease {
             env: "templates/env.template".into(),
             host_info: "templates/host-info.json.template".into(),
         },
-        runtime: Default::default(),
+        runtime: inxaiot_desk_buddy_lib::domain::aio::release::ReleaseRuntime {
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            docker: ">=20.10".into(),
+            compose: ">=2.0".into(),
+        },
     };
     std::fs::write(
         release.join("manifest.json"),

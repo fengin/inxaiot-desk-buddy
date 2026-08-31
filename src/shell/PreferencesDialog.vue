@@ -1,17 +1,18 @@
 <script setup lang="ts">
-import { open } from "@tauri-apps/plugin-dialog";
 import { NAlert, NButton, NForm, NFormItem, NInput, NModal, NSelect, NSpace, NSwitch, useMessage } from "naive-ui";
 import { computed, reactive, watch } from "vue";
 
 import { usePreferencesStore, type DensityMode, type FontSizeMode, type ThemeMode } from "@/stores/preferences";
 import { useDataDirectoryStore } from "@/stores/dataDirectory";
 import type { DataDirectorySwitchMode } from "@/shared/model/dataDirectory";
+import { useSystemDialogAdapter } from "@/shared/api/systemDialogAdapter";
 
 const props = defineProps<{ show: boolean }>();
 const emit = defineEmits<{ "update:show": [value: boolean] }>();
 const preferences = usePreferencesStore();
 const dataDirectory = useDataDirectoryStore();
 const message = useMessage();
+const dialogs = useSystemDialogAdapter();
 let original = { ...preferences.snapshot };
 
 const draft = reactive({
@@ -63,13 +64,9 @@ function cancel() {
 }
 
 async function selectDataDirectory() {
-  if (typeof window.__TAURI_INTERNALS__ === "undefined") {
-    draft.dataDirectory = "D:\\INX\\DeskBuddy";
-    message.info("浏览器 Demo 已填入示例目录；桌面版会打开系统目录选择器");
-    return;
-  }
-  const selected = await open({ directory: true, multiple: false, title: "选择 INX 实施工作台数据目录" });
-  if (typeof selected === "string") draft.dataDirectory = selected;
+  const selected = await dialogs.selectDirectory("选择 INX 实施工作台数据目录");
+  if (selected) draft.dataDirectory = selected;
+  if (!dialogs.real) message.info("浏览器Fixture已填入隔离示例目录");
 }
 
 async function save() {

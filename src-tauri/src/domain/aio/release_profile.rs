@@ -100,6 +100,22 @@ impl ReleaseProfileDraft {
                 "SSH密码和SSH私钥至少填写一项".into(),
             ));
         }
+        if credentials.platform_auth_key.len() < 3
+            || credentials.platform_mqtt_password.len() < 3
+            || credentials.aio_mqtt_password.len() < 3
+            || credentials
+                .ssh_password
+                .as_deref()
+                .is_some_and(|value| !value.is_empty() && value.len() < 3)
+            || credentials
+                .ssh_private_key
+                .as_deref()
+                .is_some_and(|value| !value.is_empty() && value.len() < 3)
+        {
+            return Err(AppError::InvalidConfig(
+                "AuthKey、MQTT密码和SSH凭据至少需要3个字节，以确保日志可安全脱敏".into(),
+            ));
+        }
         validate_remote_root(&values.aio_data_root, "一体机数据目录")?;
         validate_remote_root(&values.aio_deploy_root, "一体机部署目录")?;
         let env_names = validate_env_template(&values.env_template)?;

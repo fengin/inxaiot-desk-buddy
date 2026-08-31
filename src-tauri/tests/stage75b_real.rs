@@ -460,6 +460,16 @@ async fn stage75b_real_preflight_async_progress_cancel_history_and_cleanup() {
             .preflight(&project_id, &input)
             .await?;
         assert!(preflight.ready);
+        let snapshot = preflight
+            .execution_snapshot
+            .as_ref()
+            .expect("ready preflight execution snapshot");
+        snapshot.validate(&project_id)?;
+        assert_eq!(snapshot.targets.len(), 2);
+        assert_eq!(snapshot.artifact_fingerprint.len(), 64);
+        assert!(snapshot.targets.iter().all(|target| target.node.version > 0
+            && !target.host_key_fingerprint.is_empty()
+            && !target.host_key_accepted_at.is_empty()));
         assert_eq!(
             preflight
                 .checks

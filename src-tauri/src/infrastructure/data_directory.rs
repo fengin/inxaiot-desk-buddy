@@ -1,8 +1,10 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use walkdir::WalkDir;
 
@@ -15,6 +17,7 @@ use crate::core::error::{AppError, AppResult};
 const BOOTSTRAP_VERSION: u32 = 1;
 const BOOTSTRAP_DIR: &str = ".bootstrap";
 const BOOTSTRAP_FILE: &str = "data-directory.json";
+const MIGRATION_MARKER: &str = ".inxaiot-migration-complete";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +83,7 @@ impl DataDirectoryManager {
                         rollback_created_target(&target, &pending);
                         return Err(error);
                     }
+                    let _ = fs::remove_file(target.join(MIGRATION_MARKER));
                     target
                 }
                 Err(error) => {
@@ -92,6 +96,7 @@ impl DataDirectoryManager {
         } else {
             current
         };
+        let _ = fs::remove_file(active.join(MIGRATION_MARKER));
         Ok((
             active,
             Self {
@@ -150,13 +155,15 @@ impl DataDirectoryPort for DataDirectoryManager {
             .map_err(|_| AppError::Conflict("数据目录启动配置锁已损坏".into()))?;
         let active = self.active_directory(&config);
         validate_switch_target(&active, &target, false)?;
-        config.pending_switch = Some(PendingSwitch {
+        let mut next = config.clone();
+        next.pending_switch = Some(PendingSwitch {
             target_directory: target.to_string_lossy().into_owned(),
             mode: request.mode,
             requested_at: OffsetDateTime::now_utc().to_string(),
         });
-        config.last_switch_error = None;
-        self.write_locked(&config)?;
+        next.last_switch_error = None;
+        self.write_locked(&next)?;
+        *config = next;
         drop(config);
         self.status()
     }
@@ -173,13 +180,15 @@ impl DataDirectoryPort for DataDirectoryManager {
             .map(PathBuf::from)
             .ok_or_else(|| AppError::NotFound("没有可回滚的上一数据目录".into()))?;
         validate_switch_target(&active, &previous, true)?;
-        config.pending_switch = Some(PendingSwitch {
+        let mut next = config.clone();
+        next.pending_switch = Some(PendingSwitch {
             target_directory: previous.to_string_lossy().into_owned(),
             mode: DataDirectorySwitchMode::UseExisting,
             requested_at: OffsetDateTime::now_utc().to_string(),
         });
-        config.last_switch_error = None;
-        self.write_locked(&config)?;
+        next.last_switch_error = None;
+        self.write_locked(&next)?;
+        *config = next;
         drop(config);
         self.status()
     }
@@ -192,6 +201,15 @@ fn apply_pending_switch(
     pending: &PendingSwitch,
 ) -> AppResult<PathBuf> {
     let target = absolute_directory(Path::new(&pending.target_directory))?;
+    if pending.mode == DataDirectorySwitchMode::Migrate && target.join(MIGRATION_MARKER).is_file() {
+        validate_switch_target(current, &target, true)?;
+        if !target.join("local.db").is_file() {
+            return Err(AppError::InvalidConfig(
+                "迁移完成标记存在但local.db缺失，已拒绝切换".into(),
+            ));
+        }
+        return Ok(target);
+    }
     validate_switch_target(
         current,
         &target,
@@ -209,17 +227,47 @@ fn apply_pending_switch(
             create_empty_target(&target)?;
         }
         DataDirectorySwitchMode::Migrate => {
-            create_empty_target(&target)?;
-            if current.exists()
-                && let Err(error) =
-                    copy_directory(current, &target, default_directory, bootstrap_file)
-            {
-                let _ = fs::remove_dir_all(&target);
-                return Err(error);
-            }
+            migrate_directory(current, &target, default_directory, bootstrap_file)?;
         }
     }
     Ok(target)
+}
+
+fn migrate_directory(
+    source: &Path,
+    target: &Path,
+    default_directory: &Path,
+    bootstrap_file: &Path,
+) -> AppResult<()> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| AppError::InvalidConfig("迁移目标没有父目录".into()))?;
+    let name = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| AppError::InvalidConfig("迁移目标目录名无效".into()))?;
+    let staging = parent.join(format!(".{name}.inxaiot-migrate"));
+    if staging.exists() {
+        fs::remove_dir_all(&staging)
+            .map_err(|error| AppError::io("清理上次未完成迁移staging", &error))?;
+    }
+    fs::create_dir(&staging).map_err(|error| AppError::io("创建数据目录迁移staging", &error))?;
+    let copied = if source.exists() {
+        copy_directory(source, &staging, default_directory, bootstrap_file)
+    } else {
+        Ok(())
+    };
+    if let Err(error) = copied {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    fs::write(staging.join(MIGRATION_MARKER), b"complete")
+        .map_err(|error| AppError::io("写入数据目录迁移完成标记", &error))?;
+    if target.exists() {
+        fs::remove_dir(target).map_err(|error| AppError::io("移除空迁移目标目录", &error))?;
+    }
+    fs::rename(&staging, target).map_err(|error| AppError::io("原子发布迁移数据目录", &error))?;
+    Ok(())
 }
 
 fn create_empty_target(target: &Path) -> AppResult<()> {
@@ -270,6 +318,11 @@ fn copy_directory(
         if entry.path() == bootstrap_file {
             continue;
         }
+        if entry.file_type().is_symlink() {
+            return Err(AppError::InvalidConfig(
+                "数据目录迁移不允许符号链接或目录联接".into(),
+            ));
+        }
         let destination = target.join(relative);
         if entry.file_type().is_dir() {
             fs::create_dir_all(&destination)
@@ -281,22 +334,71 @@ fn copy_directory(
             }
             fs::copy(entry.path(), &destination)
                 .map_err(|error| AppError::io("迁移数据目录文件", &error))?;
+            let source_size = entry
+                .metadata()
+                .map_err(|_| AppError::Io {
+                    operation: "读取迁移源文件属性",
+                })?
+                .len();
+            let target_size = fs::metadata(&destination)
+                .map_err(|error| AppError::io("读取迁移目标文件属性", &error))?
+                .len();
+            if source_size != target_size {
+                return Err(AppError::Integrity {
+                    operation: "校验迁移数据目录文件大小",
+                });
+            }
+            if sha256_path(entry.path())? != sha256_path(&destination)? {
+                return Err(AppError::Integrity {
+                    operation: "校验迁移数据目录文件SHA-256",
+                });
+            }
+        } else {
+            return Err(AppError::InvalidConfig(
+                "数据目录迁移包含不支持的文件类型".into(),
+            ));
         }
     }
     Ok(())
+}
+
+fn sha256_path(path: &Path) -> AppResult<[u8; 32]> {
+    let mut file =
+        fs::File::open(path).map_err(|error| AppError::io("打开迁移校验文件", &error))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| AppError::io("读取迁移校验文件", &error))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest.finalize().into())
 }
 
 fn validate_switch_target(current: &Path, target: &Path, allow_existing: bool) -> AppResult<()> {
     if current == target {
         return Err(AppError::Conflict("目标数据目录与当前目录相同".into()));
     }
-    if paths_overlap(current, target) {
+    if paths_overlap(current, target)? {
         return Err(AppError::InvalidConfig("新旧数据目录不能互相包含".into()));
     }
     if target.parent().is_none() {
         return Err(AppError::InvalidConfig("不能使用磁盘根目录".into()));
     }
     if target.exists() {
+        if fs::symlink_metadata(target)
+            .map_err(|error| AppError::io("读取目标数据目录链接属性", &error))?
+            .file_type()
+            .is_symlink()
+        {
+            return Err(AppError::InvalidConfig(
+                "目标数据目录不能是符号链接或目录联接".into(),
+            ));
+        }
         if !target.is_dir() {
             return Err(AppError::InvalidConfig("目标数据目录不是目录".into()));
         }
@@ -318,10 +420,33 @@ fn validate_switch_target(current: &Path, target: &Path, allow_existing: bool) -
     Ok(())
 }
 
-fn paths_overlap(left: &Path, right: &Path) -> bool {
-    let left = normalized_path(left);
-    let right = normalized_path(right);
-    left.starts_with(&(right.clone() + "\\")) || right.starts_with(&(left.clone() + "\\"))
+fn paths_overlap(left: &Path, right: &Path) -> AppResult<bool> {
+    let left = normalized_path(&resolve_existing_ancestors(left)?);
+    let right = normalized_path(&resolve_existing_ancestors(right)?);
+    Ok(left == right
+        || left.starts_with(&(right.clone() + "\\"))
+        || right.starts_with(&(left.clone() + "\\")))
+}
+
+fn resolve_existing_ancestors(path: &Path) -> AppResult<PathBuf> {
+    let mut cursor = path;
+    let mut missing = Vec::new();
+    while !cursor.exists() {
+        let name = cursor
+            .file_name()
+            .ok_or_else(|| AppError::InvalidConfig("数据目录路径无法解析".into()))?;
+        missing.push(name.to_os_string());
+        cursor = cursor
+            .parent()
+            .ok_or_else(|| AppError::InvalidConfig("数据目录路径没有现有祖先".into()))?;
+    }
+    let mut resolved = cursor
+        .canonicalize()
+        .map_err(|error| AppError::io("解析数据目录真实路径", &error))?;
+    for component in missing.into_iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
 }
 
 fn normalized_path(path: &Path) -> String {
@@ -342,18 +467,23 @@ fn absolute_directory(path: &Path) -> AppResult<PathBuf> {
 
 fn read_config(path: &Path) -> AppResult<BootstrapConfig> {
     let backup = backup_path(path);
-    let candidate = if path.is_file() {
-        Some(path)
-    } else if backup.is_file() {
-        Some(backup.as_path())
-    } else {
-        None
-    };
-    let Some(candidate) = candidate else {
-        return Ok(BootstrapConfig::default());
-    };
-    let bytes =
-        fs::read(candidate).map_err(|error| AppError::io("读取数据目录启动配置", &error))?;
+    if path.is_file() {
+        match read_config_file(path) {
+            Ok(config) => return Ok(config),
+            Err(primary_error) if backup.is_file() => {
+                return read_config_file(&backup).map_err(|_| primary_error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if backup.is_file() {
+        return read_config_file(&backup);
+    }
+    Ok(BootstrapConfig::default())
+}
+
+fn read_config_file(path: &Path) -> AppResult<BootstrapConfig> {
+    let bytes = fs::read(path).map_err(|error| AppError::io("读取数据目录启动配置", &error))?;
     serde_json::from_slice(&bytes)
         .map_err(|_| AppError::InvalidConfig("数据目录启动配置无法解析".into()))
 }
@@ -382,9 +512,11 @@ fn write_config(path: &Path, config: &BootstrapConfig) -> AppResult<()> {
         let _ = fs::remove_file(&temporary);
         return Err(AppError::io("发布数据目录启动配置", &error));
     }
-    if backup.exists() {
-        fs::remove_file(&backup)
-            .map_err(|error| AppError::io("清理数据目录启动配置备份", &error))?;
+    if backup.exists() && fs::remove_file(&backup).is_err() {
+        tracing::warn!(
+            path = %backup.display(),
+            "data directory bootstrap backup cleanup deferred"
+        );
     }
     Ok(())
 }
@@ -401,7 +533,10 @@ fn rollback_created_target(target: &Path, pending: &PendingSwitch) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BootstrapConfig, DataDirectoryManager, PendingSwitch, write_config};
+    use super::{
+        BootstrapConfig, DataDirectoryManager, MIGRATION_MARKER, PendingSwitch, backup_path,
+        write_config,
+    };
     use crate::application::data_directory::{DataDirectorySwitchMode, DataDirectorySwitchRequest};
     use crate::application::ports::data_directory::DataDirectoryPort;
 
@@ -424,9 +559,13 @@ mod tests {
             .expect("schedule");
         assert!(manager.status().expect("status").restart_required);
         drop(manager);
+        let stale_staging = root.path().join(".custom.inxaiot-migrate");
+        std::fs::create_dir_all(&stale_staging).expect("stale staging");
+        std::fs::write(stale_staging.join("partial"), b"partial").expect("partial");
 
         let (active, manager) = DataDirectoryManager::resolve(&default).expect("migrated");
         assert_eq!(active, target);
+        assert!(!stale_staging.exists());
         assert_eq!(
             std::fs::read(target.join("local.db")).expect("db"),
             b"sqlite"
@@ -501,5 +640,47 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn completed_migration_marker_and_backup_config_recover_after_crash() {
+        let root = tempfile::tempdir().expect("root");
+        let default = root.path().join("default");
+        let target = root.path().join("target");
+        std::fs::create_dir_all(default.join(".bootstrap")).expect("default");
+        std::fs::create_dir_all(&target).expect("target");
+        std::fs::write(target.join("local.db"), b"sqlite").expect("db");
+        std::fs::write(target.join(MIGRATION_MARKER), b"complete").expect("marker");
+        let bootstrap = default.join(".bootstrap/data-directory.json");
+        let pending = BootstrapConfig {
+            pending_switch: Some(PendingSwitch {
+                target_directory: target.to_string_lossy().into_owned(),
+                mode: DataDirectorySwitchMode::Migrate,
+                requested_at: "before-crash".into(),
+            }),
+            ..BootstrapConfig::default()
+        };
+        std::fs::write(
+            &bootstrap,
+            serde_json::to_vec(&pending).expect("pending json"),
+        )
+        .expect("pending config");
+
+        let (active, _) = DataDirectoryManager::resolve(&default).expect("resume commit");
+        assert_eq!(active, target);
+        assert!(!target.join(MIGRATION_MARKER).exists());
+
+        std::fs::write(&bootstrap, b"{corrupt").expect("corrupt primary");
+        std::fs::write(
+            backup_path(&bootstrap),
+            serde_json::to_vec(&BootstrapConfig {
+                active_directory: Some(target.to_string_lossy().into_owned()),
+                ..BootstrapConfig::default()
+            })
+            .expect("backup json"),
+        )
+        .expect("backup config");
+        let (active, _) = DataDirectoryManager::resolve(&default).expect("backup fallback");
+        assert_eq!(active, target);
     }
 }

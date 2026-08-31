@@ -52,6 +52,108 @@ fn task_state_machine_rejects_skips_and_terminal_reentry() {
 }
 
 #[tokio::test]
+async fn local_finalization_projection_is_atomic_and_retryable() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let store = LocalStore::open(temp.path().join("local.db"))
+        .await
+        .expect("local store");
+    insert_project(&store, "project-finalize").await;
+    let repository = TaskRepository::new(store.pool().clone());
+    repository
+        .create(task("projection-task", "project-finalize"))
+        .await
+        .expect("create task");
+    for (expected, next) in [
+        (TaskState::Draft, TaskState::Checking),
+        (TaskState::Checking, TaskState::Ready),
+        (TaskState::Ready, TaskState::Queued),
+        (TaskState::Queued, TaskState::Running),
+    ] {
+        repository
+            .transition("projection-task", expected, next, None, None)
+            .await
+            .expect("advance task");
+    }
+    let target = |key: &str| TargetUpdate {
+        resource_type: "aio".into(),
+        resource_key: key.into(),
+        state: TargetState::Succeeded,
+        stage: "completed".into(),
+        progress_current: 100,
+        progress_total: 100,
+        fencing_token: Some(9),
+        message_code: None,
+        message_params_json: None,
+    };
+    let step = |key: &str| TaskStepWrite {
+        id: format!("projection-task:{key}:health"),
+        resource_type: Some("aio".into()),
+        resource_key: Some(key.into()),
+        step_code: "health".into(),
+        state: StepState::Succeeded,
+        error_code: None,
+        message: Some("ok".into()),
+    };
+
+    assert!(
+        repository
+            .finalize_projection(
+                "projection-task",
+                TaskState::Running,
+                TaskState::Succeeded,
+                &[target("A"), target("MISSING")],
+                &[step("A")],
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        repository.get("projection-task").await.expect("task").state,
+        TaskState::Running
+    );
+    assert!(
+        repository
+            .targets("projection-task")
+            .await
+            .expect("targets")
+            .iter()
+            .all(|target| target.state == TargetState::Pending)
+    );
+
+    repository
+        .finalize_projection(
+            "projection-task",
+            TaskState::Running,
+            TaskState::Succeeded,
+            &[target("A"), target("B")],
+            &[step("A"), step("B")],
+        )
+        .await
+        .expect("retry finalization projection");
+    assert_eq!(
+        repository.get("projection-task").await.expect("task").state,
+        TaskState::Succeeded
+    );
+    assert!(
+        repository
+            .targets("projection-task")
+            .await
+            .expect("targets")
+            .iter()
+            .all(|target| target.state == TargetState::Succeeded)
+    );
+    assert_eq!(
+        repository
+            .steps("projection-task")
+            .await
+            .expect("steps")
+            .len(),
+        2
+    );
+    store.close().await;
+}
+
+#[tokio::test]
 async fn task_target_step_sequence_and_project_isolation_are_atomic() {
     let temp = tempfile::tempdir().expect("temporary app data");
     let store = LocalStore::open(temp.path().join("local.db"))

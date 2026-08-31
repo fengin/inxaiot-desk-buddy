@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use crate::core::error::{AppError, AppResult};
 use crate::core::secret::SecretValue;
+use crate::domain::common::project::is_private_network_host;
 use crate::formal::app_state::FormalAppState;
 use crate::formal::error::FormalError;
 use crate::formal::operation_repository::OperationRepository;
@@ -145,6 +146,11 @@ async fn project_pools(
                 .connection_secrets(local_project_id)
                 .await
                 .map_err(map_formal_error)?;
+            let tls_mode = if is_private_network_host(&secrets.project.db_host) {
+                DatabaseTlsMode::Preferred
+            } else {
+                DatabaseTlsMode::Required
+            };
             let config = MySqlProjectConfig {
                 host: secrets.project.db_host,
                 port: secrets.project.db_port,
@@ -153,7 +159,7 @@ async fn project_pools(
                 platform_schema: secrets.project.business_db,
                 workbench_schema: secrets.project.workbench_db,
                 connect_timeout: Duration::from_secs(10),
-                tls_mode: DatabaseTlsMode::Disabled,
+                tls_mode,
             };
             state
                 .task_event_pipeline

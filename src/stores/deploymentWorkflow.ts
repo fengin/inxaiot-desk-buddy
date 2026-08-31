@@ -22,57 +22,118 @@ const emptyHistory = (): OperationHistoryPage => ({
 
 export const useDeploymentWorkflowStore = defineStore("deployment-workflow", () => {
   const currentTask = ref<DeploymentTaskView>();
+  const currentTaskProjectId = ref<string>();
   const preflight = ref<DeploymentPreflightReport>();
+  const preflightProjectId = ref<string>();
   const submission = ref<DeploymentTaskSubmission>();
   const history = ref<OperationHistoryPage>(emptyHistory());
   const historyDetail = ref<OperationHistoryDetail>();
   const taskLoading = ref(false);
   const historyLoading = ref(false);
   const error = ref("");
+  let taskRequest = 0;
+  let preflightRequest = 0;
+  let historyRequest = 0;
+  let historyDetailRequest = 0;
+  let pendingTaskRequests = 0;
+  let pendingHistoryRequests = 0;
+
+  function startTaskLoading() {
+    pendingTaskRequests += 1;
+    taskLoading.value = true;
+  }
+
+  function stopTaskLoading() {
+    pendingTaskRequests = Math.max(0, pendingTaskRequests - 1);
+    taskLoading.value = pendingTaskRequests > 0;
+  }
+
+  function startHistoryLoading() {
+    pendingHistoryRequests += 1;
+    historyLoading.value = true;
+  }
+
+  function stopHistoryLoading() {
+    pendingHistoryRequests = Math.max(0, pendingHistoryRequests - 1);
+    historyLoading.value = pendingHistoryRequests > 0;
+  }
+
+  function bindProject(projectId?: string) {
+    preflightRequest += 1;
+    historyRequest += 1;
+    historyDetailRequest += 1;
+    preflight.value = undefined;
+    preflightProjectId.value = projectId;
+    history.value = emptyHistory();
+    historyDetail.value = undefined;
+    error.value = "";
+  }
 
   async function runPreflight(projectId: string, plan: DeploymentPlanInput) {
-    taskLoading.value = true;
+    const request = ++preflightRequest;
+    startTaskLoading();
     error.value = "";
     try {
-      preflight.value = await useOperationsAdapter().preflight(projectId, plan);
-      return preflight.value;
+      const result = await useOperationsAdapter().preflight(projectId, plan);
+      if (request === preflightRequest) {
+        preflight.value = result;
+        preflightProjectId.value = projectId;
+      }
+      return result;
     } catch (cause) {
-      error.value = commandErrorText(cause, "部署预检失败");
+      if (request === preflightRequest) {
+        error.value = commandErrorText(cause, "部署预检失败");
+      }
       throw cause;
     } finally {
-      taskLoading.value = false;
+      stopTaskLoading();
     }
   }
 
   async function submit(projectId: string, plan: DeploymentPlanInput) {
-    taskLoading.value = true;
+    const request = ++taskRequest;
+    startTaskLoading();
     error.value = "";
     try {
-      submission.value = await useOperationsAdapter().submit(projectId, plan);
-      currentTask.value = await useOperationsAdapter().getTask(
+      const submitted = await useOperationsAdapter().submit(projectId, plan);
+      const task = await useOperationsAdapter().getTask(
         projectId,
-        submission.value.taskId
+        submitted.taskId
       );
-      return submission.value;
+      if (request === taskRequest) {
+        submission.value = submitted;
+        currentTask.value = task;
+        currentTaskProjectId.value = projectId;
+      }
+      return submitted;
     } catch (cause) {
-      error.value = commandErrorText(cause, "部署任务提交失败");
+      if (request === taskRequest) {
+        error.value = commandErrorText(cause, "部署任务提交失败");
+      }
       throw cause;
     } finally {
-      taskLoading.value = false;
+      stopTaskLoading();
     }
   }
 
   async function loadTask(projectId: string, taskId: string) {
-    taskLoading.value = true;
+    const request = ++taskRequest;
+    startTaskLoading();
     error.value = "";
     try {
-      currentTask.value = await useOperationsAdapter().getTask(projectId, taskId);
-      return currentTask.value;
+      const task = await useOperationsAdapter().getTask(projectId, taskId);
+      if (request === taskRequest) {
+        currentTask.value = task;
+        currentTaskProjectId.value = projectId;
+      }
+      return task;
     } catch (cause) {
-      error.value = commandErrorText(cause, "部署任务读取失败");
+      if (request === taskRequest) {
+        error.value = commandErrorText(cause, "部署任务读取失败");
+      }
       throw cause;
     } finally {
-      taskLoading.value = false;
+      stopTaskLoading();
     }
   }
 
@@ -80,52 +141,67 @@ export const useDeploymentWorkflowStore = defineStore("deployment-workflow", () 
     projectId: string,
     query: OperationHistoryQuery = { page: 1, pageSize: 20 }
   ) {
-    historyLoading.value = true;
+    const request = ++historyRequest;
+    startHistoryLoading();
     error.value = "";
     try {
-      history.value = await useOperationsAdapter().listHistory(projectId, query);
-      return history.value;
+      const result = await useOperationsAdapter().listHistory(projectId, query);
+      if (request === historyRequest) history.value = result;
+      return result;
     } catch (cause) {
-      error.value = commandErrorText(cause, "部署历史读取失败");
+      if (request === historyRequest) {
+        error.value = commandErrorText(cause, "部署历史读取失败");
+      }
       throw cause;
     } finally {
-      historyLoading.value = false;
+      stopHistoryLoading();
     }
   }
 
   async function loadHistoryDetail(projectId: string, operationId: string) {
-    historyLoading.value = true;
+    const request = ++historyDetailRequest;
+    startHistoryLoading();
     error.value = "";
     try {
-      historyDetail.value = await useOperationsAdapter().getHistoryDetail(
+      const result = await useOperationsAdapter().getHistoryDetail(
         projectId,
         operationId
       );
-      return historyDetail.value;
+      if (request === historyDetailRequest) historyDetail.value = result;
+      return result;
     } catch (cause) {
-      error.value = commandErrorText(cause, "部署历史详情读取失败");
+      if (request === historyDetailRequest) {
+        error.value = commandErrorText(cause, "部署历史详情读取失败");
+      }
       throw cause;
     } finally {
-      historyLoading.value = false;
+      stopHistoryLoading();
     }
   }
 
   function clearTask() {
+    taskRequest += 1;
     currentTask.value = undefined;
+    currentTaskProjectId.value = undefined;
     submission.value = undefined;
   }
 
   function clearPreflight() {
+    preflightRequest += 1;
     preflight.value = undefined;
+    preflightProjectId.value = undefined;
   }
 
   function clearHistoryDetail() {
+    historyDetailRequest += 1;
     historyDetail.value = undefined;
   }
 
   return {
     currentTask,
+    currentTaskProjectId,
     preflight,
+    preflightProjectId,
     submission,
     history,
     historyDetail,
@@ -139,6 +215,7 @@ export const useDeploymentWorkflowStore = defineStore("deployment-workflow", () 
     loadHistoryDetail,
     clearTask,
     clearPreflight,
-    clearHistoryDetail
+    clearHistoryDetail,
+    bindProject
   };
 });

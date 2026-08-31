@@ -16,6 +16,8 @@ import { configureDataDirectoryAdapter } from "@/shared/api/dataDirectoryAdapter
 import { FixtureDataDirectoryAdapter } from "@/dev-fixtures/dataDirectoryFixtureAdapter";
 import { configureDiagnosticsAdapter } from "@/shared/api/diagnosticsAdapter";
 import { FixtureDiagnosticsAdapter } from "@/dev-fixtures/diagnosticsFixtureAdapter";
+import { configureSystemDialogAdapter } from "@/shared/api/systemDialogAdapter";
+import { FixtureSystemDialogAdapter } from "@/dev-fixtures/systemDialogFixtureAdapter";
 
 configureWorkbenchAdapter(new FixtureWorkbenchAdapter());
 configureActivityAdapter(new FixtureActivityAdapter());
@@ -23,3 +25,4 @@ configureAioAdapter(new FixtureAioAdapter());
 configureOperationsAdapter(new FixtureOperationsAdapter());
 configureDataDirectoryAdapter(new FixtureDataDirectoryAdapter());
 configureDiagnosticsAdapter(new FixtureDiagnosticsAdapter());
+configureSystemDialogAdapter(new FixtureSystemDialogAdapter());

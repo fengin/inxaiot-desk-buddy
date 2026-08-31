@@ -6,6 +6,9 @@ use crate::application::ports::task_log::{TaskLogPage, TaskLogQuery, TaskLogStor
 use crate::core::error::{AppError, AppResult};
 use crate::domain::common::task::TaskEvent;
 
+const MAX_TASK_LOG_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_TASK_LOG_LINE_BYTES: usize = 64 * 1024;
+
 #[derive(Clone, Debug, Default)]
 pub struct JsonlTaskLogStore;
 
@@ -20,6 +23,18 @@ impl TaskLogStore for JsonlTaskLogStore {
         let mut line = serde_json::to_vec(event)
             .map_err(|_| AppError::InvalidConfig("任务事件无法序列化".into()))?;
         line.push(b'\n');
+        if line.len() > MAX_TASK_LOG_LINE_BYTES {
+            return Err(AppError::Conflict("单条任务日志超过64KiB安全上限".into()));
+        }
+        let existing = tokio::fs::metadata(path)
+            .await
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        if existing.saturating_add(line.len() as u64) > MAX_TASK_LOG_BYTES {
+            return Err(AppError::Conflict(
+                "任务日志超过32MiB安全上限，已停止继续写入".into(),
+            ));
+        }
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)

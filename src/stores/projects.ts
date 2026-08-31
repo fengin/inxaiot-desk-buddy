@@ -26,6 +26,9 @@ export const useProjectStore = defineStore("projects", () => {
   const lastConnectionTest = ref<ProjectConnectionTestResult>();
   const schemaStatus = ref<WorkbenchSchemaStatus>();
   const loginChallenge = ref<PlatformLoginChallenge>();
+  let switchRequest = 0;
+  let schemaRequest = 0;
+  let sessionRequest = 0;
 
   const activeProject = computed(() =>
     projects.value.find((project) => project.id === activeProjectId.value)
@@ -101,9 +104,15 @@ export const useProjectStore = defineStore("projects", () => {
       await useWorkbenchAdapter().deleteProject(projectId);
       projects.value = projects.value.filter((item) => item.id !== projectId);
       if (activeProjectId.value === projectId) {
-        activeProjectId.value = projects.value[0]?.id ?? "";
-        if (activeProjectId.value) localStorage.setItem(ACTIVE_PROJECT_KEY, activeProjectId.value);
-        else localStorage.removeItem(ACTIVE_PROJECT_KEY);
+        const nextProjectId = projects.value[0]?.id ?? "";
+        activeProjectId.value = nextProjectId;
+        if (nextProjectId) {
+          localStorage.setItem(ACTIVE_PROJECT_KEY, nextProjectId);
+          await switchProject(nextProjectId, false);
+        } else {
+          localStorage.removeItem(ACTIVE_PROJECT_KEY);
+          schemaStatus.value = undefined;
+        }
       }
     } catch (cause) {
       error.value = commandErrorText(cause, "删除项目失败");
@@ -124,33 +133,43 @@ export const useProjectStore = defineStore("projects", () => {
   }
 
   async function switchProject(projectId: string, persist = true) {
+    const request = ++switchRequest;
     switching.value = true;
     error.value = "";
     activeProjectId.value = projectId;
     if (persist) localStorage.setItem(ACTIVE_PROJECT_KEY, projectId);
     try {
       const project = await useWorkbenchAdapter().switchProject(projectId);
-      replaceProject(project);
-      schemaStatus.value = await useWorkbenchAdapter().getWorkbenchSchemaStatus(projectId);
+      const schema = await useWorkbenchAdapter().getWorkbenchSchemaStatus(projectId);
+      if (request === switchRequest && activeProjectId.value === projectId) {
+        replaceProject(project);
+        schemaStatus.value = schema;
+      }
       return project;
     } catch (cause) {
-      const project = projects.value.find((item) => item.id === projectId);
-      if (project) {
-        project.connectionState = "connection_failed";
-        project.databaseState = "failed";
-        project.statusMessage = commandErrorText(cause, "项目连接失败");
+      if (request === switchRequest && activeProjectId.value === projectId) {
+        const project = projects.value.find((item) => item.id === projectId);
+        if (project) {
+          project.connectionState = "connection_failed";
+          project.databaseState = "failed";
+          project.statusMessage = commandErrorText(cause, "项目连接失败");
+        }
+        error.value = commandErrorText(cause, "项目切换失败");
       }
-      error.value = commandErrorText(cause, "项目切换失败");
       throw cause;
     } finally {
-      switching.value = false;
+      if (request === switchRequest) switching.value = false;
     }
   }
 
   async function loadSchemaStatus(projectId = activeProjectId.value) {
     if (!projectId) return undefined;
-    schemaStatus.value = await useWorkbenchAdapter().getWorkbenchSchemaStatus(projectId);
-    return schemaStatus.value;
+    const request = ++schemaRequest;
+    const result = await useWorkbenchAdapter().getWorkbenchSchemaStatus(projectId);
+    if (request === schemaRequest && activeProjectId.value === projectId) {
+      schemaStatus.value = result;
+    }
+    return result;
   }
 
   async function upgradeSchema(projectId = activeProjectId.value) {
@@ -174,14 +193,37 @@ export const useProjectStore = defineStore("projects", () => {
 
   async function checkSession(projectId = activeProjectId.value): Promise<ProjectSession | undefined> {
     if (!projectId) return undefined;
-    const next = await useWorkbenchAdapter().checkProjectSession(projectId);
-    const project = projects.value.find((item) => item.id === projectId);
-    if (project) {
-      project.session = next.state === "missing" ? undefined : next;
-      if (next.state === "expired") project.connectionState = "session_expired";
-      if (next.state === "missing" && project.databaseState === "connected") project.connectionState = "login_required";
+    const request = ++sessionRequest;
+    try {
+      const next = await useWorkbenchAdapter().checkProjectSession(projectId);
+      if (request === sessionRequest) {
+        const project = projects.value.find((item) => item.id === projectId);
+        if (project) {
+          project.session = next.state === "missing" ? undefined : next;
+          if (next.state === "expired") {
+            project.connectionState = "session_expired";
+            project.statusMessage = "平台会话已失效，请重新登录";
+          } else if (next.state === "missing" && project.databaseState === "connected") {
+            project.connectionState = "login_required";
+            project.statusMessage = "数据库已连接，需要登录平台";
+          } else if (next.state === "active" && project.databaseState === "connected") {
+            project.connectionState = "ready";
+            project.statusMessage = "数据库、Schema与平台会话已就绪";
+          }
+        }
+      }
+      return next;
+    } catch (cause) {
+      if (request === sessionRequest) {
+        const project = projects.value.find((item) => item.id === projectId);
+        if (project) {
+          project.connectionState = "connection_failed";
+          project.statusMessage = commandErrorText(cause, "平台会话校验失败，业务入口已关闭");
+        }
+        error.value = commandErrorText(cause, "平台会话校验失败");
+      }
+      throw cause;
     }
-    return next;
   }
 
   async function logout(projectId = activeProjectId.value) {

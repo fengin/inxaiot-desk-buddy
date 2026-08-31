@@ -49,6 +49,29 @@ export class FixtureOperationsAdapter implements OperationsAdapter {
       ],
       normalizedPlan: structuredClone(plan),
       profileVersion: 1,
+      executionSnapshot: {
+        schemaVersion: 1,
+        localProjectId: _projectId,
+        checkedAt: new Date().toISOString(),
+        profileVersion: 1,
+        artifactFingerprint: "a".repeat(64),
+        plan: structuredClone(plan),
+        targets: plan.targetMacs.map((mac, index) => ({
+          node: {
+            macNormalized: mac,
+            name: `Fixture AIO ${index + 1}`,
+            ip: `192.0.2.${index + 10}`,
+            managementState: "managed",
+            source: "fixture",
+            version: 1
+          },
+          sshHost: `192.0.2.${index + 10}`,
+          sshPort: 22,
+          hostKeyAlgorithm: "ssh-ed25519",
+          hostKeyFingerprint: `SHA256:fixture-${index + 1}`,
+          hostKeyAcceptedAt: new Date().toISOString()
+        }))
+      },
       checkedAt: new Date().toISOString()
     };
   }

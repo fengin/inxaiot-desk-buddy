@@ -2,7 +2,7 @@
 set -eu
 
 ACTION="${1:-}"
-AGENT_VERSION="0.1.0"
+AGENT_VERSION="0.1.2"
 AGENT_PROTOCOL_VERSION="1"
 DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/data/deploy/inxvision-edge}"
 DATA_ROOT="${DATA_ROOT:-/opt/data}"
@@ -11,6 +11,7 @@ RELEASE_FINGERPRINT="${RELEASE_FINGERPRINT:-}"
 REMOTE_PACKAGE="${REMOTE_PACKAGE:-}"
 REMOTE_ENV="${REMOTE_ENV:-}"
 REMOTE_HOST_INFO="${REMOTE_HOST_INFO:-}"
+REMOTE_COMPOSE="${REMOTE_COMPOSE:-}"
 REMOTE_IMAGE="${REMOTE_IMAGE:-}"
 SERVICE_NAME="${SERVICE_NAME:-}"
 SERVICE_IMAGE="${SERVICE_IMAGE:-}"
@@ -43,6 +44,20 @@ event() {
 fail() {
   event "$1" "failed" "$2"
   exit "${3:-1}"
+}
+
+require_safe_release_version() {
+  [ -n "$RELEASE_VERSION" ] || fail "$1" "RELEASE_VERSION is required" "$2"
+  [ "${#RELEASE_VERSION}" -le 128 ] || fail "$1" "RELEASE_VERSION is too long" "$2"
+  case "$RELEASE_VERSION" in
+    .|..|*[!A-Za-z0-9._-]*)
+      fail "$1" "RELEASE_VERSION contains unsafe characters" "$2"
+      ;;
+  esac
+  case "$RELEASE_VERSION" in
+    [A-Za-z0-9]*) ;;
+    *) fail "$1" "RELEASE_VERSION must start with a letter or number" "$2" ;;
+  esac
 }
 
 need_cmd() {
@@ -269,11 +284,56 @@ stop_current_release() {
   fi
 }
 
+verify_release_dir() {
+  release_dir="$1"
+  (cd "$release_dir" && compose -f docker-compose.yml ps >/dev/null 2>&1) || return 1
+  for container in inx-edge-emqx inx-device-edge inx-rule-engine inx-device-edge-web; do
+    status="$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || true)"
+    [ "$status" = "running" ] || return 1
+  done
+  [ -f "$release_dir/manifest.json" ] || return 1
+  current_version="$(awk -F'"' '/"version"[[:space:]]*:/ {print $4; exit}' "$release_dir/manifest.json")"
+  [ "$current_version" = "$RELEASE_VERSION" ] || return 1
+  if [ -n "$RELEASE_FINGERPRINT" ]; then
+    [ -f "$release_dir/release-fingerprint.txt" ] || return 1
+    current_fingerprint="$(tr -d '\r\n' < "$release_dir/release-fingerprint.txt")"
+    [ "$current_fingerprint" = "$RELEASE_FINGERPRINT" ] || return 1
+  fi
+}
+
+rollback_release() {
+  new_release_dir="$1"
+  previous_release="$2"
+  host_info_backup="$3"
+  had_host_info="$4"
+  event "rollback" "running" "restoring previous release"
+  if [ -f "$new_release_dir/docker-compose.yml" ]; then
+    (cd "$new_release_dir" && compose -f docker-compose.yml down --remove-orphans) >/dev/null 2>&1 || true
+  fi
+  if [ -n "$previous_release" ] && [ -f "$previous_release/docker-compose.yml" ]; then
+    (cd "$previous_release" && compose -f docker-compose.yml up -d --force-recreate --remove-orphans) || return 1
+    ln -sfn "$previous_release" "$DEPLOY_ROOT/current"
+  else
+    rm -f "$DEPLOY_ROOT/current"
+  fi
+  if [ "$had_host_info" = "true" ]; then
+    cp "$host_info_backup" "$DATA_ROOT/config/host-info.json" || return 1
+  else
+    rm -f "$DATA_ROOT/config/host-info.json"
+  fi
+  case "$new_release_dir" in
+    "$DEPLOY_ROOT"/releases/*) rm -rf "$new_release_dir" ;;
+    *) return 1 ;;
+  esac
+  event "rollback" "success" "previous release restored"
+}
+
 install_release() {
-  [ -n "$RELEASE_VERSION" ] || fail "install" "RELEASE_VERSION is required" 30
+  require_safe_release_version "install" 30
   [ -f "$REMOTE_PACKAGE" ] || fail "install" "REMOTE_PACKAGE does not exist: ${REMOTE_PACKAGE}" 31
   [ -f "$REMOTE_ENV" ] || fail "install" "REMOTE_ENV does not exist: ${REMOTE_ENV}" 32
   [ -f "$REMOTE_HOST_INFO" ] || fail "install" "REMOTE_HOST_INFO does not exist: ${REMOTE_HOST_INFO}" 33
+  [ -f "$REMOTE_COMPOSE" ] || fail "install" "REMOTE_COMPOSE does not exist: ${REMOTE_COMPOSE}" 34
 
   precheck
   event "install" "running" "installing release ${RELEASE_VERSION}"
@@ -301,11 +361,19 @@ install_release() {
     (cd "$release_src" && sha256sum -c checksums/sha256.txt)
   fi
 
+  previous_release="$(current_release_dir)"
   new_release_dir="$DEPLOY_ROOT/releases/$RELEASE_VERSION"
-  rm -rf "$new_release_dir"
+  [ ! -e "$new_release_dir" ] || fail "install" "release version already exists and is immutable: ${RELEASE_VERSION}" 37
+  host_info_backup="$tmp_dir/host-info.before"
+  had_host_info="false"
+  if [ -f "$DATA_ROOT/config/host-info.json" ]; then
+    cp "$DATA_ROOT/config/host-info.json" "$host_info_backup"
+    had_host_info="true"
+  fi
   mkdir -p "$new_release_dir"
   cp -a "$release_src/." "$new_release_dir/"
   cp "$REMOTE_ENV" "$new_release_dir/.env"
+  cp "$REMOTE_COMPOSE" "$new_release_dir/docker-compose.yml"
   cp "$REMOTE_HOST_INFO" "$DATA_ROOT/config/host-info.json"
   if [ -n "$RELEASE_FINGERPRINT" ]; then
     printf '%s\n' "$RELEASE_FINGERPRINT" > "$new_release_dir/release-fingerprint.txt"
@@ -321,25 +389,41 @@ install_release() {
 
   stop_current_release "$new_release_dir"
   event "compose" "running" "docker-compose up -d --force-recreate"
-  (cd "$new_release_dir" && compose -f docker-compose.yml up -d --force-recreate --remove-orphans)
+  if ! (cd "$new_release_dir" && compose -f docker-compose.yml up -d --force-recreate --remove-orphans); then
+    if ! rollback_release "$new_release_dir" "$previous_release" "$host_info_backup" "$had_host_info"; then
+      fail "rollback" "new release failed and previous release rollback failed" 38
+    fi
+    fail "install" "new release compose start failed; previous release restored" 39
+  fi
   ln -sfn "$new_release_dir" "$DEPLOY_ROOT/current"
+  if ! verify_release_dir "$new_release_dir"; then
+    if ! rollback_release "$new_release_dir" "$previous_release" "$host_info_backup" "$had_host_info"; then
+      fail "rollback" "new release health failed and previous release rollback failed" 40
+    fi
+    fail "install" "new release health failed; previous release restored" 41
+  fi
   event "install" "success" "$new_release_dir"
 }
 
 backup_current() {
-  [ -n "$RELEASE_VERSION" ] || fail "backup" "RELEASE_VERSION is required" 40
+  require_safe_release_version "backup" 40
   backup_dir="$DATA_ROOT/backup/${RELEASE_VERSION}-before-upgrade-$(date '+%Y%m%d-%H%M%S')"
   mkdir -p "$backup_dir"
-  if [ -L "$DEPLOY_ROOT/current" ] || [ -d "$DEPLOY_ROOT/current" ]; then
-    current_dir="$(readlink -f "$DEPLOY_ROOT/current" || true)"
-    if [ -n "$current_dir" ] && [ -d "$current_dir" ]; then
-      cp -a "$current_dir/docker-compose.yml" "$backup_dir/" 2>/dev/null || true
-      cp -a "$current_dir/.env" "$backup_dir/" 2>/dev/null || true
-      cp -a "$current_dir/manifest.json" "$backup_dir/" 2>/dev/null || true
+  current_dir="$(current_release_dir)"
+  [ -n "$current_dir" ] && [ -d "$current_dir" ] || fail "backup" "current release does not exist" 41
+  for required in docker-compose.yml .env manifest.json; do
+    [ -f "$current_dir/$required" ] || fail "backup" "required backup file is missing: $required" 42
+    cp -a "$current_dir/$required" "$backup_dir/" || fail "backup" "failed to copy $required" 43
+  done
+  [ -f "$DATA_ROOT/config/host-info.json" ] || fail "backup" "host-info.json is missing" 44
+  cp -a "$DATA_ROOT/config/host-info.json" "$backup_dir/" || fail "backup" "failed to copy host-info.json" 45
+  for data_dir in "$DATA_ROOT/device-edge" "$DATA_ROOT/rule-engine"; do
+    if [ -d "$data_dir" ]; then
+      if ! find "$data_dir" -maxdepth 3 \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -exec cp -a {} "$backup_dir/" \;; then
+        fail "backup" "failed to copy service database files" 46
+      fi
     fi
-  fi
-  cp -a "$DATA_ROOT/config/host-info.json" "$backup_dir/" 2>/dev/null || true
-  find "$DATA_ROOT/device-edge" "$DATA_ROOT/rule-engine" -maxdepth 3 \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -exec cp -a {} "$backup_dir/" \; 2>/dev/null || true
+  done
   event "backup" "success" "$backup_dir"
 }
 
@@ -350,6 +434,30 @@ service_check() {
   current_image="$(env_value "$current_dir/.env" "$image_key" 2>/dev/null || true)"
   [ -n "$current_image" ] || fail "service_check" "image variable ${image_key} is missing in current .env" 65
   event "service_check" "success" "service=${SERVICE_NAME}; imageKey=${image_key}; currentImage=${current_image}"
+}
+
+verify_service_state() {
+  service_dir="$1"
+  expected_image="$2"
+  container_id="$(cd "$service_dir" && compose -f docker-compose.yml ps -q "$SERVICE_NAME" 2>/dev/null || true)"
+  [ -n "$container_id" ] || return 1
+  status="$(docker inspect -f '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
+  [ "$status" = "running" ] || return 1
+  if [ -n "$expected_image" ]; then
+    actual_image="$(docker inspect -f '{{.Config.Image}}' "$container_id" 2>/dev/null || true)"
+    [ "$actual_image" = "$expected_image" ] || return 1
+  fi
+}
+
+rollback_service_upgrade() {
+  service_dir="$1"
+  backup_env="$2"
+  previous_image="$3"
+  event "rollback" "running" "restoring previous service configuration"
+  cp "$backup_env" "$service_dir/.env" || return 1
+  (cd "$service_dir" && compose -f docker-compose.yml up -d --no-deps --force-recreate "$SERVICE_NAME") || return 1
+  verify_service_state "$service_dir" "$previous_image" || return 1
+  event "rollback" "success" "previous service image restored"
 }
 
 service_upgrade() {
@@ -364,10 +472,14 @@ service_upgrade() {
   upgrade_dir="$(service_upgrade_dir)"
   backup_dir="$DATA_ROOT/backup/$(basename "$upgrade_dir")-before-service-upgrade"
   mkdir -p "$upgrade_dir" "$backup_dir"
-  cp -a "$current_dir/docker-compose.yml" "$backup_dir/" 2>/dev/null || true
-  cp -a "$current_dir/.env" "$backup_dir/.env.before" 2>/dev/null || true
-  cp -a "$current_dir/manifest.json" "$backup_dir/" 2>/dev/null || true
-  cp -a "$REMOTE_IMAGE" "$upgrade_dir/$(basename "$REMOTE_IMAGE")" 2>/dev/null || true
+  [ -f "$current_dir/docker-compose.yml" ] || fail "service_upgrade" "docker-compose.yml is missing" 74
+  [ -f "$current_dir/.env" ] || fail "service_upgrade" ".env is missing" 75
+  cp -a "$current_dir/docker-compose.yml" "$backup_dir/" || fail "service_upgrade" "failed to backup compose" 76
+  cp -a "$current_dir/.env" "$backup_dir/.env.before" || fail "service_upgrade" "failed to backup env" 77
+  if [ -f "$current_dir/manifest.json" ]; then
+    cp -a "$current_dir/manifest.json" "$backup_dir/" || fail "service_upgrade" "failed to backup manifest" 78
+  fi
+  cp -a "$REMOTE_IMAGE" "$upgrade_dir/$(basename "$REMOTE_IMAGE")" || fail "service_upgrade" "failed to snapshot image" 79
 
   event "load_image" "running" "$SERVICE_IMAGE"
   docker load -i "$REMOTE_IMAGE"
@@ -386,8 +498,18 @@ service_upgrade() {
   } > "$upgrade_dir/metadata.json"
 
   event "compose" "running" "recreating ${SERVICE_NAME}"
-  (cd "$current_dir" && compose -f docker-compose.yml up -d --no-deps --force-recreate "$SERVICE_NAME")
-  service_health
+  if ! (cd "$current_dir" && compose -f docker-compose.yml up -d --no-deps --force-recreate "$SERVICE_NAME"); then
+    if ! rollback_service_upgrade "$current_dir" "$backup_dir/.env.before" "$current_image"; then
+      fail "rollback" "service start failed and rollback failed" 83
+    fi
+    fail "service_upgrade" "service start failed; previous image restored" 84
+  fi
+  if ! verify_service_state "$current_dir" "$SERVICE_IMAGE"; then
+    if ! rollback_service_upgrade "$current_dir" "$backup_dir/.env.before" "$current_image"; then
+      fail "rollback" "service health failed and rollback failed" 85
+    fi
+    fail "service_upgrade" "service health failed; previous image restored" 86
+  fi
   event "service_upgrade" "success" "service=${SERVICE_NAME}; image=${SERVICE_IMAGE}; backup=${backup_dir}"
 }
 
@@ -398,37 +520,14 @@ service_health() {
   if [ -z "$expected_image" ]; then
     expected_image="$(env_value "$current_dir/.env" "$image_key" 2>/dev/null || true)"
   fi
-  container_id="$(cd "$current_dir" && compose -f docker-compose.yml ps -q "$SERVICE_NAME" 2>/dev/null || true)"
-  [ -n "$container_id" ] || fail "service_health" "service ${SERVICE_NAME} container is missing" 80
-  status="$(docker inspect -f '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
-  [ "$status" = "running" ] || fail "service_health" "service ${SERVICE_NAME} status=${status:-missing}" 81
-  if [ -n "$expected_image" ]; then
-    actual_image="$(docker inspect -f '{{.Config.Image}}' "$container_id" 2>/dev/null || true)"
-    [ "$actual_image" = "$expected_image" ] || fail "service_health" "service ${SERVICE_NAME} image mismatch: current=${actual_image}, expected=${expected_image}" 82
-  fi
+  verify_service_state "$current_dir" "$expected_image" || fail "service_health" "service state or image mismatch" 80
   (cd "$current_dir" && compose -f docker-compose.yml ps "$SERVICE_NAME")
   event "service_health" "success" "service=${SERVICE_NAME}; image=${expected_image}"
 }
 
 health() {
   event "health" "running" "checking containers"
-  if ! compose -f "$DEPLOY_ROOT/current/docker-compose.yml" ps >/dev/null 2>&1; then
-    fail "health" "compose ps failed" 50
-  fi
-  for container in inx-edge-emqx inx-device-edge inx-rule-engine inx-device-edge-web; do
-    status="$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || true)"
-    [ "$status" = "running" ] || fail "health" "${container} status=${status:-missing}" 53
-  done
-  if [ -n "$RELEASE_VERSION" ]; then
-    [ -f "$DEPLOY_ROOT/current/manifest.json" ] || fail "health" "manifest.json not found" 51
-    current_version="$(awk -F'"' '/"version"[[:space:]]*:/ {print $4; exit}' "$DEPLOY_ROOT/current/manifest.json")"
-    [ "$current_version" = "$RELEASE_VERSION" ] || fail "health" "release version mismatch: current=${current_version}, expected=${RELEASE_VERSION}" 52
-  fi
-  if [ -n "$RELEASE_FINGERPRINT" ]; then
-    [ -f "$DEPLOY_ROOT/current/release-fingerprint.txt" ] || fail "health" "release fingerprint not found" 54
-    current_fingerprint="$(tr -d '\r\n' < "$DEPLOY_ROOT/current/release-fingerprint.txt")"
-    [ "$current_fingerprint" = "$RELEASE_FINGERPRINT" ] || fail "health" "release fingerprint mismatch: current=${current_fingerprint}, expected=${RELEASE_FINGERPRINT}" 55
-  fi
+  verify_release_dir "$DEPLOY_ROOT/current" || fail "health" "release service, version or fingerprint check failed" 50
   compose -f "$DEPLOY_ROOT/current/docker-compose.yml" ps
   event "health" "success" "compose ps ok"
 }
@@ -467,4 +566,3 @@ case "$ACTION" in
     exit 2
     ;;
 esac
-

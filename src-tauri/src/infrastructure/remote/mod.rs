@@ -5,7 +5,7 @@ use russh::client;
 use russh::keys::decode_secret_key;
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::{HashAlg, PublicKeyOrCertificate};
-use russh::{ChannelMsg, Disconnect};
+use russh::{ChannelMsg, Disconnect, Sig};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
 use sha2::{Digest, Sha256};
@@ -29,6 +29,7 @@ use crate::core::error::{AppError, AppResult};
 
 const DEFAULT_TRANSPORT_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(150);
+const MAX_REMOTE_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct RusshConnector {
@@ -40,6 +41,19 @@ impl Default for RusshConnector {
         Self {
             transport_inactivity_timeout: DEFAULT_TRANSPORT_INACTIVITY_TIMEOUT,
         }
+    }
+}
+
+pub fn validate_private_key_algorithm(private_key: &str) -> AppResult<()> {
+    let key = decode_secret_key(private_key, None)
+        .map_err(|error| AppError::ssh("解析SSH私钥", error))?;
+    let algorithm = format!("{:?}", key.algorithm());
+    if algorithm.starts_with("Ed25519") || algorithm.starts_with("Ecdsa") {
+        Ok(())
+    } else {
+        Err(AppError::InvalidConfig(format!(
+            "SSH私钥算法{algorithm}不受支持；请迁移为Ed25519或ECDSA，RSA私钥因已知时序风险已禁用"
+        )))
     }
 }
 
@@ -147,15 +161,16 @@ impl RemoteConnector for RusshConnector {
                         .map(crate::core::secret::SecretValue::expose),
                 )
                 .map_err(|error| AppError::ssh("解析SSH私钥", error))?;
-                let hash_algorithm = handle
-                    .best_supported_rsa_hash()
-                    .await
-                    .map_err(|error| AppError::ssh("协商RSA签名算法", error))?
-                    .flatten();
+                let algorithm = format!("{:?}", key.algorithm());
+                if !algorithm.starts_with("Ed25519") && !algorithm.starts_with("Ecdsa") {
+                    return Err(AppError::InvalidConfig(format!(
+                        "SSH私钥算法{algorithm}不受支持；请迁移为Ed25519或ECDSA"
+                    )));
+                }
                 handle
                     .authenticate_publickey(
                         username,
-                        PrivateKeyWithHashAlg::new(Arc::new(key), hash_algorithm),
+                        PrivateKeyWithHashAlg::new(Arc::new(key), None),
                     )
                     .await
                     .map_err(|error| AppError::ssh("SSH私钥认证", error))?
@@ -232,14 +247,19 @@ impl RemoteCommandExecutor for RemoteSession {
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => {
+                    let _ = channel.signal(Sig::TERM).await;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let _ = channel.signal(Sig::KILL).await;
                     let _ = channel.close().await;
                     return Err(AppError::Cancelled);
                 }
                 _ = tokio::time::sleep_until(total_deadline) => {
+                    let _ = channel.signal(Sig::KILL).await;
                     let _ = channel.close().await;
                     return Err(AppError::timeout("远端命令总时长"));
                 }
                 _ = &mut inactivity => {
+                    let _ = channel.signal(Sig::KILL).await;
                     let _ = channel.close().await;
                     return Err(AppError::timeout("远端命令无输出"));
                 }
@@ -250,6 +270,18 @@ impl RemoteCommandExecutor for RemoteSession {
                     inactivity.as_mut().reset(Instant::now() + request.inactivity_timeout);
                     match message {
                         ChannelMsg::Data { data } => {
+                            if stdout
+                                .len()
+                                .saturating_add(stderr.len())
+                                .saturating_add(data.len())
+                                > MAX_REMOTE_COMMAND_OUTPUT_BYTES
+                            {
+                                let _ = channel.signal(Sig::KILL).await;
+                                let _ = channel.close().await;
+                                return Err(AppError::Conflict(
+                                    "远端命令输出超过1MiB安全上限，已终止命令".into(),
+                                ));
+                            }
                             stdout.extend_from_slice(&data);
                             output.emit(RemoteOutputChunk {
                                 stream: RemoteOutputStream::Stdout,
@@ -257,6 +289,18 @@ impl RemoteCommandExecutor for RemoteSession {
                             })?;
                         }
                         ChannelMsg::ExtendedData { data, .. } => {
+                            if stdout
+                                .len()
+                                .saturating_add(stderr.len())
+                                .saturating_add(data.len())
+                                > MAX_REMOTE_COMMAND_OUTPUT_BYTES
+                            {
+                                let _ = channel.signal(Sig::KILL).await;
+                                let _ = channel.close().await;
+                                return Err(AppError::Conflict(
+                                    "远端命令输出超过1MiB安全上限，已终止命令".into(),
+                                ));
+                            }
                             stderr.extend_from_slice(&data);
                             output.emit(RemoteOutputChunk {
                                 stream: RemoteOutputStream::Stderr,
@@ -360,14 +404,41 @@ impl FileTransferService for RemoteSession {
                 self.verify_remote_sha256(&temporary_path, expected, cancellation)
                     .await?;
             }
-            if request.overwrite && sftp.metadata(&request.remote_path).await.is_ok() {
-                sftp.remove_file(&request.remote_path)
-                    .await
-                    .map_err(|error| AppError::sftp("删除待覆盖远端文件", error))?;
+            let backup_path = format!(
+                "{}.inxaiot-backup.{}",
+                request.remote_path, request.operation_id
+            );
+            validate_remote_path(&backup_path)?;
+            if sftp.metadata(&backup_path).await.is_ok() {
+                if sftp.metadata(&request.remote_path).await.is_ok() {
+                    sftp.remove_file(&backup_path)
+                        .await
+                        .map_err(|error| AppError::sftp("清理上次远端覆盖备份", error))?;
+                } else {
+                    sftp.rename(&backup_path, &request.remote_path)
+                        .await
+                        .map_err(|error| AppError::sftp("恢复上次远端覆盖备份", error))?;
+                }
             }
-            sftp.rename(&temporary_path, &request.remote_path)
-                .await
-                .map_err(|error| AppError::sftp("原子发布远端文件", error))?;
+            let had_previous =
+                request.overwrite && sftp.metadata(&request.remote_path).await.is_ok();
+            if had_previous {
+                sftp.rename(&request.remote_path, &backup_path)
+                    .await
+                    .map_err(|error| AppError::sftp("备份待覆盖远端文件", error))?;
+            }
+            if let Err(error) = sftp.rename(&temporary_path, &request.remote_path).await {
+                if had_previous {
+                    let _ = sftp.rename(&backup_path, &request.remote_path).await;
+                }
+                return Err(AppError::sftp("发布远端文件", error));
+            }
+            if had_previous && sftp.remove_file(&backup_path).await.is_err() {
+                tracing::warn!(
+                    remote_path = %request.remote_path,
+                    "published remote file but backup cleanup will retry next time"
+                );
+            }
             progress.emit(TransferProgress {
                 transferred: total,
                 total,

@@ -1,7 +1,7 @@
 use inxaiot_desk_buddy_lib::domain::aio::release_profile::{
     ReleaseProfileCredentials, ReleaseProfileDraft, ReleaseProfileValues,
 };
-use inxaiot_desk_buddy_lib::domain::common::project::ProjectInput;
+use inxaiot_desk_buddy_lib::domain::common::project::{PlatformLoginRequest, ProjectInput};
 
 fn release_draft() -> ReleaseProfileDraft {
     ReleaseProfileDraft {
@@ -65,4 +65,77 @@ fn project_input_requires_safe_urls_and_database_names() {
     input.validate_for_create().expect("valid project");
     input.business_db = "inxvision-iot;drop".into();
     assert!(input.validate_for_create().is_err());
+
+    input.business_db = "inxvision_iot_dev".into();
+    input.db_password = Some("x".into());
+    assert!(input.validate_for_create().is_err());
+
+    assert!(
+        PlatformLoginRequest {
+            username: "user".into(),
+            password: "x".into(),
+            session_uuid: "session".into(),
+            image_code: "code".into(),
+        }
+        .validate()
+        .is_err()
+    );
 }
+
+#[test]
+fn deployment_snapshot_binds_project_plan_nodes_and_host_keys() {
+    let node = WorkbenchNodeSnapshot {
+        mac_normalized: "001122334455".into(),
+        name: "AIO".into(),
+        ip: "192.0.2.10".into(),
+        building_id: Some("1".into()),
+        region_id: None,
+        addr_alias: None,
+        floor: None,
+        location: None,
+        remark: None,
+        platform_aio_id: Some("1".into()),
+        management_state: "managed".into(),
+        source: "test".into(),
+        last_operation_id: None,
+        version: 7,
+    };
+    let mut snapshot = DeploymentExecutionSnapshot {
+        schema_version: DEPLOYMENT_SNAPSHOT_SCHEMA_VERSION,
+        local_project_id: "project-a".into(),
+        checked_at: "123".into(),
+        profile_version: 3,
+        artifact_fingerprint: "a".repeat(64),
+        plan: DeploymentPlanInput {
+            mode: DeploymentMode::FullUpgrade,
+            target_macs: vec![node.mac_normalized.clone()],
+            artifact_path: "C:/release".into(),
+            artifact_name: "Release".into(),
+            artifact_version: "1.0.0".into(),
+            service_name: None,
+            image_name: None,
+            images: BTreeMap::new(),
+            batch_size: 1,
+            concurrency: 1,
+        },
+        targets: vec![DeploymentTargetSnapshot {
+            ssh_host: node.ip.clone(),
+            ssh_port: 22,
+            host_key_algorithm: "ssh-ed25519".into(),
+            host_key_fingerprint: "SHA256:test".into(),
+            host_key_accepted_at: "123".into(),
+            node,
+        }],
+    };
+    snapshot.validate("project-a").expect("valid snapshot");
+    assert!(snapshot.validate("project-b").is_err());
+    snapshot.artifact_fingerprint = "bad".into();
+    assert!(snapshot.validate("project-a").is_err());
+}
+use std::collections::BTreeMap;
+
+use inxaiot_desk_buddy_lib::domain::aio::deployment::{DeploymentMode, DeploymentPlanInput};
+use inxaiot_desk_buddy_lib::domain::aio::deployment_workflow::{
+    DEPLOYMENT_SNAPSHOT_SCHEMA_VERSION, DeploymentExecutionSnapshot, DeploymentTargetSnapshot,
+};
+use inxaiot_desk_buddy_lib::domain::aio::inventory::WorkbenchNodeSnapshot;

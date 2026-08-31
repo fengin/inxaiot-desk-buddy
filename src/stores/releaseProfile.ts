@@ -23,6 +23,16 @@ export const useReleaseProfileStore = defineStore("release-profile", () => {
   const hostKeyLoading = ref(false);
   const error = ref("");
   const conflict = ref(false);
+  let loadRequest = 0;
+  let mutationRequest = 0;
+
+  function cloneDraft(source: ReleaseProfileDraft): ReleaseProfileDraft {
+    return {
+      values: { ...source.values },
+      credentials: { ...source.credentials },
+      expectedVersion: source.expectedVersion
+    };
+  }
 
   function resetDraft() {
     draft.value = profile.value
@@ -35,87 +45,135 @@ export const useReleaseProfileStore = defineStore("release-profile", () => {
   }
 
   async function load(nextProjectId: string) {
+    const request = ++loadRequest;
+    mutationRequest += 1;
     projectId.value = nextProjectId;
+    profile.value = undefined;
+    draft.value = emptyReleaseProfileDraft();
+    validation.value = undefined;
+    hostKeys.value = [];
+    hostKeyObservation.value = undefined;
     loading.value = true;
     error.value = "";
     conflict.value = false;
     try {
-      profile.value = await useWorkbenchAdapter().getReleaseProfile(nextProjectId) ?? undefined;
-      resetDraft();
-      hostKeys.value = await useWorkbenchAdapter().listHostKeys(nextProjectId);
-      return profile.value;
+      const [loadedProfile, loadedHostKeys] = await Promise.all([
+        useWorkbenchAdapter().getReleaseProfile(nextProjectId),
+        useWorkbenchAdapter().listHostKeys(nextProjectId)
+      ]);
+      if (request === loadRequest && projectId.value === nextProjectId) {
+        profile.value = loadedProfile ?? undefined;
+        hostKeys.value = loadedHostKeys;
+        resetDraft();
+      }
+      return loadedProfile ?? undefined;
     } catch (cause) {
-      error.value = commandErrorText(cause, "读取发布参数失败");
+      if (request === loadRequest) {
+        error.value = commandErrorText(cause, "读取发布参数失败");
+      }
       throw cause;
     } finally {
-      loading.value = false;
+      if (request === loadRequest) loading.value = false;
     }
   }
 
   async function validate() {
+    const request = ++mutationRequest;
+    const expectedProjectId = projectId.value;
+    const candidate = cloneDraft(draft.value);
     error.value = "";
     try {
-      validation.value = await useWorkbenchAdapter().validateReleaseProfile(draft.value);
-      return validation.value;
+      const result = await useWorkbenchAdapter().validateReleaseProfile(candidate);
+      if (request === mutationRequest && projectId.value === expectedProjectId) {
+        validation.value = result;
+      }
+      return result;
     } catch (cause) {
-      validation.value = undefined;
-      error.value = commandErrorText(cause, "发布参数校验失败");
+      if (request === mutationRequest) {
+        validation.value = undefined;
+        error.value = commandErrorText(cause, "发布参数校验失败");
+      }
       throw cause;
     }
   }
 
   async function save() {
     if (!projectId.value) throw new Error("没有活动项目");
+    const expectedProjectId = projectId.value;
+    const request = ++mutationRequest;
+    const candidate = cloneDraft(draft.value);
     saving.value = true;
     error.value = "";
     conflict.value = false;
     try {
-      await validate();
-      profile.value = await useWorkbenchAdapter().saveReleaseProfile(projectId.value, draft.value);
-      resetDraft();
-      return profile.value;
+      const checked = await useWorkbenchAdapter().validateReleaseProfile(candidate);
+      const saved = await useWorkbenchAdapter().saveReleaseProfile(expectedProjectId, candidate);
+      if (request === mutationRequest && projectId.value === expectedProjectId) {
+        validation.value = checked;
+        profile.value = saved;
+        resetDraft();
+      }
+      return saved;
     } catch (cause) {
-      conflict.value = commandErrorCode(cause) === "CONFIG_VERSION_CONFLICT";
-      error.value = commandErrorText(cause, "保存发布参数失败");
+      if (request === mutationRequest) {
+        conflict.value = commandErrorCode(cause) === "CONFIG_VERSION_CONFLICT";
+        error.value = commandErrorText(cause, "保存发布参数失败");
+      }
       throw cause;
     } finally {
-      saving.value = false;
+      if (request === mutationRequest) saving.value = false;
     }
   }
 
   async function captureHostKey(host: string, port?: number) {
     if (!projectId.value) throw new Error("没有活动项目");
+    const expectedProjectId = projectId.value;
+    const request = ++mutationRequest;
     hostKeyLoading.value = true;
     error.value = "";
     try {
-      hostKeyObservation.value = await useWorkbenchAdapter().captureHostKey(projectId.value, { host, port });
-      return hostKeyObservation.value;
+      const observation = await useWorkbenchAdapter().captureHostKey(expectedProjectId, { host, port });
+      if (request === mutationRequest && projectId.value === expectedProjectId) {
+        hostKeyObservation.value = observation;
+      }
+      return observation;
     } catch (cause) {
-      error.value = commandErrorText(cause, "捕获主机密钥失败");
+      if (request === mutationRequest) {
+        error.value = commandErrorText(cause, "捕获主机密钥失败");
+      }
       throw cause;
     } finally {
-      hostKeyLoading.value = false;
+      if (request === mutationRequest) hostKeyLoading.value = false;
     }
   }
 
   async function confirmHostKey(replaceChanged: boolean) {
     if (!projectId.value || !hostKeyObservation.value) throw new Error("没有待确认主机密钥");
+    const expectedProjectId = projectId.value;
+    const expectedObservation = { ...hostKeyObservation.value };
+    const request = ++mutationRequest;
     hostKeyLoading.value = true;
     try {
-      hostKeyObservation.value = await useWorkbenchAdapter().confirmHostKey(projectId.value, {
-        host: hostKeyObservation.value.host,
-        port: hostKeyObservation.value.port,
-        algorithm: hostKeyObservation.value.algorithm,
-        fingerprint: hostKeyObservation.value.fingerprint,
+      const confirmed = await useWorkbenchAdapter().confirmHostKey(expectedProjectId, {
+        host: expectedObservation.host,
+        port: expectedObservation.port,
+        algorithm: expectedObservation.algorithm,
+        fingerprint: expectedObservation.fingerprint,
         replaceChanged
       });
-      hostKeys.value = await useWorkbenchAdapter().listHostKeys(projectId.value);
-      return hostKeyObservation.value;
+      const nextHostKeys = await useWorkbenchAdapter().listHostKeys(expectedProjectId);
+      if (request === mutationRequest && projectId.value === expectedProjectId) {
+        hostKeyObservation.value = confirmed;
+        hostKeys.value = nextHostKeys;
+      }
+      return confirmed;
     } catch (cause) {
-      error.value = commandErrorText(cause, "确认主机密钥失败");
+      if (request === mutationRequest) {
+        error.value = commandErrorText(cause, "确认主机密钥失败");
+      }
       throw cause;
     } finally {
-      hostKeyLoading.value = false;
+      if (request === mutationRequest) hostKeyLoading.value = false;
     }
   }
 

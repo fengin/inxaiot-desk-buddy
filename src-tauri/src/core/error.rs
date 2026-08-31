@@ -33,28 +33,28 @@ pub enum AppError {
 }
 
 impl AppError {
-    pub fn database(operation: &'static str, error: &sqlx::Error) -> Self {
-        tracing::error!(operation, error = ?error, "database operation failed");
+    pub fn database(operation: &'static str, _error: &sqlx::Error) -> Self {
+        tracing::error!(operation, "database operation failed");
         Self::Database { operation }
     }
 
-    pub fn platform_http(operation: &'static str, error: &reqwest::Error) -> Self {
-        tracing::error!(operation, error = ?error, "platform http operation failed");
+    pub fn platform_http(operation: &'static str, _error: &reqwest::Error) -> Self {
+        tracing::error!(operation, "platform http operation failed");
         Self::PlatformHttp { operation }
     }
 
-    pub fn ssh(operation: &'static str, error: impl std::fmt::Debug) -> Self {
-        tracing::error!(operation, error = ?error, "ssh operation failed");
+    pub fn ssh(operation: &'static str, _error: impl std::fmt::Debug) -> Self {
+        tracing::error!(operation, "ssh operation failed");
         Self::Ssh { operation }
     }
 
-    pub fn sftp(operation: &'static str, error: impl std::fmt::Debug) -> Self {
-        tracing::error!(operation, error = ?error, "sftp operation failed");
+    pub fn sftp(operation: &'static str, _error: impl std::fmt::Debug) -> Self {
+        tracing::error!(operation, "sftp operation failed");
         Self::Sftp { operation }
     }
 
     pub fn io(operation: &'static str, error: &std::io::Error) -> Self {
-        tracing::error!(operation, error = ?error, "file operation failed");
+        tracing::error!(operation, error_kind = ?error.kind(), "file operation failed");
         Self::Io { operation }
     }
 
@@ -62,8 +62,8 @@ impl AppError {
         Self::Timeout { operation }
     }
 
-    pub fn integrity(operation: &'static str, error: impl std::fmt::Debug) -> Self {
-        tracing::error!(operation, error = ?error, "file integrity check failed");
+    pub fn integrity(operation: &'static str, _error: impl std::fmt::Debug) -> Self {
+        tracing::error!(operation, "file integrity check failed");
         Self::Integrity { operation }
     }
 }

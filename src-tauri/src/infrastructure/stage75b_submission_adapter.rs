@@ -13,6 +13,7 @@ use crate::infrastructure::stage75b_preflight_adapter::Stage75BPreflightAdapter;
 use crate::infrastructure::task_data_lifecycle::TaskDataLifecycle;
 use crate::infrastructure::task_handlers::deployment_payload_file;
 use crate::runtime::task_queue::TaskEnvelope;
+use sha2::{Digest, Sha256};
 
 pub struct Stage75BSubmissionAdapter<'a> {
     state: &'a FormalAppState,
@@ -56,9 +57,11 @@ impl DeploymentSubmissionPort for Stage75BSubmissionAdapter<'_> {
                 blockers.join("；")
             )));
         }
-        let plan = crate::domain::aio::deployment::DeploymentPlan::build(
-            preflight.normalized_plan.clone(),
-        )?;
+        let snapshot = preflight
+            .execution_snapshot
+            .ok_or_else(|| AppError::Conflict("部署预检未形成不可变执行快照".into()))?;
+        snapshot.validate(project_id)?;
+        let plan = crate::domain::aio::deployment::DeploymentPlan::build(snapshot.plan.clone())?;
         let task_id = uuid::Uuid::now_v7().to_string();
         let task_dir = self
             .state
@@ -69,11 +72,10 @@ impl DeploymentSubmissionPort for Stage75BSubmissionAdapter<'_> {
             .map_err(|error| AppError::io("创建排队任务目录", &error))?;
         let payload_path = task_dir.join(deployment_payload_file());
         let temporary_path = task_dir.join("deployment-input.json.tmp");
-        let input = LaunchDeploymentInput {
-            plan: preflight.normalized_plan,
-        };
+        let input = LaunchDeploymentInput { snapshot };
         let payload = serde_json::to_vec(&input)
             .map_err(|_| AppError::InvalidConfig("序列化AIO任务payload失败".into()))?;
+        let payload_sha256 = hex::encode(Sha256::digest(&payload));
         std::fs::write(&temporary_path, payload)
             .map_err(|error| AppError::io("写入AIO任务payload临时文件", &error))?;
         std::fs::rename(&temporary_path, &payload_path)
@@ -102,6 +104,7 @@ impl DeploymentSubmissionPort for Stage75BSubmissionAdapter<'_> {
             resource_keys: plan.target_macs,
             priority: task.priority,
             payload_ref: task.payload_ref.clone(),
+            payload_sha256: Some(payload_sha256),
         };
         if let Err(error) = self.state.task_queue.enqueue(envelope).await {
             mark_enqueue_failed(self.state, &task_id, &error.to_string()).await;

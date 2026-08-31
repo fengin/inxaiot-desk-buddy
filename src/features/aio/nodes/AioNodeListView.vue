@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   NAlert,
   NButton,
@@ -34,6 +33,7 @@ import {
 } from "lucide-vue-next";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
+import { useSystemDialogAdapter } from "@/shared/api/systemDialogAdapter";
 
 import type {
   AioNodeListItem,
@@ -47,6 +47,7 @@ const aio = useAioNodesStore();
 const projects = useProjectStore();
 const message = useMessage();
 const router = useRouter();
+const dialogs = useSystemDialogAdapter();
 const search = ref("");
 const stateFilter = ref("all");
 const selectedNode = ref<AioNodeListItem>();
@@ -148,12 +149,10 @@ async function chooseInventoryFile() {
   try {
     let path = "C:/demo/inventory-2026-08.csv";
     if (aio.realBackend) {
-      const selected = await openFileDialog({
-        multiple: false,
-        directory: false,
-        filters: [{ name: "一体机清单", extensions: ["csv"] }]
-      });
-      if (typeof selected !== "string") return;
+      const selected = await dialogs.selectFile("选择一体机清单", [
+        { name: "一体机清单", extensions: ["csv"] }
+      ]);
+      if (!selected) return;
       path = selected;
     }
     await aio.previewImport(path);
@@ -243,6 +242,15 @@ onBeforeUnmount(() => {
 
     <n-alert v-if="aio.error" type="error" :bordered="false" closable @close="aio.error = ''">
       {{ aio.error }}
+    </n-alert>
+    <n-alert
+      v-else-if="aio.platformIssues.length"
+      type="warning"
+      :bordered="false"
+      class="pending-import-alert"
+    >
+      平台存在 {{ aio.platformIssues.length }} 条无法形成可靠MAC身份的记录；这些记录未静默并入资产列表。
+      <span>{{ aio.platformIssues.slice(0, 3).map((issue) => issue.message).join('；') }}</span>
     </n-alert>
     <n-alert
       v-else-if="aio.latestImportSessionId"

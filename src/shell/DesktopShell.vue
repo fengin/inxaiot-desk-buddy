@@ -45,9 +45,24 @@ const route = useRoute();
 const exitImpact = ref<ApplicationExitImpact>();
 const exitConfirming = ref(false);
 let unlistenExitImpact: (() => void) | undefined;
+let sessionCheckTimer: number | undefined;
+
+async function verifyActiveSession() {
+  const projectId = projects.activeProjectId;
+  if (!projectId || !projects.session) return;
+  try {
+    await projects.checkSession(projectId);
+  } catch {
+    // Store已将当前项目置为fail-closed，并保留可重试的本地会话。
+  }
+}
 
 onMounted(async () => {
   await Promise.allSettled([projects.initialize(), dataDirectory.initialize()]);
+  await verifyActiveSession();
+  sessionCheckTimer = window.setInterval(() => {
+    void verifyActiveSession();
+  }, 60_000);
   unlistenExitImpact = await listenApplicationExitImpact((impact) => {
     exitImpact.value = impact;
   });
@@ -55,7 +70,16 @@ onMounted(async () => {
 watch(aboutOpen, (open) => {
   if (open) void diagnostics.load(true);
 });
-onBeforeUnmount(() => unlistenExitImpact?.());
+watch(
+  () => projects.activeProjectId,
+  () => {
+    void verifyActiveSession();
+  }
+);
+onBeforeUnmount(() => {
+  unlistenExitImpact?.();
+  if (sessionCheckTimer !== undefined) window.clearInterval(sessionCheckTimer);
+});
 
 const isTauri = () => typeof window.__TAURI_INTERNALS__ !== "undefined";
 const minimiseWindow = async () => { if (isTauri()) await getCurrentWindow().minimize(); };
@@ -167,8 +191,9 @@ const businessRouteMessage = computed(() => {
       <p class="modal-description">面向项目实施与维护人员，统一管理一体机部署、升级和结果追踪；生产路径仅使用 Tauri Real Adapter。</p>
       <n-descriptions :column="1" size="small" bordered label-placement="left">
         <n-descriptions-item label="版本">{{ diagnostics.value?.applicationVersion ?? '读取中…' }}</n-descriptions-item>
+        <n-descriptions-item label="源码提交"><span class="diagnostic-value">{{ diagnostics.value?.sourceCommit ?? '读取中…' }}</span></n-descriptions-item>
         <n-descriptions-item label="数据模式">Tauri Real Adapter · 浏览器 Fixture 物理隔离</n-descriptions-item>
-        <n-descriptions-item label="Schema">本地 v{{ diagnostics.value?.localSchemaVersion ?? '—' }} · 工作台 v{{ diagnostics.value?.workbenchSchemaVersion ?? '—' }}</n-descriptions-item>
+        <n-descriptions-item label="Schema">本地实际 v{{ diagnostics.value?.localSchemaVersion ?? '—' }} · 工作台支持 v{{ diagnostics.value?.workbenchSchemaVersion ?? '—' }}</n-descriptions-item>
         <n-descriptions-item label="Agent">v{{ diagnostics.value?.agentVersion ?? '—' }} · 协议 {{ diagnostics.value?.agentProtocolVersion ?? '—' }}</n-descriptions-item>
         <n-descriptions-item label="Agent SHA-256"><span class="diagnostic-value">{{ diagnostics.value?.agentSha256 ?? '—' }}</span></n-descriptions-item>
         <n-descriptions-item label="运行平台">{{ diagnostics.value?.operatingSystem ?? '—' }} / {{ diagnostics.value?.architecture ?? '—' }}</n-descriptions-item>

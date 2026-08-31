@@ -1,5 +1,5 @@
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FixtureWorkbenchAdapter } from "@/dev-fixtures/workbenchFixtureAdapter";
 import { configureWorkbenchAdapter } from "@/shared/api/workbenchAdapter";
@@ -49,5 +49,46 @@ describe("project store", () => {
     const created = await store.createProject(input);
     await store.deleteProject(created.id);
     expect(store.projects.some((project) => project.id === created.id)).toBe(false);
+  });
+
+  it("keeps a late switch response from replacing the active project", async () => {
+    const adapter = new FixtureWorkbenchAdapter();
+    configureWorkbenchAdapter(adapter);
+    const store = useProjectStore();
+    await store.initialize();
+    const first = await store.createProject({ ...input, name: "First" });
+    const second = await store.createProject({ ...input, name: "Second" });
+    const firstResult = await adapter.switchProject(first.id);
+    const original = adapter.switchProject.bind(adapter);
+    let resolveFirst!: (value: typeof firstResult) => void;
+    vi.spyOn(adapter, "switchProject").mockImplementation((projectId) => {
+      if (projectId === first.id) {
+        return new Promise((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return original(projectId);
+    });
+
+    const stale = store.switchProject(first.id);
+    await store.switchProject(second.id);
+    resolveFirst(firstResult);
+    await stale;
+    expect(store.activeProjectId).toBe(second.id);
+    expect(store.activeProject?.id).toBe(second.id);
+  });
+
+  it("fails closed when remote session verification is unavailable", async () => {
+    const adapter = new FixtureWorkbenchAdapter();
+    configureWorkbenchAdapter(adapter);
+    const store = useProjectStore();
+    await store.initialize();
+    const projectId = store.activeProjectId;
+    vi.spyOn(adapter, "checkProjectSession").mockRejectedValue(
+      new Error("verification unavailable")
+    );
+    await expect(store.checkSession(projectId)).rejects.toThrow();
+    expect(store.activeProject?.connectionState).toBe("connection_failed");
+    expect(store.businessMenuEnabled).toBe(false);
   });
 });

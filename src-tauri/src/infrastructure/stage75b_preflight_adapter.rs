@@ -18,10 +18,11 @@ use crate::core::error::{AppError, AppResult};
 use crate::core::secret::SecretValue;
 use crate::domain::aio::deployment::{DeploymentMode, DeploymentPlan, DeploymentPlanInput};
 use crate::domain::aio::deployment_workflow::{
-    DeploymentPreflightCheck, DeploymentPreflightReport, PreflightRemediation, PreflightStatus,
+    DEPLOYMENT_SNAPSHOT_SCHEMA_VERSION, DeploymentExecutionSnapshot, DeploymentPreflightCheck,
+    DeploymentPreflightReport, DeploymentTargetSnapshot, PreflightRemediation, PreflightStatus,
 };
 use crate::domain::aio::mac::MacAddress;
-use crate::domain::aio::release::{inspect_image_archive, inspect_release_directory};
+use crate::domain::aio::release::{inspect_image_archive, inspect_release_directory, sha256_file};
 use crate::formal::app_state::FormalAppState;
 use crate::formal::project_repository::LocalProjectRepository;
 use crate::formal::release_profile_repository::{ReleaseProfileRecord, ReleaseProfileRepository};
@@ -47,19 +48,22 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
         input: &DeploymentPlanInput,
     ) -> AppResult<DeploymentPreflightReport> {
         let checked_at = timestamp();
-        let (normalized, artifact_check) = normalize_and_inspect_artifact(input);
+        let (inspected, artifact_check) = normalize_and_inspect_artifact(input);
         let mut checks = vec![artifact_check];
-        let normalized = match normalized {
+        let inspected = match inspected {
             Ok(value) => value,
             Err(_) => {
                 return Ok(DeploymentPreflightReport::from_checks(
                     checks,
                     input.clone(),
                     None,
+                    None,
                     checked_at,
                 ));
             }
         };
+        let normalized = inspected.normalized;
+        let artifact_fingerprint = inspected.fingerprint;
 
         match project_operator(self.state, project_id).await {
             Ok(operator) => checks.push(passed(
@@ -175,6 +179,7 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
         };
         let leases = ResourceLeaseRepository::new(pools.workbench.clone());
         let host_keys = HostKeyRepository::new(self.state.local_store.pool().clone());
+        let mut target_snapshots = Vec::with_capacity(normalized.target_macs.len());
         for mac in &normalized.target_macs {
             let Some(node) = nodes.get(mac) else {
                 checks.push(failed(
@@ -232,7 +237,7 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
                         Some(mac),
                         format!("已确认{}", host_key.identity.fingerprint),
                     ));
-                    host_key.identity
+                    host_key
                 }
                 None => {
                     checks.push(failed(
@@ -245,12 +250,31 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
                     continue;
                 }
             };
-            append_remote_runtime_checks(&mut checks, mac, &target, &profile, host_key).await;
+            target_snapshots.push(DeploymentTargetSnapshot {
+                node: node.clone(),
+                ssh_host: target.host.clone(),
+                ssh_port: target.port,
+                host_key_algorithm: host_key.identity.algorithm.clone(),
+                host_key_fingerprint: host_key.identity.fingerprint.clone(),
+                host_key_accepted_at: host_key.accepted_at,
+            });
+            append_remote_runtime_checks(&mut checks, mac, &target, &profile, host_key.identity)
+                .await;
         }
-        Ok(report(
+        let execution_snapshot = DeploymentExecutionSnapshot {
+            schema_version: DEPLOYMENT_SNAPSHOT_SCHEMA_VERSION,
+            local_project_id: project_id.into(),
+            checked_at: checked_at.clone(),
+            profile_version: profile.version,
+            artifact_fingerprint,
+            plan: normalized.clone(),
+            targets: target_snapshots,
+        };
+        Ok(DeploymentPreflightReport::from_checks(
             checks,
             normalized,
             Some(profile.version),
+            Some(execution_snapshot),
             checked_at,
         ))
     }
@@ -404,9 +428,14 @@ fn remote_auth(profile: &ReleaseProfileRecord) -> AppResult<RemoteAuth> {
     }
 }
 
+struct InspectedArtifact {
+    normalized: DeploymentPlanInput,
+    fingerprint: String,
+}
+
 fn normalize_and_inspect_artifact(
     input: &DeploymentPlanInput,
-) -> (AppResult<DeploymentPlanInput>, DeploymentPreflightCheck) {
+) -> (AppResult<InspectedArtifact>, DeploymentPreflightCheck) {
     let result = (|| {
         let mut normalized = input.clone();
         normalized.target_macs = input
@@ -417,6 +446,7 @@ fn normalize_and_inspect_artifact(
         match normalized.mode {
             DeploymentMode::ServiceUpgrade => {
                 let archive = inspect_image_archive(Path::new(&normalized.artifact_path))?;
+                let fingerprint = sha256_file(Path::new(&normalized.artifact_path))?;
                 let tag = normalized
                     .image_name
                     .clone()
@@ -434,12 +464,20 @@ fn normalize_and_inspect_artifact(
                     .unwrap_or_else(|| tag.clone());
                 normalized.image_name = Some(tag.clone());
                 normalized.images = BTreeMap::from([(service, tag)]);
+                DeploymentPlan::build(normalized.clone())?;
+                Ok(InspectedArtifact {
+                    normalized,
+                    fingerprint,
+                })
             }
             DeploymentMode::FirstDeploy | DeploymentMode::FullUpgrade => {
                 let validation = inspect_release_directory(Path::new(&normalized.artifact_path))?;
                 if !validation.valid {
                     return Err(AppError::InvalidConfig(validation.errors.join("；")));
                 }
+                let fingerprint = validation.fingerprint.ok_or(AppError::Integrity {
+                    operation: "读取Release指纹",
+                })?;
                 let manifest = validation
                     .manifest
                     .ok_or_else(|| AppError::InvalidConfig("Release缺少manifest".into()))?;
@@ -450,19 +488,22 @@ fn normalize_and_inspect_artifact(
                     .into_iter()
                     .map(|image| (image.service, image.image))
                     .collect();
+                DeploymentPlan::build(normalized.clone())?;
+                Ok(InspectedArtifact {
+                    normalized,
+                    fingerprint,
+                })
             }
         }
-        DeploymentPlan::build(normalized.clone())?;
-        Ok(normalized)
     })();
     let check = match &result {
-        Ok(normalized) => passed(
+        Ok(inspected) => passed(
             "artifact",
             "发布物",
             None,
             format!(
                 "{} {} 校验通过",
-                normalized.artifact_name, normalized.artifact_version
+                inspected.normalized.artifact_name, inspected.normalized.artifact_version
             ),
         ),
         Err(error) => failed(
@@ -482,7 +523,7 @@ fn report(
     profile_version: Option<u64>,
     checked_at: String,
 ) -> DeploymentPreflightReport {
-    DeploymentPreflightReport::from_checks(checks, normalized, profile_version, checked_at)
+    DeploymentPreflightReport::from_checks(checks, normalized, profile_version, None, checked_at)
 }
 
 fn passed(

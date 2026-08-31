@@ -80,8 +80,10 @@ async fn first_deploy_reinstall_is_healthy_registration_is_idempotent_and_stagin
         std::fs::create_dir_all(&node_dir).expect("node dir");
         let env = node_dir.join(".env");
         let host_info = node_dir.join("host-info.json");
+        let compose = node_dir.join("docker-compose.yml");
         std::fs::write(&env, rendered.env).expect("env");
         std::fs::write(&host_info, rendered.host_info_json).expect("host info");
+        std::fs::write(&compose, rendered.compose_preview).expect("compose");
         let session = connect_pinned(&remote, host).await;
         let staging = format!(
             "/opt/data/.inxaiot-desk-buddy/{}/{}",
@@ -95,9 +97,11 @@ async fn first_deploy_reinstall_is_healthy_registration_is_idempotent_and_stagin
                 local_artifact: release.archive.clone(),
                 local_env: Some(env),
                 local_host_info: Some(host_info),
+                local_compose: Some(compose),
             },
             &RemoteDeploymentConfig {
                 operation_id: operation_id.clone(),
+                release_fingerprint: String::new(),
                 mac_normalized: normalized_macs[index].clone(),
                 data_root: "/opt/data".into(),
                 deploy_root: "/opt/data/deploy/inxvision-edge".into(),

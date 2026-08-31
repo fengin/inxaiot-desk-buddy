@@ -1,5 +1,6 @@
 export interface SystemDiagnostics {
   applicationVersion: string;
+  sourceCommit: string;
   localSchemaVersion: string;
   workbenchSchemaVersion: string;
   agentVersion: string;

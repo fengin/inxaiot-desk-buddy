@@ -87,7 +87,12 @@ async fn full_upgrade_backs_up_installs_checks_and_cleans_exact_staging() {
             env: "templates/env.template".into(),
             host_info: "templates/host-info.json.template".into(),
         },
-        runtime: Default::default(),
+        runtime: inxaiot_desk_buddy_lib::domain::aio::release::ReleaseRuntime {
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            docker: ">=20.10".into(),
+            compose: ">=2.0".into(),
+        },
     };
     std::fs::write(
         release.join("manifest.json"),
@@ -154,8 +159,10 @@ async fn full_upgrade_backs_up_installs_checks_and_cleans_exact_staging() {
         std::fs::create_dir_all(&node_dir).expect("node dir");
         let env = node_dir.join(".env");
         let host_info = node_dir.join("host-info.json");
+        let rendered_compose = node_dir.join("docker-compose.yml");
         std::fs::write(&env, rendered.env).expect("node env");
         std::fs::write(&host_info, rendered.host_info_json).expect("host info");
+        std::fs::write(&rendered_compose, rendered.compose_preview).expect("node compose");
         let session = connect_pinned(&config, host).await;
         let mac = &plan.target_macs[index];
         let staging = format!("/opt/data/.inxaiot-desk-buddy/{operation_id}/{mac}");
@@ -167,9 +174,11 @@ async fn full_upgrade_backs_up_installs_checks_and_cleans_exact_staging() {
                 local_artifact: archive.clone(),
                 local_env: Some(env),
                 local_host_info: Some(host_info),
+                local_compose: Some(rendered_compose),
             },
             &RemoteDeploymentConfig {
                 operation_id: operation_id.clone(),
+                release_fingerprint: validation.fingerprint.clone().unwrap_or_default(),
                 mac_normalized: mac.clone(),
                 data_root: "/opt/data".into(),
                 deploy_root: "/opt/data/deploy/inxvision-edge".into(),

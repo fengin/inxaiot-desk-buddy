@@ -12,6 +12,9 @@ use crate::core::error::{AppError, AppResult};
 const REQUIRED_SERVICES: &[&str] = &["emqx", "device-edge", "rule-engine", "device-edge-web"];
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_IMAGE_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_RELEASE_VERSION_BYTES: usize = 128;
+const MAX_RELEASE_FILE_COUNT: usize = 10_000;
+const MAX_RELEASE_TOTAL_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -210,6 +213,48 @@ pub fn inspect_image_archive(path: &Path) -> AppResult<ImageArchiveInfo> {
     ))
 }
 
+pub fn sha256_file(path: &Path) -> AppResult<String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| AppError::io("读取待校验文件", &error))?;
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|error| AppError::io("读取待校验文件属性", &error))?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err(AppError::InvalidConfig("待校验文件为空或不是文件".into()));
+    }
+    let mut file =
+        std::fs::File::open(&canonical).map_err(|error| AppError::io("打开待校验文件", &error))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| AppError::io("计算文件SHA-256", &error))?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+pub fn validate_release_version(version: &str) -> AppResult<()> {
+    let bytes = version.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > MAX_RELEASE_VERSION_BYTES
+        || matches!(version, "." | "..")
+        || !bytes[0].is_ascii_alphanumeric()
+        || !bytes
+            .iter()
+            .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'.' | b'_' | b'-'))
+    {
+        return Err(AppError::InvalidConfig(
+            "Release版本只能由字母、数字、点、下划线和连字符组成，且必须以字母或数字开头".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn read_manifest(path: &Path) -> AppResult<ReleaseManifest> {
     let metadata =
         std::fs::metadata(path).map_err(|error| AppError::io("读取Release manifest", &error))?;
@@ -225,14 +270,21 @@ fn read_manifest(path: &Path) -> AppResult<ReleaseManifest> {
 }
 
 fn validate_manifest_fields(manifest: &ReleaseManifest, errors: &mut Vec<String>) {
-    if manifest.schema_version == 0 {
-        errors.push("manifest.schemaVersion必须大于0".into());
+    if manifest.schema_version != 1 {
+        errors.push("manifest.schemaVersion当前只支持1".into());
     }
-    if manifest.version.trim().is_empty() {
-        errors.push("manifest.version不能为空".into());
+    if let Err(error) = validate_release_version(&manifest.version) {
+        errors.push(error.to_string());
     }
     if manifest.compose_file.trim().is_empty() {
         errors.push("manifest.composeFile不能为空".into());
+    }
+    if manifest.runtime.os.trim().is_empty()
+        || manifest.runtime.arch.trim().is_empty()
+        || manifest.runtime.docker.trim().is_empty()
+        || manifest.runtime.compose.trim().is_empty()
+    {
+        errors.push("manifest.runtime必须完整声明os、arch、docker和compose约束".into());
     }
     let mut services = BTreeSet::new();
     for image in &manifest.images {
@@ -323,13 +375,38 @@ fn validate_compose_variables(
 }
 
 fn fingerprint_directory(root: &Path) -> AppResult<String> {
-    let mut files = WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .map(|entry| entry.into_path())
-        .collect::<Vec<_>>();
+    let mut files = Vec::new();
+    let mut total_bytes = 0_u64;
+    for entry in WalkDir::new(root).follow_links(false) {
+        let entry = entry.map_err(|_| AppError::InvalidConfig("遍历Release目录失败".into()))?;
+        if entry.file_type().is_symlink() {
+            return Err(AppError::InvalidConfig(
+                "Release目录不允许包含符号链接".into(),
+            ));
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        files.push(entry.path().to_path_buf());
+        if files.len() > MAX_RELEASE_FILE_COUNT {
+            return Err(AppError::InvalidConfig(
+                "Release文件数量超过10000个安全上限".into(),
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(
+            entry
+                .metadata()
+                .map_err(|_| AppError::Io {
+                    operation: "读取Release文件属性",
+                })?
+                .len(),
+        );
+        if total_bytes > MAX_RELEASE_TOTAL_BYTES {
+            return Err(AppError::InvalidConfig(
+                "Release总大小超过50GiB安全上限".into(),
+            ));
+        }
+    }
     files.sort();
     let mut digest = Sha256::new();
     for path in files {
@@ -364,7 +441,7 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        ReleaseImage, ReleaseManifest, ReleaseTemplates, inspect_image_archive,
+        ReleaseImage, ReleaseManifest, ReleaseRuntime, ReleaseTemplates, inspect_image_archive,
         inspect_release_directory,
     };
 
@@ -431,7 +508,12 @@ mod tests {
                 env: "templates/env.template".into(),
                 host_info: "templates/host-info.json.template".into(),
             },
-            runtime: Default::default(),
+            runtime: ReleaseRuntime {
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                docker: ">=20.10".into(),
+                compose: ">=2.0".into(),
+            },
         };
         std::fs::write(
             temp.path().join("manifest.json"),

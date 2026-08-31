@@ -244,7 +244,7 @@ async fn acquire_one(
         let expired: i8 = row
             .try_get("expired")
             .map_err(|_| FormalError::LocalDatabase("解析租约过期状态"))?;
-        if state == "active" && expired == 0 && owner != request.owner_instance_id {
+        if state == "active" && expired == 0 {
             return Ok(LeaseOutcome::Busy {
                 resource_type: request.resource_type.clone(),
                 resource_key: request.resource_key.clone(),

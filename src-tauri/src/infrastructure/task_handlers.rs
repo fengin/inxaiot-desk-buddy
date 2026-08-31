@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 use tokio_util::sync::CancellationToken;
 
@@ -105,9 +106,15 @@ async fn execute_aio_handler_inner(
     let bytes = tokio::fs::read(payload_path)
         .await
         .map_err(|error| AppError::io("读取AIO任务payload", &error))?;
+    let expected_sha256 = envelope
+        .payload_sha256
+        .as_deref()
+        .ok_or_else(|| AppError::InvalidConfig("AIO任务缺少payload_sha256".into()))?;
+    verify_payload_sha256(&bytes, expected_sha256)?;
     let input = serde_json::from_slice::<LaunchDeploymentInput>(&bytes)
         .map_err(|_| AppError::InvalidConfig("AIO任务payload无法解析".into()))?;
-    let plan = DeploymentPlan::build(input.plan.clone())?;
+    input.snapshot.validate(&envelope.local_project_id)?;
+    let plan = DeploymentPlan::build(input.snapshot.plan.clone())?;
     if mode_code(plan.mode) != envelope.operation_type {
         return Err(AppError::Conflict("AIO任务操作类型与payload不一致".into()));
     }
@@ -126,6 +133,17 @@ async fn execute_aio_handler_inner(
     )
     .await
     .map(|_| ())
+}
+
+fn verify_payload_sha256(bytes: &[u8], expected_sha256: &str) -> AppResult<()> {
+    let actual_sha256 = hex::encode(Sha256::digest(bytes));
+    if actual_sha256.eq_ignore_ascii_case(expected_sha256) {
+        Ok(())
+    } else {
+        Err(AppError::Integrity {
+            operation: "校验AIO任务payload",
+        })
+    }
 }
 
 async fn converge_handler_failure(state: &FormalAppState, task_id: &str, error: &AppError) {
@@ -214,7 +232,11 @@ fn mode_code(mode: DeploymentMode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{AIO_OPERATIONS, deployment_payload_file, register_aio_task_handlers};
+    use sha2::{Digest, Sha256};
+
+    use super::{
+        AIO_OPERATIONS, deployment_payload_file, register_aio_task_handlers, verify_payload_sha256,
+    };
     use crate::runtime::task_queue::TaskHandlerRegistry;
 
     #[test]
@@ -235,5 +257,13 @@ mod tests {
                 ("aio".into(), "service_upgrade".into())
             ]
         );
+    }
+
+    #[test]
+    fn deployment_payload_hash_rejects_any_mutation() {
+        let bytes = br#"{"snapshot":"immutable"}"#;
+        let expected = hex::encode(Sha256::digest(bytes));
+        verify_payload_sha256(bytes, &expected).expect("original payload");
+        assert!(verify_payload_sha256(br#"{"snapshot":"changed"}"#, &expected).is_err());
     }
 }

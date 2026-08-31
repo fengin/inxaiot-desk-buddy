@@ -62,9 +62,11 @@ async fn service_upgrade_runs_on_both_nodes_and_cleans_exact_staging() {
                 local_artifact: image.clone(),
                 local_env: None,
                 local_host_info: None,
+                local_compose: None,
             },
             &RemoteDeploymentConfig {
                 operation_id: operation_id.clone(),
+                release_fingerprint: String::new(),
                 mac_normalized: mac.clone(),
                 data_root: "/opt/data".into(),
                 deploy_root: "/opt/data/deploy/inxvision-edge".into(),

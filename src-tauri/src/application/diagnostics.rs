@@ -4,6 +4,7 @@ use serde::Serialize;
 #[serde(rename_all = "camelCase")]
 pub struct SystemDiagnostics {
     pub application_version: String,
+    pub source_commit: String,
     pub local_schema_version: String,
     pub workbench_schema_version: String,
     pub agent_version: String,
@@ -21,6 +22,7 @@ pub struct SystemDiagnostics {
 #[derive(Clone, Debug)]
 pub struct SystemDiagnosticsInput {
     pub application_version: String,
+    pub source_commit: String,
     pub local_schema_version: String,
     pub workbench_schema_version: String,
     pub agent_version: String,
@@ -38,6 +40,7 @@ pub struct SystemDiagnosticsInput {
 pub fn build_system_diagnostics(input: SystemDiagnosticsInput) -> SystemDiagnostics {
     SystemDiagnostics {
         application_version: input.application_version,
+        source_commit: input.source_commit,
         local_schema_version: input.local_schema_version,
         workbench_schema_version: input.workbench_schema_version,
         agent_version: input.agent_version,

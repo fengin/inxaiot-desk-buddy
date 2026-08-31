@@ -26,7 +26,10 @@ use crate::infrastructure::logging::task_event_pipeline::TaskEventPipeline;
 use crate::infrastructure::process_lock::DataDirectoryProcessLock;
 use crate::infrastructure::task_data_lifecycle::TaskDataLifecycle;
 use crate::infrastructure::task_handlers::register_production_task_handlers;
-use crate::infrastructure::task_runtime::{prepare_shutdown_tasks, reconcile_shutdown_outcomes};
+use crate::infrastructure::task_runtime::{
+    prepare_shutdown_tasks, reconcile_queue_result, reconcile_shutdown_outcomes,
+    reconcile_untracked_active_tasks, retry_pending_local_finalizations,
+};
 use crate::interface::commands::aio_assets::{
     apply_inventory_import, discard_inventory_import, get_edge_node_detail,
     get_latest_inventory_import, list_edge_nodes, preview_inventory_import,
@@ -110,14 +113,29 @@ pub fn run() {
                 let task_repository = TaskRepository::new(local_store.pool().clone());
                 task_repository.recover_interrupted().await?;
                 let task_data_lifecycle = TaskDataLifecycle::new(&paths);
-                for task in task_repository.list_artifact_cleanup_candidates().await? {
-                    task_data_lifecycle.finalize_task(
-                        &task.local_project_id,
-                        &task.id,
-                        task.state,
-                    )?;
+                match task_repository.list_artifact_cleanup_candidates().await {
+                    Ok(tasks) => {
+                        for task in tasks {
+                            if let Err(error) = task_data_lifecycle.finalize_task(
+                                &task.local_project_id,
+                                &task.id,
+                                task.state,
+                            ) {
+                                tracing::warn!(
+                                    task_id = %task.id,
+                                    error = %error,
+                                    "startup task artifact cleanup deferred"
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, "startup task cleanup scan deferred");
+                    }
                 }
-                task_data_lifecycle.sweep_expired_logs()?;
+                if let Err(error) = task_data_lifecycle.sweep_expired_logs() {
+                    tracing::warn!(error = %error, "startup task log retention sweep deferred");
+                }
                 let job_supervisor = JobSupervisor::default();
                 let task_handler_registry = TaskHandlerRegistry::default();
                 register_production_task_handlers(&task_handler_registry, setup_app_handle)?;
@@ -133,7 +151,7 @@ pub fn run() {
                     task_event_bus.clone(),
                     SensitiveValueRedactor::production(),
                 );
-                Ok::<_, Box<dyn std::error::Error>>(FormalAppState {
+                let state = FormalAppState {
                     local_store,
                     secret_store: Arc::new(OsSecretStore::new("inxaiot-desk-buddy")?),
                     runtime_registry: ProjectRuntimeRegistry::default(),
@@ -144,7 +162,9 @@ pub fn run() {
                     task_repository,
                     task_event_pipeline,
                     paths,
-                })
+                };
+                retry_pending_local_finalizations(&state).await;
+                Ok::<_, Box<dyn std::error::Error>>(state)
             })?;
             let mut events = state.task_event_bus.subscribe();
             let app_handle = app.handle().clone();
@@ -155,6 +175,30 @@ pub fn run() {
                             let _ = app_handle.emit("task-event", event);
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+            let mut queue_results = state.task_queue.subscribe_results();
+            let outcome_repository = state.task_repository.clone();
+            let outcome_paths = state.paths.clone();
+            let outcome_queue = state.task_queue.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match queue_results.recv().await {
+                        Ok(result) => {
+                            reconcile_queue_result(&outcome_repository, &outcome_paths, &result)
+                                .await;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                            reconcile_untracked_active_tasks(
+                                &outcome_repository,
+                                &outcome_paths,
+                                &outcome_queue,
+                            )
+                            .await;
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }

@@ -3,9 +3,9 @@ use sha2::{Digest, Sha256};
 use crate::core::error::{AppError, AppResult};
 
 pub const AGENT_SOURCE: &str = include_str!("../../resources/agent/edge-node-agent.sh");
-pub const AGENT_VERSION: &str = "0.1.0";
+pub const AGENT_VERSION: &str = "0.1.2";
 pub const AGENT_PROTOCOL_VERSION: &str = "1";
-pub const AGENT_SHA256: &str = "8787fa59f40ffbd2dcb3ceda0fbe378cf6622de9f208aac687c8d5b554ff95c6";
+pub const AGENT_SHA256: &str = "b49eb802e3c31a1dfdc48e31630820d057e8f6d38a2e4dadff314697a3e0b678";
 pub const AGENT_COMPATIBILITY: &[&str] = &[
     "Linux x86_64",
     "Docker Engine 20.10+",
@@ -35,16 +35,18 @@ pub fn verify_embedded_agent() -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AGENT_COMPATIBILITY, AGENT_PROTOCOL_VERSION, AGENT_SHA256, AGENT_VERSION,
+        AGENT_COMPATIBILITY, AGENT_PROTOCOL_VERSION, AGENT_SHA256, AGENT_SOURCE, AGENT_VERSION,
         verify_embedded_agent,
     };
 
     #[test]
     fn embedded_agent_has_version_hash_protocol_and_compatibility() {
         verify_embedded_agent().expect("embedded agent");
-        assert_eq!(AGENT_VERSION, "0.1.0");
+        assert_eq!(AGENT_VERSION, "0.1.2");
         assert_eq!(AGENT_PROTOCOL_VERSION, "1");
         assert_eq!(AGENT_SHA256.len(), 64);
         assert!(!AGENT_COMPATIBILITY.is_empty());
+        assert!(AGENT_SOURCE.contains("require_safe_release_version"));
+        assert!(AGENT_SOURCE.contains("REMOTE_COMPOSE"));
     }
 }

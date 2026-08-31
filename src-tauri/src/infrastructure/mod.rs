@@ -2,6 +2,7 @@ pub mod agent_asset;
 pub mod csv_inventory;
 pub mod data_directory;
 pub mod database;
+pub mod deployment_finalization;
 pub mod deployment_progress;
 pub mod deployment_remote;
 pub mod device_api;

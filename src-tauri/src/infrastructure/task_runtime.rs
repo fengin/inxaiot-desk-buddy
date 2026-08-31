@@ -1,8 +1,256 @@
+use crate::application::project_context::project_database;
 use crate::domain::common::task::{TargetState, TaskState};
 use crate::formal::app_state::FormalAppState;
+use crate::formal::config::AppPaths;
+use crate::infrastructure::deployment_finalization::{
+    read_pending_local_finalization, shared_operation_state,
+};
 use crate::infrastructure::local_sqlite::task_repository::TargetUpdate;
+use crate::infrastructure::local_sqlite::task_repository::TaskRepository;
 use crate::infrastructure::task_data_lifecycle::TaskDataLifecycle;
 use crate::runtime::job_supervisor::JobOutcome;
+use crate::runtime::task_queue::{TaskQueue, TaskQueueResult};
+
+pub async fn retry_pending_local_finalizations(state: &FormalAppState) {
+    let Ok(tasks) = state.task_repository.list_active().await else {
+        return;
+    };
+    for task in tasks
+        .into_iter()
+        .filter(|task| task.state == TaskState::FinalizingFailed)
+    {
+        let Ok(task_dir) = state
+            .paths
+            .project_task_dir(&task.local_project_id, &task.id)
+        else {
+            continue;
+        };
+        let Ok(projection) = read_pending_local_finalization(&task_dir) else {
+            continue;
+        };
+        let Ok(pools) = project_database(state, &task.local_project_id).await else {
+            continue;
+        };
+        let Ok(Some(shared_state)) =
+            shared_operation_state(&pools.workbench, &projection.operation_id).await
+        else {
+            continue;
+        };
+        if shared_state != projection.final_state.as_str() {
+            continue;
+        }
+        if state
+            .task_repository
+            .finalize_projection(
+                &task.id,
+                TaskState::FinalizingFailed,
+                projection.final_state,
+                &projection.targets,
+                &projection.steps,
+            )
+            .await
+            .is_ok()
+        {
+            let _ = TaskDataLifecycle::new(&state.paths).finalize_task(
+                &task.local_project_id,
+                &task.id,
+                projection.final_state,
+            );
+        }
+    }
+}
+
+pub async fn reconcile_queue_result(
+    repository: &TaskRepository,
+    paths: &AppPaths,
+    result: &TaskQueueResult,
+) {
+    let Ok(mut task) = repository.get(&result.local_task_id).await else {
+        return;
+    };
+    if task.state.is_terminal() || task.state == TaskState::FinalizingFailed {
+        return;
+    }
+
+    let (next, error_code, message, target_state) = match (&result.outcome, task.state) {
+        (JobOutcome::Cancelled, TaskState::Queued) => (
+            TaskState::Cancelled,
+            "QUEUE_CANCELLED",
+            "排队任务已取消，未进入执行器",
+            TargetState::Cancelled,
+        ),
+        (JobOutcome::Cancelled, TaskState::Running) => {
+            let Ok(updated) = repository
+                .transition(
+                    &task.id,
+                    TaskState::Running,
+                    TaskState::Cancelling,
+                    Some("TASK_CANCELLED"),
+                    Some("执行器已取消任务，正在收敛状态"),
+                )
+                .await
+            else {
+                return;
+            };
+            task = updated;
+            (
+                TaskState::Cancelled,
+                "TASK_CANCELLED",
+                "任务已由执行器取消",
+                TargetState::Cancelled,
+            )
+        }
+        (JobOutcome::Cancelled, TaskState::Cancelling) => (
+            TaskState::Cancelled,
+            "TASK_CANCELLED",
+            "任务已由执行器取消",
+            TargetState::Cancelled,
+        ),
+        (JobOutcome::Failed(_), TaskState::Queued) => {
+            let Ok(updated) = repository
+                .transition(
+                    &task.id,
+                    TaskState::Queued,
+                    TaskState::Running,
+                    Some("TASK_DISPATCH_FAILED"),
+                    Some("任务处理器启动失败"),
+                )
+                .await
+            else {
+                return;
+            };
+            task = updated;
+            (
+                TaskState::Failed,
+                "TASK_DISPATCH_FAILED",
+                "任务处理器启动或执行失败",
+                TargetState::Failed,
+            )
+        }
+        (JobOutcome::Failed(_), TaskState::Running | TaskState::Cancelling) => (
+            TaskState::Failed,
+            "TASK_HANDLER_FAILED",
+            "任务处理器异常返回，已统一收敛",
+            TargetState::Failed,
+        ),
+        (JobOutcome::Panicked | JobOutcome::Aborted, TaskState::Queued) => {
+            let Ok(updated) = repository
+                .transition(
+                    &task.id,
+                    TaskState::Queued,
+                    TaskState::Running,
+                    Some("TASK_DISPATCH_ABORTED"),
+                    Some("任务处理器未能安全启动"),
+                )
+                .await
+            else {
+                return;
+            };
+            task = updated;
+            (
+                TaskState::Failed,
+                "TASK_DISPATCH_ABORTED",
+                "任务处理器panic或被中止",
+                TargetState::Failed,
+            )
+        }
+        (
+            JobOutcome::Panicked | JobOutcome::Aborted | JobOutcome::Completed,
+            TaskState::Running | TaskState::Cancelling,
+        ) => (
+            TaskState::Interrupted,
+            "TASK_OUTCOME_UNSAFE",
+            "执行器结束但任务未形成安全终态，需要对账",
+            TargetState::Interrupted,
+        ),
+        (JobOutcome::Completed, TaskState::Queued) => {
+            let Ok(updated) = repository
+                .transition(
+                    &task.id,
+                    TaskState::Queued,
+                    TaskState::Running,
+                    Some("TASK_COMPLETED_WITHOUT_STATE"),
+                    Some("执行器完成但任务未进入运行态"),
+                )
+                .await
+            else {
+                return;
+            };
+            task = updated;
+            (
+                TaskState::Failed,
+                "TASK_COMPLETED_WITHOUT_STATE",
+                "执行器完成但任务没有持久化执行结果",
+                TargetState::Failed,
+            )
+        }
+        _ => return,
+    };
+    if repository
+        .transition(&task.id, task.state, next, Some(error_code), Some(message))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    converge_targets(repository, &task.id, next, target_state, error_code).await;
+    let _ = TaskDataLifecycle::new(paths).finalize_task(&task.local_project_id, &task.id, next);
+}
+
+pub async fn reconcile_untracked_active_tasks(
+    repository: &TaskRepository,
+    paths: &AppPaths,
+    queue: &TaskQueue,
+) {
+    let Ok(tasks) = repository.list_active().await else {
+        return;
+    };
+    for task in tasks {
+        if task.state != TaskState::FinalizingFailed && !queue.is_tracked(&task.id).await {
+            reconcile_queue_result(
+                repository,
+                paths,
+                &TaskQueueResult {
+                    local_task_id: task.id,
+                    outcome: JobOutcome::Aborted,
+                },
+            )
+            .await;
+        }
+    }
+}
+
+async fn converge_targets(
+    repository: &TaskRepository,
+    task_id: &str,
+    task_state: TaskState,
+    target_state: TargetState,
+    error_code: &str,
+) {
+    if let Ok(targets) = repository.targets(task_id).await {
+        for target in targets {
+            if matches!(target.state, TargetState::Pending | TargetState::Running) {
+                let total = target.progress_total.max(100);
+                let _ = repository
+                    .update_target(
+                        task_id,
+                        TargetUpdate {
+                            resource_type: target.resource_type,
+                            resource_key: target.resource_key,
+                            state: target_state,
+                            stage: task_state.as_str().into(),
+                            progress_current: total,
+                            progress_total: total,
+                            fencing_token: target.fencing_token,
+                            message_code: Some(error_code.into()),
+                            message_params_json: None,
+                        },
+                    )
+                    .await;
+            }
+        }
+    }
+}
 
 pub async fn prepare_shutdown_tasks(state: &FormalAppState) {
     let Ok(tasks) = state.task_repository.list_active().await else {
@@ -104,7 +352,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{prepare_shutdown_tasks, reconcile_shutdown_outcomes};
+    use super::{prepare_shutdown_tasks, reconcile_queue_result, reconcile_shutdown_outcomes};
     use crate::domain::common::task::{TargetState, TaskState};
     use crate::formal::app_state::FormalAppState;
     use crate::formal::config::AppPaths;
@@ -116,7 +364,7 @@ mod tests {
     use crate::infrastructure::logging::redactor::SensitiveValueRedactor;
     use crate::infrastructure::logging::task_event_pipeline::TaskEventPipeline;
     use crate::runtime::event_bus::TaskEventBus;
-    use crate::runtime::task_queue::{TaskHandlerRegistry, TaskQueue};
+    use crate::runtime::task_queue::{TaskHandlerRegistry, TaskQueue, TaskQueueResult};
 
     #[tokio::test]
     async fn shutdown_outcomes_persist_queued_cancel_and_running_interrupt() {
@@ -135,7 +383,7 @@ mod tests {
         .await
         .expect("project");
         let repository = TaskRepository::new(local_store.pool().clone());
-        for task_id in ["queued", "running"] {
+        for task_id in ["queued", "running", "dispatch-failed"] {
             repository
                 .create(CreateTask {
                     id: task_id.into(),
@@ -194,6 +442,31 @@ mod tests {
             ),
             paths,
         };
+        reconcile_queue_result(
+            &repository,
+            &state.paths,
+            &TaskQueueResult {
+                local_task_id: "dispatch-failed".into(),
+                outcome: JobOutcome::Failed("missing handler".into()),
+            },
+        )
+        .await;
+        assert_eq!(
+            repository
+                .get("dispatch-failed")
+                .await
+                .expect("dispatch failed")
+                .state,
+            TaskState::Failed
+        );
+        assert_eq!(
+            repository
+                .targets("dispatch-failed")
+                .await
+                .expect("dispatch failed targets")[0]
+                .state,
+            TargetState::Failed
+        );
         prepare_shutdown_tasks(&state).await;
         assert_eq!(
             repository.get("running").await.expect("running").state,

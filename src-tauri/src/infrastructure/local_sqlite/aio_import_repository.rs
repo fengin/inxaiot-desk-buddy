@@ -398,4 +398,26 @@ mod tests {
         );
         store.close().await;
     }
+
+    #[tokio::test]
+    async fn concurrent_preview_creation_keeps_one_open_session_per_project() {
+        let (_directory, store, repository) = setup().await;
+        let first = repository.clone();
+        let second = repository.clone();
+        let left_items = [item(2, ImportClassification::NewPending)];
+        let right_items = [item(2, ImportClassification::NewPending)];
+        let (left, right) = tokio::join!(
+            first.create_preview("project-a", "left.csv", "C:/left.csv", &left_items,),
+            second.create_preview("project-a", "right.csv", "C:/right.csv", &right_items,)
+        );
+        assert_ne!(left.is_ok(), right.is_ok());
+        assert!(
+            repository
+                .latest_open_for_project("project-a")
+                .await
+                .expect("latest")
+                .is_some()
+        );
+        store.close().await;
+    }
 }

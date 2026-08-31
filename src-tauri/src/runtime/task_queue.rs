@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError, broadcast};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore, TryAcquireError, broadcast};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -25,16 +25,27 @@ pub struct TaskEnvelope {
     pub resource_keys: Vec<String>,
     pub priority: i32,
     pub payload_ref: Option<String>,
+    pub payload_sha256: Option<String>,
 }
 
 impl TaskEnvelope {
     pub fn validate(&self) -> AppResult<()> {
+        let payload_is_valid = match (&self.payload_ref, &self.payload_sha256) {
+            (None, None) => true,
+            (Some(reference), Some(hash)) => {
+                !reference.trim().is_empty()
+                    && hash.len() == 64
+                    && hash.bytes().all(|value| value.is_ascii_hexdigit())
+            }
+            _ => false,
+        };
         if self.local_task_id.trim().is_empty()
             || self.local_project_id.trim().is_empty()
             || self.domain_type.trim().is_empty()
             || self.operation_type.trim().is_empty()
             || self.resource_keys.is_empty()
             || self.resource_keys.iter().any(|key| key.trim().is_empty())
+            || !payload_is_valid
         {
             return Err(AppError::InvalidConfig("任务队列信封参数无效".into()));
         }
@@ -148,6 +159,8 @@ impl Ord for QueuedTask {
 struct QueueState {
     heap: Mutex<BinaryHeap<QueuedTask>>,
     queued_ids: Mutex<HashSet<String>>,
+    dispatching_ids: Mutex<HashSet<String>>,
+    dispatch_changed: Notify,
     items: Semaphore,
     slots: Arc<Semaphore>,
     sequence: AtomicU64,
@@ -179,6 +192,8 @@ impl TaskQueue {
         let state = Arc::new(QueueState {
             heap: Mutex::new(BinaryHeap::new()),
             queued_ids: Mutex::new(HashSet::new()),
+            dispatching_ids: Mutex::new(HashSet::new()),
+            dispatch_changed: Notify::new(),
             items: Semaphore::new(0),
             slots: Arc::new(Semaphore::new(capacity)),
             sequence: AtomicU64::new(0),
@@ -253,6 +268,12 @@ impl TaskQueue {
         self.state.heap.lock().await.len()
     }
 
+    pub async fn is_tracked(&self, task_id: &str) -> bool {
+        self.state.queued_ids.lock().await.contains(task_id)
+            || self.state.dispatching_ids.lock().await.contains(task_id)
+            || self.supervisor.contains(task_id).await
+    }
+
     pub fn is_closed(&self) -> bool {
         self.state.closed.load(AtomicOrdering::SeqCst)
     }
@@ -273,11 +294,25 @@ impl TaskQueue {
             return Ok(());
         }
         drop(heap);
-        for _ in 0..4 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        loop {
             if self.supervisor.contains(task_id).await {
                 return self.supervisor.cancel(task_id).await;
             }
-            tokio::task::yield_now().await;
+            if !self.state.dispatching_ids.lock().await.contains(task_id) {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(AppError::Conflict(format!(
+                    "任务正在进入执行器，取消尚未完成：{task_id}"
+                )));
+            }
+            let _ = tokio::time::timeout(
+                remaining.min(Duration::from_millis(25)),
+                self.state.dispatch_changed.notified(),
+            )
+            .await;
         }
         Err(AppError::NotFound(format!(
             "任务不在队列或监督器中：{task_id}"
@@ -350,6 +385,7 @@ impl TaskQueue {
                         .await
                         .remove(&task.envelope.local_task_id);
                     let task_id = task.envelope.local_task_id.clone();
+                    self.state.dispatching_ids.lock().await.insert(task_id.clone());
                     let handler = self
                         .registry
                         .get(&task.envelope.domain_type, &task.envelope.operation_type);
@@ -377,6 +413,8 @@ impl TaskQueue {
                         }
                         Err(error) => JobOutcome::Failed(error.to_string()),
                     };
+                    self.state.dispatching_ids.lock().await.remove(&task_id);
+                    self.state.dispatch_changed.notify_waiters();
                     let _ = self.results.send(TaskQueueResult {
                         local_task_id: task_id,
                         outcome,

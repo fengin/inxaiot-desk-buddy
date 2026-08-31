@@ -623,24 +623,39 @@ fn service_status(versions: &[&ServiceVersionRecord]) -> (String, String) {
     if versions.is_empty() {
         return ("unknown".into(), "待检查".into());
     }
-    let unknown = versions
-        .iter()
-        .filter(|version| version.observed_version.is_none())
-        .count();
-    let mismatch = versions
+    let needs_check = versions
         .iter()
         .filter(|version| {
-            matches!(
-                (&version.expected_version, &version.observed_version),
-                (Some(expected), Some(observed)) if expected != observed
-            )
+            version.observed_version.is_none()
+                || version
+                    .observed_at
+                    .as_deref()
+                    .is_none_or(|observed_at| !service_observation_is_fresh(observed_at))
+                || matches!(
+                    (&version.expected_version, &version.observed_version),
+                    (Some(expected), Some(observed)) if expected != observed
+                )
         })
         .count();
-    if unknown > 0 || mismatch > 0 {
-        let count = unknown + mismatch;
-        return ("warning".into(), format!("{count}项需检查"));
+    if needs_check > 0 {
+        return ("warning".into(), format!("{needs_check}项需检查"));
     }
     ("healthy".into(), format!("{}项正常", versions.len()))
+}
+
+fn service_observation_is_fresh(value: &str) -> bool {
+    let rfc3339 = if value.ends_with('Z') || value.contains('+') {
+        value.to_string()
+    } else {
+        format!("{value}Z")
+    };
+    let Ok(observed) =
+        OffsetDateTime::parse(&rfc3339, &time::format_description::well_known::Rfc3339)
+    else {
+        return false;
+    };
+    let age = OffsetDateTime::now_utc() - observed;
+    age >= time::Duration::minutes(-1) && age <= time::Duration::minutes(15)
 }
 
 fn deploy_label(state: &str) -> &'static str {

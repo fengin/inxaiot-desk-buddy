@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use time::OffsetDateTime;
 
@@ -48,7 +49,7 @@ impl CreateTask {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TargetUpdate {
     pub resource_type: String,
     pub resource_key: String,
@@ -61,7 +62,7 @@ pub struct TargetUpdate {
     pub message_params_json: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskStepWrite {
     pub id: String,
     pub resource_type: Option<String>,
@@ -275,7 +276,7 @@ impl TaskRepository {
              error_code, message, created_at, started_at, ended_at, updated_at \
              FROM local_task WHERE state IN \
              ('check_failed', 'cancelled', 'succeeded', 'partially_succeeded', 'failed', \
-              'interrupted', 'finalizing_failed') ORDER BY updated_at, id",
+              'interrupted') ORDER BY updated_at, id",
         )
         .fetch_all(&self.pool)
         .await
@@ -452,10 +453,136 @@ impl TaskRepository {
         Ok(sequence)
     }
 
+    pub async fn finalize_projection(
+        &self,
+        task_id: &str,
+        expected_state: TaskState,
+        final_state: TaskState,
+        targets: &[TargetUpdate],
+        steps: &[TaskStepWrite],
+    ) -> AppResult<()> {
+        expected_state.ensure_transition(final_state)?;
+        if !final_state.is_terminal() || targets.is_empty() {
+            return Err(AppError::InvalidConfig("本地最终化投影参数无效".into()));
+        }
+        let now = timestamp();
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| AppError::database("开始本地最终化投影事务", &error))?;
+        for update in targets {
+            if update.resource_type.trim().is_empty()
+                || update.resource_key.trim().is_empty()
+                || (update.progress_total > 0 && update.progress_current > update.progress_total)
+            {
+                return Err(AppError::InvalidConfig("本地最终化目标参数无效".into()));
+            }
+            let percent = if update.progress_total == 0 {
+                0
+            } else {
+                update.progress_current.saturating_mul(100) / update.progress_total
+            }
+            .min(100);
+            let result = sqlx::query(concat!(
+                "UPDATE local_task_target SET state = ?, stage = ?, progress = ?, ",
+                "progress_current = ?, progress_total = ?, ",
+                "fencing_token = COALESCE(?, fencing_token), message_code = ?, ",
+                "message_params_json = ?, updated_at = ? ",
+                "WHERE local_task_id = ? AND resource_type = ? AND resource_key = ?"
+            ))
+            .bind(update.state.as_str())
+            .bind(&update.stage)
+            .bind(to_i64(percent, "任务目标百分比")?)
+            .bind(to_i64(update.progress_current, "任务目标当前进度")?)
+            .bind(to_i64(update.progress_total, "任务目标总进度")?)
+            .bind(
+                update
+                    .fencing_token
+                    .map(|value| to_i64(value, "fencing token"))
+                    .transpose()?,
+            )
+            .bind(&update.message_code)
+            .bind(&update.message_params_json)
+            .bind(&now)
+            .bind(task_id)
+            .bind(&update.resource_type)
+            .bind(&update.resource_key)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| AppError::database("写入本地最终化目标", &error))?;
+            if result.rows_affected() != 1 {
+                return Err(AppError::NotFound(format!(
+                    "本地最终化目标不存在：{}/{}",
+                    update.resource_type, update.resource_key
+                )));
+            }
+        }
+        for step in steps {
+            if step.id.trim().is_empty() || step.step_code.trim().is_empty() {
+                return Err(AppError::InvalidConfig("本地最终化步骤参数无效".into()));
+            }
+            let ended_at = matches!(
+                step.state,
+                StepState::Succeeded
+                    | StepState::Failed
+                    | StepState::Skipped
+                    | StepState::Cancelled
+                    | StepState::Interrupted
+            )
+            .then_some(now.as_str());
+            sqlx::query(concat!(
+                "INSERT INTO local_task_step ",
+                "(id, local_task_id, resource_type, resource_key, step_code, state, error_code, ",
+                "message, started_at, ended_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ",
+                "ON CONFLICT(id) DO UPDATE SET state = excluded.state, ",
+                "error_code = excluded.error_code, message = excluded.message, ",
+                "started_at = COALESCE(local_task_step.started_at, excluded.started_at), ",
+                "ended_at = excluded.ended_at, updated_at = excluded.updated_at"
+            ))
+            .bind(&step.id)
+            .bind(task_id)
+            .bind(&step.resource_type)
+            .bind(&step.resource_key)
+            .bind(&step.step_code)
+            .bind(step.state.as_str())
+            .bind(&step.error_code)
+            .bind(&step.message)
+            .bind(now.as_str())
+            .bind(ended_at)
+            .bind(&now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| AppError::database("写入本地最终化步骤", &error))?;
+        }
+        let updated = sqlx::query(concat!(
+            "UPDATE local_task SET state = ?, error_code = NULL, message = NULL, ",
+            "ended_at = COALESCE(ended_at, ?), sequence = sequence + 1, updated_at = ? ",
+            "WHERE id = ? AND state = ?"
+        ))
+        .bind(final_state.as_str())
+        .bind(&now)
+        .bind(&now)
+        .bind(task_id)
+        .bind(expected_state.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| AppError::database("写入本地任务最终状态", &error))?;
+        if updated.rows_affected() != 1 {
+            return Err(AppError::Conflict(format!(
+                "本地任务最终化期间状态已变化：{task_id}"
+            )));
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| AppError::database("提交本地最终化投影事务", &error))
+    }
+
     pub async fn recover_interrupted(&self) -> AppResult<Vec<String>> {
         let ids = sqlx::query_scalar::<_, String>(
             "SELECT id FROM local_task WHERE state IN \
-             ('queued', 'running', 'cancelling', 'finalizing_failed') ORDER BY id",
+             ('queued', 'running', 'cancelling') ORDER BY id",
         )
         .fetch_all(&self.pool)
         .await

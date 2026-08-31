@@ -90,6 +90,15 @@ async fn released_row_preserves_monotonic_fencing_token() {
         .await
         .expect("first heartbeat");
 
+    let same_instance_busy = leases
+        .acquire_many(vec![request(
+            &resource_key,
+            "instance-a",
+            &second_operation,
+        )])
+        .await;
+    assert!(matches!(same_instance_busy, Err(FormalError::Conflict(_))));
+
     let busy = leases
         .acquire_many(vec![request(
             &resource_key,

@@ -440,6 +440,8 @@ Vue Page
 - fingerprint遍历使用`filter_map(Result::ok)`静默忽略目录错误。
 - 镜像tar条目数、Release文件数和总尺寸无上限。
 
+整改结论（检查点`33708a1`）：schemaVersion严格等于1；runtime只接受linux/x86_64和`>=主.次[.补丁]`数字约束，要求随发布物检查结果进入每台节点预检，真实执行uname、Docker及Compose版本比较。Release目录10000文件/50GiB限制保留且归档阶段再次校验；镜像tar增加20GiB文件、100000条目、20GiB声明总量、唯一1MiB manifest限制。版本解析、非法runtime以及tar文件/条目/声明量测试通过。
+
 ### P1-07 模板值可通过换行注入额外env
 
 - 非JSON占位符直接插入原值；`validate_env`会把注入的新行当作合法变量。
@@ -648,6 +650,7 @@ Vue Page
 - P1-02全局节点并发：进程级远端节点Semaphore固定上限5，不再按4个Task worker各自放大。
 - P1-03资源上限：每条远端命令输出1MiB、单条任务日志64KiB、单任务日志32MiB。
 - P1-04/P1-05：所有SFTP部署上传启用SHA-256；覆盖采用可恢复备份切换；敏感staging清理失败不能返回成功。
+- P1-06：schema/runtime语义、Release归档与镜像tar资源上限完成；runtime进入逐节点OS/架构/Docker/Compose真实预检。
 - P1-07：非JSON模板变量含CR/LF/NUL立即拒绝。
 - P1-10：密码/Token版本化引用、主密钥本地登记、SecretStore清理Outbox、启动重试和About待清理诊断通过故障注入。
 - P1-11：SQLite部分唯一索引确保每项目只有一个开放导入预览，并发测试通过。
@@ -657,11 +660,11 @@ Vue Page
 ### 12.4 本轮门禁证据
 
 - 前端：typecheck、严格Lint、17个测试文件34项测试、生产构建通过；新增Real Adapter三项主密钥Command、系统保存对话框、Store版本操作和缺钥界面恢复契约。
-- Rust：cargo fmt --check、全目标全Feature严格Clippy通过；默认Feature全部非忽略单元/集成测试通过（库单测54项）；新增SSH依赖/原始日志契约及SecretStore补偿故障注入通过。
+- Rust：cargo fmt --check、全目标全Feature严格Clippy通过；默认Feature全部非忽略单元/集成测试通过（库单测56项）；新增SSH依赖/原始日志契约、SecretStore补偿和Release runtime/tar上限故障测试通过。
 - 故障注入：真实双进程锁、本地最终化中途失败全回滚/重试、并发导入唯一约束、payload篡改、旧项目响应晚到、会话校验不可用fail-closed均通过。
 - 真实平台：只执行授权测试登录和Token只读菜单校验，未连接、未执行SQL、未修改平台业务库结构或数据。
 - 主密钥真实集成：仅在授权隔离工作台Schema写入`key-poc-*`唯一配置/审计，覆盖迁移、数据库密码解耦、轮换失败回滚、成功轮换和跨电脑导入，结束后按唯一键删除并复查总数为0；Windows Credential Manager唯一测试引用已删除。
-- 最近已验证默认Feature生产Release基于`6f82de8`，大小11929088字节，SHA-256为`BA96809AD7D0D53A64BD79A791EDDE0BB37AF88998622A78F7313C7E817EB6E1`；包含主密钥Command，无WebDriver/Fixture标记。依赖树不存在`rsa 0.10.0-rc.18`，`chacha20`为0.10.2。`1668896`及后续P1整改尚未重建Release，最终收口时统一重建并替换本条证据。
+- 最近已验证默认Feature生产Release基于`6f82de8`，大小11929088字节，SHA-256为`BA96809AD7D0D53A64BD79A791EDDE0BB37AF88998622A78F7313C7E817EB6E1`；包含主密钥Command，无WebDriver/Fixture标记。依赖树不存在`rsa 0.10.0-rc.18`，`chacha20`为0.10.2。`1668896`、`33708a1`及后续P1整改尚未重建Release，最终收口时统一重建并替换本条证据。
 - 未执行真实SSH/Docker门禁：现有test/id_rsa为RSA 4096，已被新策略明确拒绝；不得为了复用旧门禁而绕过算法限制。
 
 ### 12.5 当前准入结论

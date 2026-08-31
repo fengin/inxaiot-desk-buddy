@@ -12,6 +12,9 @@ use crate::core::error::{AppError, AppResult};
 const REQUIRED_SERVICES: &[&str] = &["emqx", "device-edge", "rule-engine", "device-edge-web"];
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_IMAGE_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_IMAGE_ARCHIVE_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+const MAX_IMAGE_TAR_ENTRIES: usize = 100_000;
+const MAX_IMAGE_DECLARED_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const MAX_RELEASE_VERSION_BYTES: usize = 128;
 const MAX_RELEASE_FILE_COUNT: usize = 10_000;
 const MAX_RELEASE_TOTAL_BYTES: u64 = 50 * 1024 * 1024 * 1024;
@@ -148,14 +151,28 @@ pub fn inspect_release_directory(package_dir: &Path) -> AppResult<ReleaseValidat
 }
 
 pub fn inspect_image_archive(path: &Path) -> AppResult<ImageArchiveInfo> {
+    inspect_image_archive_with_limits(
+        path,
+        MAX_IMAGE_ARCHIVE_BYTES,
+        MAX_IMAGE_TAR_ENTRIES,
+        MAX_IMAGE_DECLARED_BYTES,
+    )
+}
+
+fn inspect_image_archive_with_limits(
+    path: &Path,
+    max_archive_bytes: u64,
+    max_entries: usize,
+    max_declared_bytes: u64,
+) -> AppResult<ImageArchiveInfo> {
     let canonical = path
         .canonicalize()
         .map_err(|error| AppError::io("读取Docker镜像归档", &error))?;
     let metadata =
         std::fs::metadata(&canonical).map_err(|error| AppError::io("读取镜像属性", &error))?;
-    if !metadata.is_file() || metadata.len() == 0 {
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > max_archive_bytes {
         return Err(AppError::InvalidConfig(
-            "Docker镜像归档为空或不是文件".into(),
+            "Docker镜像归档为空、不是文件或超过20GiB安全上限".into(),
         ));
     }
     let file = std::fs::File::open(&canonical)
@@ -164,8 +181,23 @@ pub fn inspect_image_archive(path: &Path) -> AppResult<ImageArchiveInfo> {
     let entries = archive
         .entries()
         .map_err(|error| AppError::io("读取Docker镜像tar目录", &error))?;
+    let mut entry_count = 0_usize;
+    let mut declared_bytes = 0_u64;
+    let mut manifest_bytes = None;
     for entry in entries {
         let mut entry = entry.map_err(|error| AppError::io("读取Docker镜像tar项", &error))?;
+        entry_count = entry_count.saturating_add(1);
+        if entry_count > max_entries {
+            return Err(AppError::InvalidConfig(
+                "Docker镜像tar条目数超过100000个安全上限".into(),
+            ));
+        }
+        declared_bytes = declared_bytes.saturating_add(entry.size());
+        if declared_bytes > max_declared_bytes {
+            return Err(AppError::InvalidConfig(
+                "Docker镜像tar声明总大小超过20GiB安全上限".into(),
+            ));
+        }
         let entry_path = entry
             .path()
             .map_err(|error| AppError::io("解析Docker镜像tar路径", &error))?;
@@ -177,40 +209,52 @@ pub fn inspect_image_archive(path: &Path) -> AppResult<ImageArchiveInfo> {
                 "Docker镜像manifest.json超过1MiB".into(),
             ));
         }
+        if manifest_bytes.is_some() {
+            return Err(AppError::InvalidConfig(
+                "Docker镜像归档包含重复manifest.json".into(),
+            ));
+        }
         let mut bytes = Vec::with_capacity(usize::try_from(entry.size()).unwrap_or(0));
         entry
             .read_to_end(&mut bytes)
             .map_err(|error| AppError::io("读取Docker镜像manifest.json", &error))?;
-        #[derive(Deserialize)]
-        #[serde(rename_all = "PascalCase")]
-        struct DockerManifestEntry {
-            #[serde(default)]
-            repo_tags: Vec<String>,
-        }
-        let records = serde_json::from_slice::<Vec<DockerManifestEntry>>(&bytes)
-            .map_err(|_| AppError::InvalidConfig("Docker镜像manifest.json格式无效".into()))?;
-        let repo_tags = records
-            .into_iter()
-            .flat_map(|record| record.repo_tags)
-            .map(|tag| tag.trim().to_string())
-            .filter(|tag| !tag.is_empty() && tag != "<none>:<none>")
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        if repo_tags.is_empty() {
-            return Err(AppError::InvalidConfig(
-                "Docker镜像归档没有有效RepoTag".into(),
-            ));
-        }
-        return Ok(ImageArchiveInfo {
-            path: canonical.to_string_lossy().into_owned(),
-            size: metadata.len(),
-            repo_tags,
-        });
+        manifest_bytes = Some(bytes);
     }
-    Err(AppError::InvalidConfig(
-        "Docker镜像归档缺少manifest.json".into(),
-    ))
+    let bytes = manifest_bytes
+        .ok_or_else(|| AppError::InvalidConfig("Docker镜像归档缺少manifest.json".into()))?;
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct DockerManifestEntry {
+        #[serde(default)]
+        repo_tags: Vec<String>,
+    }
+    let records = serde_json::from_slice::<Vec<DockerManifestEntry>>(&bytes)
+        .map_err(|_| AppError::InvalidConfig("Docker镜像manifest.json格式无效".into()))?;
+    let repo_tags = records
+        .into_iter()
+        .flat_map(|record| record.repo_tags)
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty() && tag != "<none>:<none>")
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if repo_tags.is_empty() {
+        return Err(AppError::InvalidConfig(
+            "Docker镜像归档没有有效RepoTag".into(),
+        ));
+    }
+    Ok(ImageArchiveInfo {
+        path: canonical.to_string_lossy().into_owned(),
+        size: metadata.len(),
+        repo_tags,
+    })
+}
+
+pub fn runtime_version_satisfies(actual_output: &str, requirement: &str) -> AppResult<bool> {
+    let required = parse_runtime_requirement(requirement)?;
+    let actual = extract_runtime_version(actual_output)
+        .ok_or_else(|| AppError::InvalidConfig("远端运行时版本输出无法解析".into()))?;
+    Ok(actual >= required)
 }
 
 pub fn sha256_file(path: &Path) -> AppResult<String> {
@@ -279,13 +323,7 @@ fn validate_manifest_fields(manifest: &ReleaseManifest, errors: &mut Vec<String>
     if manifest.compose_file.trim().is_empty() {
         errors.push("manifest.composeFile不能为空".into());
     }
-    if manifest.runtime.os.trim().is_empty()
-        || manifest.runtime.arch.trim().is_empty()
-        || manifest.runtime.docker.trim().is_empty()
-        || manifest.runtime.compose.trim().is_empty()
-    {
-        errors.push("manifest.runtime必须完整声明os、arch、docker和compose约束".into());
-    }
+    validate_runtime(&manifest.runtime, errors);
     let mut services = BTreeSet::new();
     for image in &manifest.images {
         if image.service.trim().is_empty() || image.image.trim().is_empty() {
@@ -299,6 +337,59 @@ fn validate_manifest_fields(manifest: &ReleaseManifest, errors: &mut Vec<String>
             errors.push(format!("缺少必需服务镜像：{service}"));
         }
     }
+}
+
+fn validate_runtime(runtime: &ReleaseRuntime, errors: &mut Vec<String>) {
+    if runtime.os.trim() != "linux" {
+        errors.push("manifest.runtime.os当前只支持linux".into());
+    }
+    if runtime.arch.trim() != "x86_64" {
+        errors.push("manifest.runtime.arch当前只支持x86_64".into());
+    }
+    for (label, requirement) in [
+        ("docker", runtime.docker.as_str()),
+        ("compose", runtime.compose.as_str()),
+    ] {
+        if let Err(error) = parse_runtime_requirement(requirement) {
+            errors.push(format!("manifest.runtime.{label}约束无效：{error}"));
+        }
+    }
+}
+
+fn parse_runtime_requirement(value: &str) -> AppResult<(u64, u64, u64)> {
+    let version = value.trim().strip_prefix(">=").ok_or_else(|| {
+        AppError::InvalidConfig("运行时版本约束必须使用>=主版本.次版本格式".into())
+    })?;
+    parse_version_triplet(version)
+        .ok_or_else(|| AppError::InvalidConfig("运行时版本约束必须使用纯数字版本".into()))
+}
+
+fn extract_runtime_version(value: &str) -> Option<(u64, u64, u64)> {
+    value
+        .split(|character: char| !(character.is_ascii_digit() || character == '.'))
+        .filter(|candidate| candidate.contains('.'))
+        .find_map(parse_version_triplet)
+}
+
+fn parse_version_triplet(value: &str) -> Option<(u64, u64, u64)> {
+    if value.is_empty()
+        || value.starts_with('.')
+        || value.ends_with('.')
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        return None;
+    }
+    let parts = value.split('.').collect::<Vec<_>>();
+    if !(2..=3).contains(&parts.len()) {
+        return None;
+    }
+    Some((
+        parts[0].parse().ok()?,
+        parts[1].parse().ok()?,
+        parts.get(2).map_or(Some(0), |part| part.parse().ok())?,
+    ))
 }
 
 fn canonical_directory(path: &Path) -> AppResult<PathBuf> {
@@ -442,7 +533,8 @@ mod tests {
 
     use super::{
         ReleaseImage, ReleaseManifest, ReleaseRuntime, ReleaseTemplates, inspect_image_archive,
-        inspect_release_directory,
+        inspect_image_archive_with_limits, inspect_release_directory, runtime_version_satisfies,
+        validate_runtime,
     };
 
     fn image_tar(path: &Path, repo_tag: &str) {
@@ -556,5 +648,69 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("device-edge"))
         );
+    }
+
+    #[test]
+    fn runtime_constraints_are_semantic_and_match_real_version_output() {
+        assert!(
+            runtime_version_satisfies("Docker version 24.0.7, build test", ">=20.10")
+                .expect("docker version")
+        );
+        assert!(
+            !runtime_version_satisfies("Docker version 19.03.15", ">=20.10")
+                .expect("old docker version")
+        );
+        assert!(
+            runtime_version_satisfies("Docker Compose version v2.27.1", ">=2.0")
+                .expect("compose version")
+        );
+        assert!(runtime_version_satisfies("unknown", ">=2.0").is_err());
+        assert!(runtime_version_satisfies("Docker 24.0", "24.0").is_err());
+
+        let mut errors = Vec::new();
+        validate_runtime(
+            &ReleaseRuntime {
+                os: "windows".into(),
+                arch: "arm64".into(),
+                docker: "latest".into(),
+                compose: ">=v2".into(),
+            },
+            &mut errors,
+        );
+        assert_eq!(errors.len(), 4);
+    }
+
+    #[test]
+    fn image_tar_limits_cover_file_size_entry_count_and_declared_bytes() {
+        let temp = tempfile::tempdir().expect("temp");
+        let oversized = temp.path().join("oversized.tar");
+        std::fs::File::create(&oversized)
+            .expect("create oversized")
+            .set_len(11)
+            .expect("size oversized");
+        assert!(inspect_image_archive_with_limits(&oversized, 10, 10, 100).is_err());
+
+        let archive_path = temp.path().join("entries.tar");
+        let file = std::fs::File::create(&archive_path).expect("create tar");
+        let mut builder = tar::Builder::new(file);
+        for (path, content) in [
+            (
+                "manifest.json",
+                br#"[{"Config":"config.json","RepoTags":["device-edge:1"],"Layers":[]}]"#
+                    .as_slice(),
+            ),
+            ("layer.tar", b"layer".as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, Cursor::new(content))
+                .expect("append tar entry");
+        }
+        builder.finish().expect("finish tar");
+        assert!(inspect_image_archive_with_limits(&archive_path, 1024 * 1024, 1, 1024).is_err());
+        assert!(inspect_image_archive_with_limits(&archive_path, 1024 * 1024, 10, 10).is_err());
     }
 }

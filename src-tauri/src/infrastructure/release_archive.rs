@@ -4,6 +4,9 @@ use walkdir::WalkDir;
 
 use crate::core::error::{AppError, AppResult};
 
+const MAX_RELEASE_ARCHIVE_FILE_COUNT: usize = 10_000;
+const MAX_RELEASE_ARCHIVE_TOTAL_BYTES: u64 = 50 * 1024 * 1024 * 1024;
+
 pub fn create_release_tar(source_dir: &Path, destination: &Path) -> AppResult<PathBuf> {
     let root = source_dir
         .canonicalize()
@@ -23,6 +26,8 @@ pub fn create_release_tar(source_dir: &Path, destination: &Path) -> AppResult<Pa
     let file = std::fs::File::create(destination)
         .map_err(|error| AppError::io("创建Release归档", &error))?;
     let mut builder = tar::Builder::new(file);
+    let mut file_count = 0_usize;
+    let mut total_bytes = 0_u64;
     for entry in WalkDir::new(&root).follow_links(false) {
         let entry = entry.map_err(|_| AppError::InvalidConfig("遍历Release目录失败".into()))?;
         if entry.path() == root {
@@ -50,6 +55,25 @@ pub fn create_release_tar(source_dir: &Path, destination: &Path) -> AppResult<Pa
                 .append_dir(relative, entry.path())
                 .map_err(|error| AppError::io("归档Release目录", &error))?;
         } else if entry.file_type().is_file() {
+            file_count = file_count.saturating_add(1);
+            if file_count > MAX_RELEASE_ARCHIVE_FILE_COUNT {
+                return Err(AppError::InvalidConfig(
+                    "Release归档文件数量超过10000个安全上限".into(),
+                ));
+            }
+            total_bytes = total_bytes.saturating_add(
+                entry
+                    .metadata()
+                    .map_err(|_| AppError::Io {
+                        operation: "读取Release归档文件属性",
+                    })?
+                    .len(),
+            );
+            if total_bytes > MAX_RELEASE_ARCHIVE_TOTAL_BYTES {
+                return Err(AppError::InvalidConfig(
+                    "Release归档总大小超过50GiB安全上限".into(),
+                ));
+            }
             builder
                 .append_path_with_name(entry.path(), relative)
                 .map_err(|error| AppError::io("归档Release文件", &error))?;

@@ -22,7 +22,10 @@ use crate::domain::aio::deployment_workflow::{
     DeploymentPreflightReport, DeploymentTargetSnapshot, PreflightRemediation, PreflightStatus,
 };
 use crate::domain::aio::mac::MacAddress;
-use crate::domain::aio::release::{inspect_image_archive, inspect_release_directory, sha256_file};
+use crate::domain::aio::release::{
+    ReleaseRuntime, inspect_image_archive, inspect_release_directory, runtime_version_satisfies,
+    sha256_file,
+};
 use crate::formal::app_state::FormalAppState;
 use crate::formal::project_repository::LocalProjectRepository;
 use crate::formal::release_master_key::ReleaseMasterKeyManager;
@@ -65,6 +68,7 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
         };
         let normalized = inspected.normalized;
         let artifact_fingerprint = inspected.fingerprint;
+        let runtime = inspected.runtime;
 
         let operator = match project_operator(self.state, project_id).await {
             Ok(operator) => {
@@ -285,8 +289,15 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
                 host_key_fingerprint: host_key.identity.fingerprint.clone(),
                 host_key_accepted_at: host_key.accepted_at,
             });
-            append_remote_runtime_checks(&mut checks, mac, &target, &profile, host_key.identity)
-                .await;
+            append_remote_runtime_checks(
+                &mut checks,
+                mac,
+                &target,
+                &profile,
+                host_key.identity,
+                &runtime,
+            )
+            .await;
         }
         let execution_snapshot = DeploymentExecutionSnapshot {
             schema_version: DEPLOYMENT_SNAPSHOT_SCHEMA_VERSION,
@@ -313,6 +324,7 @@ async fn append_remote_runtime_checks(
     target: &RemoteTarget,
     profile: &ReleaseProfileRecord,
     host_key: HostKeyIdentity,
+    runtime: &ReleaseRuntime,
 ) {
     let auth = match remote_auth(profile) {
         Ok(auth) => auth,
@@ -367,16 +379,42 @@ async fn append_remote_runtime_checks(
         }
     };
     let cancellation = CancellationToken::new();
-    for (code, label, args) in [
-        ("docker", "Docker", vec!["--version".into()]),
+    enum Expectation<'a> {
+        Exact(&'a str),
+        Minimum(&'a str),
+    }
+    for (code, label, program, args, expectation) in [
+        (
+            "runtime_os",
+            "操作系统",
+            "uname",
+            vec!["-s".into()],
+            Expectation::Exact(runtime.os.as_str()),
+        ),
+        (
+            "runtime_arch",
+            "CPU架构",
+            "uname",
+            vec!["-m".into()],
+            Expectation::Exact(runtime.arch.as_str()),
+        ),
+        (
+            "docker",
+            "Docker",
+            "docker",
+            vec!["--version".into()],
+            Expectation::Minimum(runtime.docker.as_str()),
+        ),
         (
             "docker_compose",
             "Docker Compose",
+            "docker",
             vec!["compose".into(), "version".into()],
+            Expectation::Minimum(runtime.compose.as_str()),
         ),
     ] {
         let request = ExecRequest {
-            program: "docker".into(),
+            program: program.into(),
             args,
             env: BTreeMap::new(),
             stdin: None,
@@ -387,26 +425,37 @@ async fn append_remote_runtime_checks(
             .run(&request, &cancellation, &NoopRemoteOutputSink)
             .await
         {
-            Ok(result) if result.exit_status == 0 => checks.push(passed(
-                code,
-                label,
-                Some(mac),
-                result
-                    .stdout
-                    .lines()
-                    .next()
-                    .unwrap_or("命令执行成功")
-                    .into(),
-            )),
+            Ok(result) if result.exit_status == 0 => {
+                let output = result.stdout.lines().next().unwrap_or("").trim();
+                let (satisfied, message) = match expectation {
+                    Expectation::Exact(expected) => (
+                        output.eq_ignore_ascii_case(expected),
+                        format!("要求{expected}，远端已返回受支持值"),
+                    ),
+                    Expectation::Minimum(requirement) => {
+                        match runtime_version_satisfies(output, requirement) {
+                            Ok(satisfied) => (satisfied, format!("远端版本满足{requirement}约束")),
+                            Err(_) => (false, format!("远端版本无法按{requirement}约束解析")),
+                        }
+                    }
+                };
+                if satisfied {
+                    checks.push(passed(code, label, Some(mac), message));
+                } else {
+                    checks.push(failed(
+                        code,
+                        label,
+                        Some(mac),
+                        message,
+                        remediation("repair_remote_runtime", "修复远端运行环境", None, Some(mac)),
+                    ));
+                }
+            }
             Ok(result) => checks.push(failed(
                 code,
                 label,
                 Some(mac),
-                format!(
-                    "退出码{}：{}",
-                    result.exit_status,
-                    result.stderr.lines().next().unwrap_or("未返回错误信息")
-                ),
+                format!("退出码{}，未取得可验证运行时版本", result.exit_status),
                 remediation("repair_remote_runtime", "修复远端运行环境", None, Some(mac)),
             )),
             Err(error) => checks.push(failed(
@@ -458,6 +507,7 @@ fn remote_auth(profile: &ReleaseProfileRecord) -> AppResult<RemoteAuth> {
 struct InspectedArtifact {
     normalized: DeploymentPlanInput,
     fingerprint: String,
+    runtime: ReleaseRuntime,
 }
 
 fn normalize_and_inspect_artifact(
@@ -495,6 +545,12 @@ fn normalize_and_inspect_artifact(
                 Ok(InspectedArtifact {
                     normalized,
                     fingerprint,
+                    runtime: ReleaseRuntime {
+                        os: "linux".into(),
+                        arch: "x86_64".into(),
+                        docker: ">=20.10".into(),
+                        compose: ">=2.0".into(),
+                    },
                 })
             }
             DeploymentMode::FirstDeploy | DeploymentMode::FullUpgrade => {
@@ -510,6 +566,7 @@ fn normalize_and_inspect_artifact(
                     .ok_or_else(|| AppError::InvalidConfig("Release缺少manifest".into()))?;
                 normalized.artifact_name = "Release".into();
                 normalized.artifact_version = manifest.version;
+                let runtime = manifest.runtime.clone();
                 normalized.images = manifest
                     .images
                     .into_iter()
@@ -519,6 +576,7 @@ fn normalize_and_inspect_artifact(
                 Ok(InspectedArtifact {
                     normalized,
                     fingerprint,
+                    runtime,
                 })
             }
         }

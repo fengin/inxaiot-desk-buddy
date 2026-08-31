@@ -7,8 +7,8 @@
 | Review 角色 | 架构师、产品负责人、实施用户、安全与运维视角 |
 | Review 范围 | Rust/Tauri、Vue/Pinia、SQLite/MySQL、平台认证、SSH/SFTP、Shell Agent、Release/模板、三类部署、任务/恢复、数据目录、日志/脱敏、测试、依赖与发布 |
 | 代码规模 | 283个正式文件；147个Rust、68个TypeScript、8个Vue、4个SQL；54个测试相关文件 |
-| IPC与测试 | 44个Tauri Command、44个shared/api invoke点；15个前端Spec、36个Rust集成测试文件、35个真实环境ignore测试 |
-| 当前结论 | 已完成两批高优先级代码整改和自动门禁；P0-13、非RSA双节点真实门禁及外部发布门禁仍阻断阶段8 |
+| IPC与测试 | 整改后46个Tauri Command、46个shared/api invoke点；17个前端Spec、38个Rust集成测试文件、36个真实环境ignore测试 |
+| 当前结论 | P0-13稳定项目主密钥能力、隔离MySQL集成和自动用户门禁已关闭；非RSA双节点、正式桌面故障场景及外部发布门禁仍阻断阶段8 |
 
 ## 1. 执行摘要
 
@@ -341,6 +341,14 @@ Vue Page
 - 支持密钥轮换和旧格式迁移；明确跨电脑安全分发模型。
 - 在新方案落地前禁止静默修改会破坏解密的数据库密码。
 
+整改结论（检查点`9b73236`）：
+
+- 当前格式为`argon2id-aes256gcm-project-key`；32字节随机项目主密钥按版本保存到Windows Credential Manager，MySQL只保存盐、随机数、认证密文、格式和密钥版本，数据库密码不再参与新密文派生。
+- 旧`argon2id-aes256gcm`密文首次读取或数据库密码修改前在`SELECT ... FOR UPDATE`事务内迁移；轮换固定为先保存新版本密钥，再锁行解密/重加密/审计，提交失败删除新密钥并继续使用旧版本。
+- `.inxkey`包使用Argon2id和AES-256-GCM；AAD绑定平台URL、数据库主机/端口、工作台Schema指纹及密钥版本。导入先校验绑定/版本并实际解密当前发布配置，成功后才写本机安全存储。
+- 页面仍经Release Store→Workbench Adapter→Real Adapter→Tauri Command调用；浏览器Fixture独立实现。配置因本机缺钥读取失败时，“导入并验证密钥包”入口仍可使用，口令在弹窗关闭、项目切换或成功后清空。
+- 隔离MySQL真实门禁覆盖旧密文迁移、数据库密码替换后读取、轮换审计故障全回滚、成功轮换、跨本机项目ID导入和精确清理归零；Windows Credential Manager唯一引用写/读/删及页面缺钥恢复用户测试通过。
+
 ### P0-14 数据目录和启动维护缺少崩溃恢复
 
 证据：
@@ -622,9 +630,9 @@ Vue Page
 | P0-10 | 代码已关闭，Linux门禁待补 | 渲染Compose写入每节点任务文件、SFTP上传并传递REMOTE_COMPOSE，Agent覆盖Release内Compose后才启动；全部上传文件带SHA-256 | 需两节点修改Compose值后远端实际文件/容器配置变化门禁 |
 | P0-11 | 代码已关闭，Linux故障门禁待补 | Agent 0.1.2增加整包启动/健康回滚、HostInfo恢复、单服env/镜像回滚、严格备份；SSH取消/超时发送TERM/KILL；清理失败不再成功 | 当前Windows无POSIX sh；需非RSA授权节点执行compose失败、health失败、取消和回滚门禁 |
 | P0-12 | 真实集成已通过，桌面过期门禁待补 | 缺失expires_in强制30分钟；每60秒真实Token只读校验；401/403清理会话，网络异常fail-closed；授权平台真实登录+ /sys/menu/nav 契约通过 | 需桌面Token撤销/到期后页面立即关闭业务入口门禁 |
-| P0-13 | **未关闭** | 已临时阻止在存在发布配置时修改数据库密码，避免继续制造不可解密密文 | 仍需稳定项目主密钥、版本化KEK、旧格式迁移、轮换和跨电脑安全分发模型 |
+| P0-13 | 能力、隔离集成和自动用户门禁已关闭 | 随机版本化项目主密钥、旧密文事务迁移、数据库密码解耦、轮换失败回滚、Windows Credential Manager、项目绑定口令包、缺钥页面恢复入口和精确清理均通过 | 需正式Tauri原生保存/打开对话框执行一次人工用户门禁；不再属于架构或数据可恢复性缺口 |
 | P0-14 | 能力已关闭，桌面崩溃门禁待补 | 同盘staging、逐文件SHA-256、完成标记、原子改名、残留staging清理、损坏主配置回退备份、真实祖先路径/联接阻断、启动维护best-effort测试通过 | 需正式Tauri复制中断/改名后崩溃/损坏sidecar用户门禁 |
-| P0-15 | 部分关闭 | 短凭据被源头拒绝；核心错误不记录原始Debug；RSA/DSA私钥在保存和连接层拒绝；公网HTTPS/MySQL Required、内网MySQL Preferred；任务/命令日志硬上限 | 需提供并授权Ed25519/ECDSA测试密钥；russh传递yanked依赖升级、稳定主密钥及全日志调用点收敛仍未完成 |
+| P0-15 | 部分关闭 | 短凭据被源头拒绝；核心错误不记录原始Debug；RSA/DSA私钥在保存和连接层拒绝；公网HTTPS/MySQL Required、内网MySQL Preferred；任务/命令日志硬上限；稳定项目主密钥已关闭 | 需提供并授权Ed25519/ECDSA测试密钥；russh传递yanked依赖升级及全日志调用点收敛仍未完成 |
 
 ### 12.3 已随P0关闭的P1问题
 
@@ -638,14 +646,16 @@ Vue Page
 
 ### 12.4 本轮门禁证据
 
-- 前端：typecheck、严格Lint、15个测试文件31项测试、生产构建通过。
+- 前端：typecheck、严格Lint、17个测试文件34项测试、生产构建通过；新增Real Adapter三项主密钥Command、系统保存对话框、Store版本操作和缺钥界面恢复契约。
 - Rust：cargo fmt --check、全目标全Feature严格Clippy通过；默认Feature全部非忽略单元/集成测试通过。
 - 故障注入：真实双进程锁、本地最终化中途失败全回滚/重试、并发导入唯一约束、payload篡改、旧项目响应晚到、会话校验不可用fail-closed均通过。
 - 真实平台：只执行授权测试登录和Token只读菜单校验，未连接、未执行SQL、未修改平台业务库结构或数据。
+- 主密钥真实集成：仅在授权隔离工作台Schema写入`key-poc-*`唯一配置/审计，覆盖迁移、数据库密码解耦、轮换失败回滚、成功轮换和跨电脑导入，结束后按唯一键删除并复查总数为0；Windows Credential Manager唯一测试引用已删除。
+- 默认Feature生产Release基于`9b73236`，大小12046848字节，SHA-256为`F4C51EE6A26A9B88BE0DABE97321EEEC4BD109AF82AFCBA8ABE258C42135344D`；包含三项主密钥Command，无WebDriver/Fixture标记。
 - 未执行真实SSH/Docker门禁：现有test/id_rsa为RSA 4096，已被新策略明确拒绝；不得为了复用旧门禁而绕过算法限制。
 
 ### 12.5 当前准入结论
 
 - 阶段7.5-D仍为“整改中”，阶段8继续暂停。
-- 下一代码根因是P0-13稳定项目主密钥；下一真实环境前置条件是授权Ed25519/ECDSA测试密钥。
+- P0-13代码根因已经关闭；下一真实环境前置条件是授权Ed25519/ECDSA测试密钥，下一代码审查焦点为P0-15的`russh`传递撤回依赖与剩余日志调用点。
 - 外部CI、安装包签名和产物上传需要用户明确指定可信基础设施与证书；未授权前只运行本地门禁。

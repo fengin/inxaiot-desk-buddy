@@ -1,0 +1,620 @@
+use std::time::Duration;
+
+use sqlx::MySqlPool;
+use tokio::task::JoinHandle;
+use tokio::time::MissedTickBehavior;
+use tokio_util::sync::CancellationToken;
+
+use crate::application::deployment_executor::{DeploymentExecutionSummary, DeploymentTargetState};
+use crate::application::project_context::{map_formal_error, project_database};
+use crate::core::error::{AppError, AppResult};
+use crate::domain::aio::deployment::{DeploymentMode, DeploymentPlan};
+use crate::domain::common::task::{StepState, TargetState, TaskRecord, TaskState};
+use crate::formal::aio_node_repository::{AioNodeRepository, ServiceVersionWrite};
+use crate::formal::app_state::FormalAppState;
+use crate::formal::operation_repository::{
+    OperationFinalResult, OperationRepository, OperationStart, TargetFinalResult,
+};
+use crate::formal::resource_lease_repository::{LeaseGrant, LeaseRequest, ResourceLeaseRepository};
+use crate::infrastructure::local_sqlite::task_repository::{
+    CreateTask, TargetUpdate, TaskStepWrite,
+};
+use crate::infrastructure::workbench_aio::WorkbenchAioRepository;
+
+#[derive(Clone)]
+pub struct DeploymentControlHandle {
+    pub local_task_id: String,
+    pub operation_id: String,
+    pub operation_version: u64,
+    pub plan: DeploymentPlan,
+    pub leases: Vec<LeaseGrant>,
+}
+
+pub const DEPLOYMENT_LEASE_TTL: Duration = Duration::from_secs(90);
+pub const DEPLOYMENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+
+pub struct DeploymentHeartbeatGuard {
+    stop: CancellationToken,
+    join: JoinHandle<AppResult<u64>>,
+}
+
+pub async fn create_deployment_task(
+    state: &FormalAppState,
+    local_project_id: &str,
+    local_task_id: &str,
+    plan: &DeploymentPlan,
+    remote_operation_record_id: Option<String>,
+) -> AppResult<TaskRecord> {
+    create_deployment_task_with_payload(
+        state,
+        local_project_id,
+        local_task_id,
+        plan,
+        remote_operation_record_id,
+        None,
+    )
+    .await
+}
+
+pub async fn create_deployment_task_with_payload(
+    state: &FormalAppState,
+    local_project_id: &str,
+    local_task_id: &str,
+    plan: &DeploymentPlan,
+    remote_operation_record_id: Option<String>,
+    payload_ref: Option<String>,
+) -> AppResult<TaskRecord> {
+    let operation_type = mode_code(plan.mode);
+    state
+        .task_repository
+        .create(CreateTask {
+            id: local_task_id.to_string(),
+            local_project_id: local_project_id.into(),
+            remote_operation_record_id,
+            domain_type: "aio".into(),
+            operation_type: operation_type.into(),
+            name: format!("{} · {}", mode_label(plan.mode), plan.artifact_name),
+            priority: 0,
+            batch_size: plan.batch_size,
+            concurrency: plan.concurrency,
+            payload_ref,
+            log_path: state
+                .paths
+                .project_task_log_path(local_project_id, local_task_id)
+                .map_err(map_formal_error)?
+                .to_string_lossy()
+                .into_owned(),
+            targets: plan
+                .target_macs
+                .iter()
+                .map(|mac| ("aio".into(), mac.clone()))
+                .collect(),
+        })
+        .await
+}
+
+impl DeploymentHeartbeatGuard {
+    pub async fn stop(self) -> AppResult<u64> {
+        self.stop.cancel();
+        self.join
+            .await
+            .map_err(|_| AppError::Conflict("部署心跳任务异常结束".into()))?
+    }
+}
+
+pub fn start_deployment_heartbeat(
+    pool: MySqlPool,
+    operation_id: String,
+    operation_version: u64,
+    leases: Vec<LeaseGrant>,
+    execution_cancellation: CancellationToken,
+) -> DeploymentHeartbeatGuard {
+    start_deployment_heartbeat_with_timing(
+        pool,
+        operation_id,
+        operation_version,
+        leases,
+        execution_cancellation,
+        DEPLOYMENT_HEARTBEAT_INTERVAL,
+        DEPLOYMENT_LEASE_TTL,
+    )
+}
+
+pub fn start_deployment_heartbeat_with_timing(
+    pool: MySqlPool,
+    operation_id: String,
+    operation_version: u64,
+    leases: Vec<LeaseGrant>,
+    execution_cancellation: CancellationToken,
+    interval: Duration,
+    ttl: Duration,
+) -> DeploymentHeartbeatGuard {
+    let stop = CancellationToken::new();
+    let worker_stop = stop.clone();
+    let join = tokio::spawn(async move {
+        let leases_repository = ResourceLeaseRepository::new(pool.clone());
+        let operations = OperationRepository::new(pool);
+        let mut version = operation_version;
+        let mut ticker = tokio::time::interval(interval.max(Duration::from_millis(10)));
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        ticker.tick().await;
+        loop {
+            tokio::select! {
+                _ = worker_stop.cancelled() => return Ok(version),
+                _ = ticker.tick() => {
+                    let heartbeat_result = async {
+                        for lease in &leases {
+                            leases_repository
+                                .heartbeat(lease, ttl)
+                                .await
+                                .map_err(map_formal_error)?;
+                        }
+                        version = operations
+                            .heartbeat(&operation_id, version)
+                            .await
+                            .map_err(map_formal_error)?;
+                        AppResult::Ok(())
+                    }
+                    .await;
+                    if let Err(error) = heartbeat_result {
+                        execution_cancellation.cancel();
+                        return Err(AppError::Conflict(format!(
+                            "部署租约或操作心跳失效，已停止派发新步骤：{error}"
+                        )));
+                    }
+                }
+            }
+        }
+    });
+    DeploymentHeartbeatGuard { stop, join }
+}
+
+pub async fn start_deployment_control(
+    state: &FormalAppState,
+    local_project_id: &str,
+    local_task_id: &str,
+    plan: DeploymentPlan,
+    operator_name: &str,
+    instance_id: &str,
+) -> AppResult<DeploymentControlHandle> {
+    let pools = project_database(state, local_project_id).await?;
+    let operations = OperationRepository::new(pools.workbench.clone());
+    let operation_type = mode_code(plan.mode);
+    let record = operations
+        .start(OperationStart {
+            domain_type: "aio".into(),
+            operation_type: operation_type.into(),
+            operation_name: mode_label(plan.mode).into(),
+            operator_name: operator_name.into(),
+            instance_id: instance_id.into(),
+            targets: plan
+                .target_macs
+                .iter()
+                .map(|mac| ("aio".into(), mac.clone()))
+                .collect(),
+            artifact_name: Some(plan.artifact_name.clone()),
+            artifact_version: Some(plan.artifact_version.clone()),
+            operation_summary: Some(serde_json::json!({
+                "mode": operation_type,
+                "serviceName": plan.service_name,
+                "imageName": plan.image_name,
+                "batchSize": plan.batch_size,
+                "concurrency": plan.concurrency
+            })),
+            retry_of_operation_id: None,
+        })
+        .await
+        .map_err(map_formal_error)?;
+    let lease_repository = ResourceLeaseRepository::new(pools.workbench.clone());
+    let leases = match lease_repository
+        .acquire_many(
+            plan.target_macs
+                .iter()
+                .map(|mac| LeaseRequest {
+                    resource_type: "aio".into(),
+                    resource_key: mac.clone(),
+                    domain_type: "aio".into(),
+                    operation_id: record.id.clone(),
+                    owner_instance_id: instance_id.into(),
+                    owner_user: operator_name.into(),
+                    ttl: DEPLOYMENT_LEASE_TTL,
+                })
+                .collect(),
+        )
+        .await
+    {
+        Ok(leases) => leases,
+        Err(error) => {
+            let summary = error.to_string();
+            fail_started_operation(&operations, &record, &plan.target_macs, &summary).await;
+            return Err(map_formal_error(error));
+        }
+    };
+    let task_result = match state.task_repository.get(local_task_id).await {
+        Ok(task) => {
+            if !matches!(task.state, TaskState::Draft | TaskState::Queued)
+                || task.local_project_id != local_project_id
+                || task.domain_type != "aio"
+                || task.operation_type != operation_type
+                || task.remote_operation_record_id.is_some()
+            {
+                Err(AppError::Conflict(format!(
+                    "预创建任务状态或归属不匹配：{local_task_id}"
+                )))
+            } else {
+                state
+                    .task_repository
+                    .link_operation(local_task_id, &record.id)
+                    .await
+            }
+        }
+        Err(AppError::NotFound(_)) => {
+            create_deployment_task(
+                state,
+                local_project_id,
+                local_task_id,
+                &plan,
+                Some(record.id.clone()),
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
+    let task = match task_result {
+        Ok(task) => task,
+        Err(error) => {
+            for lease in &leases {
+                let _ = lease_repository.release(lease).await;
+            }
+            fail_started_operation(&operations, &record, &plan.target_macs, &error.to_string())
+                .await;
+            return Err(error);
+        }
+    };
+    let mut current = task.state;
+    let transitions = if current == TaskState::Queued {
+        vec![TaskState::Running]
+    } else {
+        vec![
+            TaskState::Checking,
+            TaskState::Ready,
+            TaskState::Queued,
+            TaskState::Running,
+        ]
+    };
+    for next in transitions {
+        state
+            .task_repository
+            .transition(local_task_id, current, next, None, None)
+            .await?;
+        current = next;
+    }
+    for lease in &leases {
+        state
+            .task_repository
+            .update_target(
+                local_task_id,
+                TargetUpdate {
+                    resource_type: "aio".into(),
+                    resource_key: lease.resource_key.clone(),
+                    state: TargetState::Running,
+                    stage: "lease_acquired".into(),
+                    progress_current: 0,
+                    progress_total: 100,
+                    fencing_token: Some(lease.fencing_token),
+                    message_code: None,
+                    message_params_json: None,
+                },
+            )
+            .await?;
+        for step in &plan.steps {
+            state
+                .task_repository
+                .save_step(
+                    local_task_id,
+                    TaskStepWrite {
+                        id: step_id(local_task_id, &lease.resource_key, &step.code),
+                        resource_type: Some("aio".into()),
+                        resource_key: Some(lease.resource_key.clone()),
+                        step_code: step.code.clone(),
+                        state: StepState::Pending,
+                        error_code: None,
+                        message: Some(step.label.clone()),
+                    },
+                )
+                .await?;
+        }
+    }
+    Ok(DeploymentControlHandle {
+        local_task_id: local_task_id.to_string(),
+        operation_id: record.id,
+        operation_version: record.version,
+        plan,
+        leases,
+    })
+}
+
+async fn fail_started_operation(
+    operations: &OperationRepository,
+    record: &crate::formal::operation_repository::OperationRecord,
+    targets: &[String],
+    summary: &str,
+) {
+    for mac in targets {
+        let _ = operations
+            .finalize_target(TargetFinalResult {
+                operation_id: record.id.clone(),
+                resource_type: "aio".into(),
+                resource_key: mac.clone(),
+                result_state: "failed".into(),
+                before_version: None,
+                after_version: None,
+                result_summary: Some("部署启动失败".into()),
+                error_code: Some("DEPLOYMENT_START_FAILED".into()),
+                error_summary: Some(summary.into()),
+            })
+            .await;
+    }
+    let _ = operations
+        .finalize(OperationFinalResult {
+            operation_id: record.id.clone(),
+            expected_version: record.version,
+            state: "failed".into(),
+            result_summary: Some("部署启动失败".into()),
+            error_code: Some("DEPLOYMENT_START_FAILED".into()),
+            error_summary: Some(summary.into()),
+        })
+        .await;
+}
+
+pub async fn finalize_deployment_control(
+    state: &FormalAppState,
+    local_project_id: &str,
+    handle: DeploymentControlHandle,
+    summary: DeploymentExecutionSummary,
+) -> AppResult<()> {
+    let pools = project_database(state, local_project_id).await?;
+    let operations = OperationRepository::new(pools.workbench.clone());
+    let aio_nodes = AioNodeRepository::new(pools.workbench.clone());
+    let workbench_nodes = WorkbenchAioRepository::new(pools.workbench.clone());
+    let lease_repository = ResourceLeaseRepository::new(pools.workbench.clone());
+    for lease in &handle.leases {
+        if !lease_repository
+            .validate_fencing(lease)
+            .await
+            .map_err(map_formal_error)?
+        {
+            return Err(AppError::Conflict(format!(
+                "资源租约已失效，禁止写入项目最终结果：{}/{}",
+                lease.resource_type, lease.resource_key
+            )));
+        }
+    }
+    for target in &summary.targets {
+        let (state_name, target_state, error_code) = match target.state {
+            DeploymentTargetState::Succeeded => ("succeeded", TargetState::Succeeded, None),
+            DeploymentTargetState::Failed | DeploymentTargetState::Panicked => (
+                "failed",
+                TargetState::Failed,
+                Some("DEPLOYMENT_FAILED".into()),
+            ),
+            DeploymentTargetState::Cancelled => (
+                "cancelled",
+                TargetState::Cancelled,
+                Some("CANCELLED".into()),
+            ),
+        };
+        operations
+            .finalize_target(TargetFinalResult {
+                operation_id: handle.operation_id.clone(),
+                resource_type: "aio".into(),
+                resource_key: target.mac.clone(),
+                result_state: state_name.into(),
+                before_version: None,
+                after_version: (state_name == "succeeded")
+                    .then(|| handle.plan.artifact_version.clone()),
+                result_summary: Some(if state_name == "succeeded" {
+                    "部署步骤和健康检查完成".into()
+                } else {
+                    "部署未成功".into()
+                }),
+                error_code: error_code.clone(),
+                error_summary: target.error.clone(),
+            })
+            .await
+            .map_err(map_formal_error)?;
+        if state_name == "succeeded" {
+            for (service, image) in &handle.plan.images {
+                let (image_name, version) = image
+                    .rsplit_once(':')
+                    .map(|(name, version)| (name.to_string(), version.to_string()))
+                    .unwrap_or_else(|| (image.clone(), image.clone()));
+                aio_nodes
+                    .save_service_version(ServiceVersionWrite {
+                        mac: target.mac.clone(),
+                        service_name: service.clone(),
+                        expected_image_name: Some(image_name.clone()),
+                        expected_version: Some(version.clone()),
+                        observed_image_name: Some(image_name),
+                        observed_version: Some(version),
+                        source_operation_id: Some(handle.operation_id.clone()),
+                    })
+                    .await
+                    .map_err(map_formal_error)?;
+            }
+            workbench_nodes
+                .mark_operation_success(&target.mac, &handle.operation_id)
+                .await?;
+        }
+        state
+            .task_repository
+            .update_target(
+                &handle.local_task_id,
+                TargetUpdate {
+                    resource_type: "aio".into(),
+                    resource_key: target.mac.clone(),
+                    state: target_state,
+                    stage: "completed".into(),
+                    progress_current: 100,
+                    progress_total: 100,
+                    fencing_token: None,
+                    message_code: None,
+                    message_params_json: None,
+                },
+            )
+            .await?;
+        for step in &handle.plan.steps {
+            state
+                .task_repository
+                .save_step(
+                    &handle.local_task_id,
+                    TaskStepWrite {
+                        id: step_id(&handle.local_task_id, &target.mac, &step.code),
+                        resource_type: Some("aio".into()),
+                        resource_key: Some(target.mac.clone()),
+                        step_code: step.code.clone(),
+                        state: if state_name == "succeeded" {
+                            StepState::Succeeded
+                        } else {
+                            StepState::Failed
+                        },
+                        error_code: error_code.clone(),
+                        message: target.error.clone().or_else(|| Some(step.label.clone())),
+                    },
+                )
+                .await?;
+        }
+    }
+    let final_state = if summary.failure_count == 0 && summary.cancelled_count == 0 {
+        "succeeded"
+    } else if summary.success_count > 0 {
+        "partially_succeeded"
+    } else if summary.cancelled_count > 0 && summary.failure_count == 0 {
+        "cancelled"
+    } else {
+        "failed"
+    };
+    operations
+        .finalize(OperationFinalResult {
+            operation_id: handle.operation_id.clone(),
+            expected_version: handle.operation_version,
+            state: final_state.into(),
+            result_summary: Some(format!(
+                "成功{}，失败{}，取消{}",
+                summary.success_count, summary.failure_count, summary.cancelled_count
+            )),
+            error_code: None,
+            error_summary: None,
+        })
+        .await
+        .map_err(map_formal_error)?;
+    for lease in &handle.leases {
+        lease_repository
+            .release(lease)
+            .await
+            .map_err(map_formal_error)?;
+    }
+    let current_task = state.task_repository.get(&handle.local_task_id).await?;
+    let task_final = if current_task.state == TaskState::Cancelling {
+        if summary.failure_count > 0 {
+            TaskState::Failed
+        } else {
+            TaskState::Cancelled
+        }
+    } else {
+        TaskState::parse(final_state)?
+    };
+    state
+        .task_repository
+        .transition(
+            &handle.local_task_id,
+            current_task.state,
+            task_final,
+            None,
+            None,
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn mark_deployment_interrupted(
+    state: &FormalAppState,
+    handle: &DeploymentControlHandle,
+    error_code: &str,
+    summary: &str,
+) -> AppResult<()> {
+    for lease in &handle.leases {
+        state
+            .task_repository
+            .update_target(
+                &handle.local_task_id,
+                TargetUpdate {
+                    resource_type: lease.resource_type.clone(),
+                    resource_key: lease.resource_key.clone(),
+                    state: TargetState::Interrupted,
+                    stage: "needs_reconcile".into(),
+                    progress_current: 0,
+                    progress_total: 100,
+                    fencing_token: Some(lease.fencing_token),
+                    message_code: Some(error_code.into()),
+                    message_params_json: None,
+                },
+            )
+            .await?;
+    }
+    let task = state.task_repository.get(&handle.local_task_id).await?;
+    if !task.state.is_terminal() {
+        state
+            .task_repository
+            .transition(
+                &handle.local_task_id,
+                task.state,
+                TaskState::Interrupted,
+                Some(error_code),
+                Some(summary),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn mark_deployment_finalizing_failed(
+    state: &FormalAppState,
+    handle: &DeploymentControlHandle,
+    summary: &str,
+) -> AppResult<()> {
+    let task = state.task_repository.get(&handle.local_task_id).await?;
+    if !task.state.is_terminal() && task.state != TaskState::FinalizingFailed {
+        state
+            .task_repository
+            .transition(
+                &handle.local_task_id,
+                task.state,
+                TaskState::FinalizingFailed,
+                Some("FINALIZATION_FAILED"),
+                Some(summary),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+fn mode_code(mode: DeploymentMode) -> &'static str {
+    match mode {
+        DeploymentMode::FirstDeploy => "first_deploy",
+        DeploymentMode::FullUpgrade => "full_upgrade",
+        DeploymentMode::ServiceUpgrade => "service_upgrade",
+    }
+}
+
+fn mode_label(mode: DeploymentMode) -> &'static str {
+    match mode {
+        DeploymentMode::FirstDeploy => "首次部署",
+        DeploymentMode::FullUpgrade => "整包升级",
+        DeploymentMode::ServiceUpgrade => "单服升级",
+    }
+}
+
+fn step_id(task_id: &str, mac: &str, code: &str) -> String {
+    format!("{task_id}:{mac}:{code}")
+}

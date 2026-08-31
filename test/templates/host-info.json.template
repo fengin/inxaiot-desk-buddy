@@ -1,0 +1,6 @@
+{
+  "mac": "{{ node.mac }}",
+  "ip": "{{ node.ip }}",
+  "hostname": "{{ node.name }}",
+  "authKey": "{{ authKey }}"
+}

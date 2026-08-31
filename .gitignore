@@ -1,0 +1,25 @@
+node_modules/
+dist/
+.vite/
+coverage/
+src-tauri/target/
+*.log
+.idea/
+
+# 本地真实环境凭据和验收数据不得进入版本库
+test/id_rsa
+test/测试数据说明.txt
+test/images/*.tar
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 本地运行与Review工具产物
+*.db
+*.sqlite
+*.sqlite3
+.review-tools/

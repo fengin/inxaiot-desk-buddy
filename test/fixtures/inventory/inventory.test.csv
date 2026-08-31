@@ -1,0 +1,4 @@
+name,ip,mac,buildingId,regionId,addrAlias,floor,location,remark
+aio-test-79,192.168.3.79,00:0C:29:3B:B9:33,2037055886501359600,test-region,A/F1,1F,virtual-edge-node,
+aio-test-121,192.168.3.121,00:0C:29:0B:71:F4,2037055976662118400,test-region,A/F2,2F,virtual-edge-node,
+

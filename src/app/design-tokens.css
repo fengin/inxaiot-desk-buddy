@@ -1,0 +1,101 @@
+:root {
+  color-scheme: light dark;
+  font-family: "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --inx-font-ui: "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --inx-font-mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  --inx-font-size-base: 13px;
+  --inx-font-size-table: 12px;
+  --inx-page-title-size: 22px;
+  --inx-space-page: 12px;
+  --inx-space-panel: 12px;
+  --inx-control-height: 32px;
+  --inx-table-row-height: 36px;
+  --inx-appbar-height: 48px;
+  --inx-statusbar-height: 24px;
+  --inx-navigation-width: 176px;
+  --inx-navigation-collapsed: 52px;
+  --inx-color-app: #f3f5f7;
+  --inx-color-surface: #ffffff;
+  --inx-color-surface-subtle: #f7f9fa;
+  --inx-color-sidebar: #f6f8fa;
+  --inx-color-table-header: #f2f4f7;
+  --inx-color-border: #d8dee6;
+  --inx-color-border-strong: #c5cdd8;
+  --inx-color-text: #1f2933;
+  --inx-color-text-secondary: #667085;
+  --inx-color-text-tertiary: #98a2b3;
+  --inx-color-selected: #eaf2ff;
+  --inx-color-hover: #eef3f7;
+  --inx-color-info: #2080f0;
+  --inx-color-info-soft: #eaf3ff;
+  --inx-color-operation: #18a058;
+  --inx-color-operation-hover: #36ad6a;
+  --inx-color-success-soft: #eaf8f0;
+  --inx-color-warning: #f0a020;
+  --inx-color-warning-soft: #fff6e5;
+  --inx-color-danger: #d03050;
+  --inx-color-danger-soft: #fff0f3;
+  --inx-color-focus: #4f7cff;
+  --inx-shadow-popover: 0 8px 24px rgb(15 23 42 / 14%);
+  --inx-shadow-modal: 0 18px 48px rgb(15 23 42 / 20%);
+}
+
+:root[data-theme="dark"] {
+  --inx-color-app: #11161d;
+  --inx-color-surface: #181d25;
+  --inx-color-surface-subtle: #1e252e;
+  --inx-color-sidebar: #1e252e;
+  --inx-color-table-header: #222a35;
+  --inx-color-border: #303946;
+  --inx-color-border-strong: #414b5c;
+  --inx-color-text: #e7ebf0;
+  --inx-color-text-secondary: #a5afbd;
+  --inx-color-text-tertiary: #7f8a99;
+  --inx-color-selected: #243650;
+  --inx-color-hover: #232d38;
+  --inx-color-info: #6ea8fe;
+  --inx-color-info-soft: #172b45;
+  --inx-color-operation: #42bd88;
+  --inx-color-operation-hover: #63cc9c;
+  --inx-color-success-soft: #153428;
+  --inx-color-warning: #e5aa43;
+  --inx-color-warning-soft: #3a2c13;
+  --inx-color-danger: #f06a7f;
+  --inx-color-danger-soft: #3d1d26;
+  --inx-color-focus: #7c9dff;
+  --inx-shadow-popover: 0 8px 24px rgb(0 0 0 / 32%);
+  --inx-shadow-modal: 0 18px 48px rgb(0 0 0 / 40%);
+}
+
+:root[data-font-size="small"] {
+  --inx-font-size-base: 12px;
+  --inx-font-size-table: 11px;
+  --inx-page-title-size: 20px;
+}
+
+:root[data-font-size="large"] {
+  --inx-font-size-base: 14px;
+  --inx-font-size-table: 13px;
+  --inx-page-title-size: 24px;
+}
+
+:root[data-density="comfortable"] {
+  --inx-space-page: 16px;
+  --inx-space-panel: 16px;
+  --inx-control-height: 36px;
+  --inx-table-row-height: 44px;
+  --inx-appbar-height: 52px;
+  --inx-statusbar-height: 28px;
+  --inx-navigation-width: 192px;
+}
+
+:root[data-reduce-motion="true"] *,
+:root[data-reduce-motion="true"] *::before,
+:root[data-reduce-motion="true"] *::after {
+  scroll-behavior: auto !important;
+  animation-duration: 0s !important;
+  transition-duration: 0s !important;
+}
+

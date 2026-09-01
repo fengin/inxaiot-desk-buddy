@@ -154,7 +154,7 @@ async function assertActualDirectory(expected) {
   await waitBody("实际数据目录");
   await waitBody(expected);
   await waitBody("协议 1");
-  await waitBody("8787fa59f40ffbd2dcb3ceda0fbe378cf6622de9f208aac687c8d5b554ff95c6");
+  await waitBody("64fa5197c28f8a3fba5d7949634782d3aab7fd75259d464e83e39c46380ff8f8");
   await clickSelector(".about-modal .n-card-header__close");
 }
 

@@ -455,7 +455,7 @@ Vue Page
 - 不同路径同名数据库复制到同一目录可能覆盖。
 - `backup/`、`service-upgrades/`和崩溃staging没有过期清理。
 
-当前状态：未关闭。已形成停服后一致性复制、按相对路径保存及backup/service-upgrades/staging分层保留方案，但该方案会新增远端Compose停止/重启和按天递归删除。安全审查要求用户对精确服务范围、默认保留天数、三个删除根目录和失败回滚作专项授权；本轮补丁被拒且未写入代码，不得绕过。
+整改结论：已关闭。Agent 0.1.3对`$DATA_ROOT/backup`、`$DEPLOY_ROOT/service-upgrades`、`$DATA_ROOT/.inxaiot-desk-buddy`三个固定根目录的直接子目录分别执行30/14/3天超期递归清理，拒绝空/根/相对/穿越路径和符号链接根。SQLite类数据只在当前Compose停止后复制，目标保留`DATA_ROOT`相对路径；停止或复制失败仍尝试恢复，启动后验证四个既有容器。两节点真实门禁用31/29、15/13、4/2天唯一样本证明删除/保留边界，完成停启、数据库备份和运行态验证后精确删除全部样本与备份。
 
 ### P1-09 固定工作台Schema与最小数据库权限未由后端强制
 
@@ -645,13 +645,13 @@ Vue Page
 
 | 编号 | 当前状态 | 已取得证据 | 未关闭门禁 |
 | --- | --- | --- | --- |
-| P0-01 | 能力已关闭 | 独立仓库、三段检查点、LF规则、凭据/镜像忽略、构建内提交ID、本地一键门禁脚本 | 外部CI因未获源码交由第三方运行授权而未创建；签名安装包仍属发布阻断 |
+| P0-01 | 能力已关闭 | 独立仓库、系列检查点、LF规则、凭据/镜像忽略、构建内提交ID、本地门禁、内网Jenkins分层流水线及NSIS/SBOM/签名脚本 | 当前无受信Code Signing证书，首个签名安装包仍属发布阻断 |
 | P0-02 | 能力已关闭，桌面门禁待补 | 锁在日志/SQLite/恢复前获取；同进程与真实子进程竞争、释放后恢复测试通过；Windows启动错误对话框已接通 | 需用正式Tauri程序执行同数据目录双启动用户门禁 |
 | P0-03 | 已关闭 | execute_deployment Command、前端API、Real Adapter方法和应用层同步入口全部删除；契约测试确认仅保留preflight→submit→Handler路径 | 无 |
 | P0-04 | 能力已关闭，真实门禁待补 | payload包含版本化执行快照、Profile版本、节点版本、HostKey、发布物指纹；payload SHA-256校验；发布物复制到任务专属目录后复算指纹 | 需以非RSA密钥重跑预检后修改源文件/Profile/节点/HostKey的真实阻断门禁 |
 | P0-05 | 能力已关闭，用户门禁待补 | 项目活动任务前置守卫+SQLite触发器；Operations/Project/Release/AIO Store请求代次；任务始终按原项目轮询/取消；删除当前项目真实切换下一项目 | 需桌面快速切换与活动任务删除/编辑用户门禁 |
 | P0-06 | 代码已关闭 | 活动未过期租约不再按owner放行；同实例第二操作真实MySQL测试已写入 | 需用隔离标识运行该ignore真实门禁并精确清理 |
-| P0-07 | 代码与本地故障注入通过 | fencing行锁、目标结果、服务版本、资产、操作和租约释放进入同一MySQL事务；SQLite目标/步骤/任务单事务投影；提交不确定查询；三次重试；finalizing_failed证据保留及启动重放 | 需真实MySQL stale fencing/事务失败/提交响应不确定故障门禁 |
+| P0-07 | 已关闭 | fencing行锁、目标结果、服务版本、资产、操作和租约释放进入同一MySQL事务；真实随机Schema证明stale fencing拒绝、中途SQL失败全回滚、成功收敛和重复拒写；执行前后information_schema残留均为0 | 无 |
 | P0-08 | 能力已关闭 | 正式Outcome Reconciler已接入；缺失Handler、spawn失败、panic、abort、cancel统一持久化；dispatching状态消除取消边界；广播滞后审计未跟踪任务 | 需桌面任务panic/缺失Handler故障注入门禁 |
 | P0-09 | 代码已关闭，Linux门禁待补 | Rust和Agent双层限制128字节安全版本段；Agent只在受控releases子目录删除；同版本目录不可覆盖 | 需授权Linux节点路径穿越与同版本重复门禁 |
 | P0-10 | 代码已关闭，Linux门禁待补 | 渲染Compose写入每节点任务文件、SFTP上传并传递REMOTE_COMPOSE，Agent覆盖Release内Compose后才启动；全部上传文件带SHA-256 | 需两节点修改Compose值后远端实际文件/容器配置变化门禁 |
@@ -659,7 +659,7 @@ Vue Page
 | P0-12 | 真实集成已通过，桌面过期门禁待补 | 缺失expires_in强制30分钟；每60秒真实Token只读校验；401/403清理会话，网络异常fail-closed；授权平台真实登录+ /sys/menu/nav 契约通过 | 需桌面Token撤销/到期后页面立即关闭业务入口门禁 |
 | P0-13 | 能力、隔离集成和自动用户门禁已关闭 | 随机版本化项目主密钥、旧密文事务迁移、数据库密码解耦、轮换失败回滚、Windows Credential Manager、项目绑定口令包、缺钥页面恢复入口和精确清理均通过 | 需正式Tauri原生保存/打开对话框执行一次人工用户门禁；不再属于架构或数据可恢复性缺口 |
 | P0-14 | 能力已关闭，桌面崩溃门禁待补 | 同盘staging、逐文件SHA-256、完成标记、原子改名、残留staging清理、损坏主配置回退备份、真实祖先路径/联接阻断、启动维护best-effort测试通过 | 需正式Tauri复制中断/改名后崩溃/损坏sidecar用户门禁 |
-| P0-15 | 代码能力已关闭，真实门禁待补 | 短凭据源头拒绝；全部底层错误SafeError；RSA/DSA私钥双层拒绝；russh移除RSA Feature；chacha20升级0.10.2；内置Ed25519握手通过；公网HTTPS/MySQL Required、内网MySQL Preferred；任务/命令日志硬上限；稳定项目主密钥已关闭 | 需提供并授权Ed25519/ECDSA测试密钥，在两台真实Linux节点重跑SSH/SFTP/Compose/取消/回滚门禁 |
+| P0-15 | 代码能力关闭，真实主链通过 | 既有安全能力不变；临时Ed25519在两节点通过认证、HostKey捕获/固定/变化阻断、SFTP哈希传输、Agent和P1-08 Compose停启，验收后公私钥零残留 | Compose失败、取消和回滚仍按P0-11门禁补齐 |
 
 ### 12.3 已随P0关闭的P1问题
 
@@ -677,7 +677,8 @@ Vue Page
 - P1-14：60秒Token验证、非法过期fail-closed、单项目列表故障隔离和初始化可见重试完成。
 - P1-15：完整节点选择集、全项目搜索/全选、项目级版本聚合和共享历史分页完成，250节点跨页测试通过。
 - P1-19：Task事件合并刷新、5秒安全兜底和页面重入活动/finalizing_failed任务恢复完成。
-- P1-20：本地scripts/quality-gate.ps1已建立；外部GitHub CI未获授权，不视为关闭。
+- P1-08：Agent 0.1.3停服一致性备份、服务相对路径、失败恢复、四容器验证及三个固定根30/14/3天治理通过两节点门禁。
+- P1-20：内网Jenkins、NSIS、CycloneDX、哈希、Authenticode、CMS清单签名、不可覆盖产物集与离线验证代码已建立；因当前无企业CA/既有证书且自签名Root/TrustedPublisher信任变更未获精确授权，仍不视为关闭。
 
 ### 12.4 本轮门禁证据
 
@@ -687,11 +688,13 @@ Vue Page
 - 真实平台：只执行授权测试登录和Token只读菜单校验，未连接、未执行SQL、未修改平台业务库结构或数据。
 - 主密钥真实集成：仅在授权隔离工作台Schema写入`key-poc-*`唯一配置/审计，覆盖迁移、数据库密码解耦、轮换失败回滚、成功轮换和跨电脑导入，结束后按唯一键删除并复查总数为0；Windows Credential Manager唯一测试引用已删除。
 - 最终默认Feature生产Release基于`a0008b62fd09af4530ee08c2e9b357652f091bdb`，大小11987968字节，SHA-256为`FBE660633418908A1784A002899C042DFE893EBCCB34B8E347C7BF5DBB65A1D3`；包含三项主密钥Command，无WebDriver/Fixture标记，已覆盖1668896至b5d8690的全部P1代码整改。依赖树不存在`rsa 0.10.0-rc.18`，`chacha20`为0.10.2。
-- 未执行真实SSH/Docker门禁：现有test/id_rsa为RSA 4096，已被新策略明确拒绝；不得为了复用旧门禁而绕过算法限制。
+- 真实最终化：随机隔离Schema门禁通过stale fencing、事务触发器失败、成功/重复最终化；门禁前后`FINALIZATION_SCHEMA_RESIDUE_COUNT=0`。
+- 真实SSH/Docker：两节点临时Ed25519通过HostKey、2MiB SFTP、Agent和P1-08 Compose停启/恢复；唯一远端测试资产、公钥和本机密钥目录均精确删除。现有RSA 4096测试私钥仍保持拒绝。
+- 发布基础设施：CycloneDX 1.5实测905组件，Tauri发布配置完成debug/no-bundle构建。创建自签名证书及加入CurrentUser Root/TrustedPublisher的命令在执行前被安全审查拒绝；复查My/Root/TrustedPublisher计数均0，`D:\inxaiot-release-artifacts`不存在，无持久副作用。
 
 ### 12.5 当前准入结论
 
 - 阶段7.5-D仍为“整改中”，阶段8继续暂停。
-- P0-13、P0-15代码根因及P1-01、P1-06、P1-09、P1-10、P1-12～P1-15、P1-19高优先级整改已经关闭；下一真实环境前置条件是授权Ed25519/ECDSA测试密钥。代码门禁不等于真实节点、正式桌面或发布基础设施门禁。
-- P1-19已经关闭；当前可执行代码层高优先级剩余为P1-08。其远端停服/递归清理副作用需用户专项授权。P1-20需要用户指定可信CI、证书和产物基础设施。
-- 外部CI、安装包签名和产物上传需要用户明确指定可信基础设施与证书；未授权前只运行本地门禁。
+- P0-07与P1-08新增真实门禁已关闭，Ed25519双节点主链已通过；代码门禁仍不能替代剩余正式桌面和远端故障/取消/回滚门禁。
+- 当前高优先级唯一发布阻断为P1-20受信签名证书与首个签名安装包。内网Jenkins和产物脚本已经确定，但持久加入自签名信任根需要用户对精确证书Subject、CurrentUser Root/TrustedPublisher范围和撤销方案再次明确授权。
+- 阶段7.5-D仍为“整改中”，阶段8继续暂停；不得把未受信或仅自签但未验证的安装包记为完成。

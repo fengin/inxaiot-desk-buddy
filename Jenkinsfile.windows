@@ -1,0 +1,62 @@
+pipeline {
+    agent { label 'inxaiot-windows-release' }
+
+    options {
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+        booleanParam(name: 'RUN_REAL_GATES', defaultValue: false, description: '在受控开发MySQL和两节点上执行显式ignore真实门禁')
+        booleanParam(name: 'PUBLISH_SIGNED_RELEASE', defaultValue: false, description: '生成不可覆盖的签名NSIS产物集')
+    }
+
+    environment {
+        INX_RELEASE_ARTIFACT_ROOT = 'D:\inxaiot-release-artifacts'
+        INX_SIGN_TIMESTAMP_URL = 'http://timestamp.digicert.com'
+    }
+
+    stages {
+        stage('检出') {
+            steps {
+                checkout scm
+                powershell 'git status --short'
+            }
+        }
+        stage('能力门禁') {
+            steps {
+                powershell '.\\scripts\\quality-gate.ps1'
+            }
+        }
+        stage('受控真实环境门禁') {
+            when { expression { params.RUN_REAL_GATES } }
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: 'inxaiot-stage75-ed25519', keyFileVariable: 'INX_TEST_SSH_PRIVATE_KEY_PATH')]) {
+                    dir('src-tauri') {
+                        powershell '''
+                            cargo test --test deployment_finalization_real atomic_finalization_rejects_stale_fencing_rolls_back_mid_transaction_and_converges -- --ignored --nocapture
+                            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                            cargo test --test formal_host_key_real -- --ignored --nocapture
+                            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                            cargo test --test formal_remote_transfer_real private_key_pinning_command_upload_download_hash_and_exact_cleanup -- --ignored --nocapture
+                            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                            cargo test --test formal_agent_real -- --ignored --nocapture
+                            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                            cargo test --test agent_retention_backup_real -- --ignored --nocapture
+                            exit $LASTEXITCODE
+                        '''
+                    }
+                }
+            }
+        }
+        stage('签名发布') {
+            when { expression { params.PUBLISH_SIGNED_RELEASE } }
+            steps {
+                withCredentials([string(credentialsId: 'inxaiot-windows-signing-thumbprint', variable: 'INX_SIGN_CERT_THUMBPRINT')]) {
+                    powershell '.\\scripts\\release-windows.ps1 -SkipQualityGate'
+                }
+            }
+        }
+    }
+}

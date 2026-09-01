@@ -55,7 +55,12 @@ pub fn config() -> RemoteTestConfig {
             .map(str::to_string)
             .collect(),
         user: line(&description, "一体机ssh用户：").into(),
-        private_key: std::fs::read_to_string(root.join("test/id_rsa")).expect("private key"),
+        private_key: std::fs::read_to_string(
+            std::env::var_os("INX_TEST_SSH_PRIVATE_KEY_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| root.join("test/id_rsa")),
+        )
+        .expect("private key"),
         platform_host: platform_host.into(),
         platform_api_port: api_port.into(),
         platform_mqtt_port: mqtt_port.into(),
@@ -102,6 +107,16 @@ pub async fn run(
     args: Vec<String>,
     env: BTreeMap<String, String>,
 ) -> RemoteCommandResult {
+    run_with_timeout(session, program, args, env, Duration::from_secs(60)).await
+}
+
+pub async fn run_with_timeout(
+    session: &RemoteSession,
+    program: &str,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+    total_timeout: Duration,
+) -> RemoteCommandResult {
     session
         .run(
             &ExecRequest {
@@ -109,7 +124,7 @@ pub async fn run(
                 args,
                 env,
                 stdin: None,
-                total_timeout: Duration::from_secs(60),
+                total_timeout,
                 inactivity_timeout: Duration::from_secs(30),
             },
             &CancellationToken::new(),

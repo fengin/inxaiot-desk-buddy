@@ -2,7 +2,7 @@
 set -eu
 
 ACTION="${1:-}"
-AGENT_VERSION="0.1.2"
+AGENT_VERSION="0.1.3"
 AGENT_PROTOCOL_VERSION="1"
 DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/data/deploy/inxvision-edge}"
 DATA_ROOT="${DATA_ROOT:-/opt/data}"
@@ -18,6 +18,9 @@ SERVICE_IMAGE="${SERVICE_IMAGE:-}"
 SERVICE_IMAGE_ENV="${SERVICE_IMAGE_ENV:-}"
 TASK_ID="${TASK_ID:-}"
 MIN_FREE_MB="${MIN_FREE_MB:-1024}"
+BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
+SERVICE_UPGRADE_RETENTION_DAYS="${SERVICE_UPGRADE_RETENTION_DAYS:-14}"
+STAGING_RETENTION_DAYS="${STAGING_RETENTION_DAYS:-3}"
 ALLOW_EXISTING_PORTS="${ALLOW_EXISTING_PORTS:-false}"
 PORTS="${PORTS:-1883 6001 6002 7000}"
 COMPOSE_CMD="${COMPOSE_CMD:-}"
@@ -60,6 +63,53 @@ require_safe_release_version() {
   esac
 }
 
+require_safe_root() {
+  name="$1"
+  value="$2"
+  code="$3"
+  [ -n "$value" ] || fail "precheck" "${name} is empty" "$code"
+  [ "$value" != "/" ] || fail "precheck" "${name} cannot be /" "$code"
+  case "$value" in
+    /*) ;;
+    *) fail "precheck" "${name} must be an absolute path" "$code" ;;
+  esac
+  case "$value/" in
+    *"//"*|*"/./"*|*"/../"*) fail "precheck" "${name} contains unsafe path segments" "$code" ;;
+  esac
+}
+
+require_retention_days() {
+  name="$1"
+  value="$2"
+  case "$value" in
+    ''|*[!0-9]*) fail "retention" "${name} must be an integer number of days" 17 ;;
+  esac
+  [ "$value" -ge 1 ] && [ "$value" -le 3650 ] || fail "retention" "${name} must be between 1 and 3650 days" 17
+}
+
+prune_directory() {
+  root="$1"
+  days="$2"
+  label="$3"
+  [ -e "$root" ] || return 0
+  [ -d "$root" ] || fail "retention" "${label} root is not a directory: ${root}" 18
+  [ ! -L "$root" ] || fail "retention" "${label} root cannot be a symbolic link: ${root}" 18
+  event "retention" "running" "pruning ${label} children older than ${days} days"
+  if ! find "$root" -mindepth 1 -maxdepth 1 -type d -mtime "+${days}" -exec rm -rf -- {} +; then
+    fail "retention" "failed to prune expired ${label} directories" 19
+  fi
+  event "retention" "success" "${label} retention applied"
+}
+
+prune_retention() {
+  require_retention_days "BACKUP_RETENTION_DAYS" "$BACKUP_RETENTION_DAYS"
+  require_retention_days "SERVICE_UPGRADE_RETENTION_DAYS" "$SERVICE_UPGRADE_RETENTION_DAYS"
+  require_retention_days "STAGING_RETENTION_DAYS" "$STAGING_RETENTION_DAYS"
+  prune_directory "$DATA_ROOT/backup" "$BACKUP_RETENTION_DAYS" "backup"
+  prune_directory "$DEPLOY_ROOT/service-upgrades" "$SERVICE_UPGRADE_RETENTION_DAYS" "service-upgrades"
+  prune_directory "$DATA_ROOT/.inxaiot-desk-buddy" "$STAGING_RETENTION_DAYS" "staging"
+}
+
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "precheck" "$1 not found" "$2"
 }
@@ -88,13 +138,18 @@ compose() {
 }
 
 ensure_data_root() {
-  [ -n "$DATA_ROOT" ] || fail "precheck" "DATA_ROOT is empty" 14
-  [ "$DATA_ROOT" != "/" ] || fail "precheck" "DATA_ROOT cannot be /" 14
+  require_safe_root "DATA_ROOT" "$DATA_ROOT" 14
+  require_safe_root "DEPLOY_ROOT" "$DEPLOY_ROOT" 14
   if [ ! -d "$DATA_ROOT" ]; then
     mkdir -p "$DATA_ROOT" || fail "precheck" "create ${DATA_ROOT} failed" 14
     event "precheck" "running" "created ${DATA_ROOT}"
   fi
   [ -w "$DATA_ROOT" ] || fail "precheck" "${DATA_ROOT} is not writable" 14
+  if [ ! -d "$DEPLOY_ROOT" ]; then
+    mkdir -p "$DEPLOY_ROOT" || fail "precheck" "create ${DEPLOY_ROOT} failed" 14
+    event "precheck" "running" "created ${DEPLOY_ROOT}"
+  fi
+  [ -w "$DEPLOY_ROOT" ] || fail "precheck" "${DEPLOY_ROOT} is not writable" 14
 }
 
 free_mb() {
@@ -146,6 +201,7 @@ precheck() {
   need_cmd tar 12
   need_cmd awk 13
   ensure_data_root
+  prune_retention
 
   arch="$(uname -m)"
   [ "$arch" = "x86_64" ] || fail "precheck" "unsupported arch ${arch}" 15
@@ -154,7 +210,7 @@ precheck() {
   [ "${free:-0}" -ge "$MIN_FREE_MB" ] || fail "precheck" "free space ${free}MB is less than ${MIN_FREE_MB}MB" 16
 
   check_ports
-	check_platform_endpoints
+  check_platform_endpoints
   compose_version="$(compose version 2>&1)"
   event "precheck" "success" "docker=$(docker --version); compose=${compose_version}; freeMB=${free}"
 }
@@ -169,11 +225,13 @@ prepare_dirs() {
     "$DATA_ROOT/emqx/data" \
     "$DATA_ROOT/emqx/log" \
     "$DATA_ROOT/backup" \
+    "$DATA_ROOT/.inxaiot-desk-buddy" \
     "$DEPLOY_ROOT/releases" \
     "$DEPLOY_ROOT/service-upgrades"
   if command -v chown >/dev/null 2>&1; then
     chown -R 1000:1000 "$DATA_ROOT/emqx" 2>/dev/null || true
   fi
+  prune_retention
 }
 
 current_release_dir() {
@@ -287,10 +345,7 @@ stop_current_release() {
 verify_release_dir() {
   release_dir="$1"
   (cd "$release_dir" && compose -f docker-compose.yml ps >/dev/null 2>&1) || return 1
-  for container in inx-edge-emqx inx-device-edge inx-rule-engine inx-device-edge-web; do
-    status="$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || true)"
-    [ "$status" = "running" ] || return 1
-  done
+  verify_runtime_containers || return 1
   [ -f "$release_dir/manifest.json" ] || return 1
   current_version="$(awk -F'"' '/"version"[[:space:]]*:/ {print $4; exit}' "$release_dir/manifest.json")"
   [ "$current_version" = "$RELEASE_VERSION" ] || return 1
@@ -299,6 +354,13 @@ verify_release_dir() {
     current_fingerprint="$(tr -d '\r\n' < "$release_dir/release-fingerprint.txt")"
     [ "$current_fingerprint" = "$RELEASE_FINGERPRINT" ] || return 1
   fi
+}
+
+verify_runtime_containers() {
+  for container in inx-edge-emqx inx-device-edge inx-rule-engine inx-device-edge-web; do
+    status="$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || true)"
+    [ "$status" = "running" ] || return 1
+  done
 }
 
 rollback_release() {
@@ -407,23 +469,63 @@ install_release() {
 
 backup_current() {
   require_safe_release_version "backup" 40
-  backup_dir="$DATA_ROOT/backup/${RELEASE_VERSION}-before-upgrade-$(date '+%Y%m%d-%H%M%S')"
-  mkdir -p "$backup_dir"
+  ensure_data_root
+  prepare_dirs
   current_dir="$(current_release_dir)"
   [ -n "$current_dir" ] && [ -d "$current_dir" ] || fail "backup" "current release does not exist" 41
   for required in docker-compose.yml .env manifest.json; do
     [ -f "$current_dir/$required" ] || fail "backup" "required backup file is missing: $required" 42
-    cp -a "$current_dir/$required" "$backup_dir/" || fail "backup" "failed to copy $required" 43
   done
   [ -f "$DATA_ROOT/config/host-info.json" ] || fail "backup" "host-info.json is missing" 44
+
+  backup_dir="$DATA_ROOT/backup/${RELEASE_VERSION}-before-upgrade-$(date '+%Y%m%d-%H%M%S')"
+  mkdir "$backup_dir" || fail "backup" "failed to create unique backup directory" 43
+  for required in docker-compose.yml .env manifest.json; do
+    cp -a "$current_dir/$required" "$backup_dir/" || fail "backup" "failed to copy $required" 43
+  done
   cp -a "$DATA_ROOT/config/host-info.json" "$backup_dir/" || fail "backup" "failed to copy host-info.json" 45
+  database_file_list="$backup_dir/.database-files.list"
   for data_dir in "$DATA_ROOT/device-edge" "$DATA_ROOT/rule-engine"; do
     if [ -d "$data_dir" ]; then
-      if ! find "$data_dir" -maxdepth 3 \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -exec cp -a {} "$backup_dir/" \;; then
-        fail "backup" "failed to copy service database files" 46
-      fi
+      find "$data_dir" -maxdepth 3 -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) -print >> "$database_file_list" || fail "backup" "failed to enumerate service database files" 46
     fi
   done
+  if [ -s "$database_file_list" ]; then
+    event "compose" "running" "stopping current release for consistent database backup"
+    if ! (cd "$current_dir" && compose -f docker-compose.yml stop); then
+      if ! (cd "$current_dir" && compose -f docker-compose.yml up -d); then
+        fail "backup" "compose stop failed and service recovery also failed" 47
+      fi
+      rm -rf -- "$backup_dir"
+      fail "backup" "compose stop failed; services were restored" 46
+    fi
+
+    copy_failed="false"
+    while IFS= read -r database_file; do
+      [ -n "$database_file" ] || continue
+      relative_path="${database_file#"$DATA_ROOT"/}"
+      target_file="$backup_dir/data/$relative_path"
+      if ! mkdir -p "$(dirname "$target_file")" || ! cp -a "$database_file" "$target_file"; then
+        copy_failed="true"
+        break
+      fi
+    done < "$database_file_list"
+
+    event "compose" "running" "restarting current release after database backup"
+    if ! (cd "$current_dir" && compose -f docker-compose.yml up -d); then
+      rm -f "$database_file_list"
+      fail "backup" "database backup finished but current release restart failed" 48
+    fi
+    if ! verify_runtime_containers; then
+      rm -f "$database_file_list"
+      fail "backup" "current release restart did not restore all expected containers" 49
+    fi
+    if [ "$copy_failed" = "true" ]; then
+      rm -rf -- "$backup_dir"
+      fail "backup" "database copy failed; services were restored and partial backup removed" 46
+    fi
+  fi
+  rm -f "$database_file_list"
   event "backup" "success" "$backup_dir"
 }
 

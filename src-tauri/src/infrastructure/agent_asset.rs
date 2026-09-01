@@ -3,9 +3,9 @@ use sha2::{Digest, Sha256};
 use crate::core::error::{AppError, AppResult};
 
 pub const AGENT_SOURCE: &str = include_str!("../../resources/agent/edge-node-agent.sh");
-pub const AGENT_VERSION: &str = "0.1.2";
+pub const AGENT_VERSION: &str = "0.1.3";
 pub const AGENT_PROTOCOL_VERSION: &str = "1";
-pub const AGENT_SHA256: &str = "b49eb802e3c31a1dfdc48e31630820d057e8f6d38a2e4dadff314697a3e0b678";
+pub const AGENT_SHA256: &str = "64fa5197c28f8a3fba5d7949634782d3aab7fd75259d464e83e39c46380ff8f8";
 pub const AGENT_COMPATIBILITY: &[&str] = &[
     "Linux x86_64",
     "Docker Engine 20.10+",
@@ -42,11 +42,20 @@ mod tests {
     #[test]
     fn embedded_agent_has_version_hash_protocol_and_compatibility() {
         verify_embedded_agent().expect("embedded agent");
-        assert_eq!(AGENT_VERSION, "0.1.2");
+        assert_eq!(AGENT_VERSION, "0.1.3");
         assert_eq!(AGENT_PROTOCOL_VERSION, "1");
         assert_eq!(AGENT_SHA256.len(), 64);
         assert!(!AGENT_COMPATIBILITY.is_empty());
         assert!(AGENT_SOURCE.contains("require_safe_release_version"));
+        assert!(AGENT_SOURCE.contains("BACKUP_RETENTION_DAYS=\"${BACKUP_RETENTION_DAYS:-30}\""));
+        assert!(
+            AGENT_SOURCE.contains(
+                "SERVICE_UPGRADE_RETENTION_DAYS=\"${SERVICE_UPGRADE_RETENTION_DAYS:-14}\""
+            )
+        );
+        assert!(AGENT_SOURCE.contains("STAGING_RETENTION_DAYS=\"${STAGING_RETENTION_DAYS:-3}\""));
+        assert!(AGENT_SOURCE.contains("stopping current release for consistent database backup"));
+        assert!(AGENT_SOURCE.contains("target_file=\"$backup_dir/data/$relative_path\""));
         assert!(AGENT_SOURCE.contains("REMOTE_COMPOSE"));
     }
 }

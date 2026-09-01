@@ -13,7 +13,6 @@ pub mod file_processing;
 pub mod local_sqlite;
 pub mod logging;
 pub mod platform_aio;
-pub mod platform_auth;
 pub mod process_lock;
 pub mod project_context;
 pub mod release_archive;

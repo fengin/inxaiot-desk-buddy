@@ -72,7 +72,7 @@ P1-20在本轮关闭的是“可重复构建、完整性、来源和不可覆盖
 4. 已知CNG KeyName、UniqueName私钥文件及`certutil -user -key`匹配数均为0。
 5. `D:\inxaiot-release-artifacts`及其受控ACL保留，不删除已验收的内部产物集。
 
-禁止按模糊Subject批量删除其他证书。历史签名脚本不在Tauri配置、Jenkins或正式发布入口中执行。
+禁止按模糊Subject批量删除其他证书。历史签名实现和专用签名脚本已删除；`release-windows.ps1`与`verify-release.ps1`仅保留无签名链兼容转发。
 
 ## 5. 首次关闭门禁
 

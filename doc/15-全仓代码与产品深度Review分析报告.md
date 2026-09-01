@@ -2,12 +2,12 @@
 
 | 属性 | 内容 |
 | --- | --- |
-| Review 日期 | 2026-08-31 |
+| Review 日期 | 2026-08-31；过度修复反向Review：2026-09-01 |
 | 适用项目 | `inxaiot-desk-buddy` |
 | Review 角色 | 架构师、产品负责人、实施用户、安全与运维视角 |
 | Review 范围 | Rust/Tauri、Vue/Pinia、SQLite/MySQL、平台认证、SSH/SFTP、Shell Agent、Release/模板、三类部署、任务/恢复、数据目录、日志/脱敏、测试、依赖与发布 |
-| 代码规模 | 283个正式文件；147个Rust、68个TypeScript、8个Vue、4个SQL；54个测试相关文件 |
-| IPC与测试 | 整改后46个Tauri Command、46个shared/api invoke点；17个前端Spec、38个Rust集成测试文件、36个真实环境ignore测试 |
+| 代码规模 | 反向精简后116个生产Rust、72个TypeScript、8个Vue文件；生产代码约3.3万行 |
+| IPC与测试 | 45个Tauri Command、45个shared/api invoke点；18个前端Spec、41个Rust集成测试文件、43个ignore测试入口 |
 | 当前结论 | 高影响代码问题已收口：P0-06/P0-07/P0-09/P0-10/P0-11、P1-08/P1-20及Ed25519双节点主链关闭；低概率高成本项已分流为阶段8验收或已知风险，MySQL TLS为环境前置 |
 
 ## 1. 执行摘要
@@ -338,16 +338,16 @@ Vue Page
 修复要求：
 
 - 设计稳定项目主密钥与版本化KEK，不得直接绑定连接密码。
-- 支持密钥轮换和旧格式迁移；明确跨电脑安全分发模型。
+- 支持旧格式迁移并明确跨电脑安全分发模型；不向普通用户提供人工轮换。
 - 在新方案落地前禁止静默修改会破坏解密的数据库密码。
 
 整改结论（检查点`9b73236`）：
 
 - 当前格式为`argon2id-aes256gcm-project-key`；32字节随机项目主密钥按版本保存到Windows Credential Manager，MySQL只保存盐、随机数、认证密文、格式和密钥版本，数据库密码不再参与新密文派生。
-- 旧`argon2id-aes256gcm`密文首次读取或数据库密码修改前在`SELECT ... FOR UPDATE`事务内迁移；轮换固定为先保存新版本密钥，再锁行解密/重加密/审计，提交失败删除新密钥并继续使用旧版本。
+- 旧`argon2id-aes256gcm`密文首次读取或数据库密码修改前在`SELECT ... FOR UPDATE`事务内迁移；新密文不再绑定数据库密码。首期不提供人工主密钥轮换。
 - `.inxkey`包使用Argon2id和AES-256-GCM；AAD绑定平台URL、数据库主机/端口、工作台Schema指纹及密钥版本。导入先校验绑定/版本并实际解密当前发布配置，成功后才写本机安全存储。
 - 页面仍经Release Store→Workbench Adapter→Real Adapter→Tauri Command调用；浏览器Fixture独立实现。配置因本机缺钥读取失败时，“导入并验证密钥包”入口仍可使用，口令在弹窗关闭、项目切换或成功后清空。
-- 隔离MySQL真实门禁覆盖旧密文迁移、数据库密码替换后读取、轮换审计故障全回滚、成功轮换、跨本机项目ID导入和精确清理归零；Windows Credential Manager唯一引用写/读/删及页面缺钥恢复用户测试通过。
+- 隔离MySQL真实门禁保留旧密文迁移、数据库密码替换后读取、跨本机项目ID导入和精确清理归零；Windows Credential Manager唯一引用写/读/删及页面缺钥恢复自动门禁通过。轮换专用代码与测试已删除。
 
 ### P0-14 数据目录和启动维护缺少崩溃恢复
 
@@ -472,7 +472,7 @@ Vue Page
 - 删除和旧凭据清理均忽略SecretStore删除失败。
 - 修复：版本化ref、commit后切换、失败补偿表和孤儿凭据GC。
 
-整改结论（检查点`1668896`）：数据库密码与平台Token改为UUID版本化引用；创建、项目更新和会话upsert发生错误时读取SQLite当前引用判定是否已提交，仅清理未引用新值。旧密码/Token、项目删除以及主密钥轮换/回滚删除失败统一写入`local_secret_cleanup`，启动幂等重试；`local_project_master_key`登记所有生产主密钥版本，项目删除前读取并精确清理。About显示待清理数量。SQLite Trigger与可失败SecretStore测试证明旧Token/密码保留、新值无孤儿、Outbox从1归零。
+整改结论（检查点`1668896`）：数据库密码与平台Token改为UUID版本化引用；创建、项目更新和会话upsert发生错误时读取SQLite当前引用判定是否已提交，仅清理未引用新值。旧密码/Token、项目删除及密钥清理失败写入`local_secret_cleanup`，启动幂等重试；`local_project_master_key`登记生产主密钥引用，项目删除前精确清理。About显示待清理数量。
 
 ### P1-11 导入预览缺少数据库唯一打开约束
 
@@ -658,10 +658,10 @@ Vue Page
 | P0-07 | 已关闭 | fencing行锁、目标结果、服务版本、资产、操作和租约释放进入同一MySQL事务；真实随机Schema证明stale fencing拒绝、中途SQL失败全回滚、成功收敛和重复拒写；执行前后information_schema残留均为0 | 无 |
 | P0-08 | 工程关闭，接受极端桌面注入风险 | 正式Outcome Reconciler已接入；缺失Handler、spawn失败、panic、abort、cancel统一持久化；dispatching状态消除取消边界；广播滞后审计未跟踪任务 | 状态机自动测试已覆盖；不为桌面人工制造panic增加生产注入入口 |
 | P0-09 | 已关闭 | 两节点`../escape-*`以40拒绝、同版本以37拒绝，事件流均未进入Compose；current不变且fixture零残留 | 无 |
-| P0-10 | 已关闭 | 两节点分别渲染唯一env值进入Compose label；远端Compose SHA-256与本机一致，device-edge容器label命中；随后恢复原current/host-info/镜像及四容器running/0，Release/备份/staging/公私钥零残留 | 无；真实传播为顺序维护窗口，生产并发和单目标失败隔离由批执行器测试证明，未来门禁已改走生产concurrency=2 |
-| P0-11 | 已关闭 | Agent 0.1.3两节点Compose/健康失败84/86回滚、SSH/SFTP取消通过；重启前只读Schema阻断；node121唯一备份后补列，17条规则/integrity/6001/RestartCount=0/新日志验证通过 | 无 |
+| P0-10 | 已关闭 | 两节点分别渲染唯一env值进入Compose label；远端Compose SHA-256与本机一致，device-edge容器label命中；恢复后四容器running/0且零残留 | 一次性765行真实测试已删除，模板/Agent/远端哈希断言合并既有门禁 |
+| P0-11 | 已关闭 | Agent 0.1.3两节点Compose/健康失败84/86回滚、SSH/SFTP取消通过；node121历史事故已恢复 | 服务Schema由镜像负责，工具不检查rule-engine内部列 |
 | P0-12 | 工程与真实集成关闭，转阶段8用户验收 | 缺失expires_in强制30分钟；每60秒真实Token只读校验；401/403清理会话，网络异常fail-closed；授权平台真实登录+ /sys/menu/nav 契约通过 | 阶段8观察业务入口关闭和提示，不再制造更多Token时序 |
-| P0-13 | 工程、隔离集成和自动用户门禁关闭 | 随机版本化项目主密钥、旧密文事务迁移、数据库密码解耦、轮换失败回滚、Windows Credential Manager、项目绑定口令包、缺钥页面恢复入口和精确清理均通过 | 原生保存/打开对话框列入阶段8代表性验收 |
+| P0-13 | 工程、隔离集成和自动用户门禁关闭 | 随机版本化项目主密钥、旧密文事务迁移、数据库密码解耦、Windows Credential Manager、项目绑定口令包和缺钥恢复通过 | 人工轮换已删除；原生保存/打开对话框列入阶段8 |
 | P0-14 | 工程关闭，极端崩溃窗口接受风险 | 正式Tauri完成切换/重启/实际路径/回滚/非空阻断；journal、完成标记、备份配置和损坏恢复有自动测试 | 复制中断/改名瞬间断电/sidecar同时损坏概率低、注入成本高；保留启动错误与人工回滚说明 |
 | P0-15 | SSH关闭；MySQL列为外部环境前置条件 | Ed25519两节点主链/故障/清理通过，RSA拒绝和日志脱敏不变；生产MySQL仍fail-closed | 开发MySQL TLS与Rustls/Native TLS不兼容；阶段8需TLS可用实例或用户明确批准受控明文策略，不继续用复杂客户端降级绕过 |
 
@@ -687,10 +687,10 @@ Vue Page
 ### 12.4 本轮门禁证据
 
 - 前端：typecheck、严格Lint、18个测试文件39项测试、生产构建通过；新增主密钥/缺钥恢复、项目重试、250节点跨页、历史分页、Task事件、Operations重入和诊断错误态契约。
-- Rust：cargo fmt --check、全目标全Feature严格Clippy通过；默认Feature全部非忽略单元/集成测试通过（库单测57项）；新增SSH依赖/原始日志契约、SecretStore补偿、Release runtime/tar上限和非法会话过期测试通过。
+- Rust：cargo fmt --check、全目标全Feature严格Clippy通过；精简后全部非忽略单元/集成测试通过（库单测56项）；SSH依赖/日志泄漏契约、SecretStore补偿、Release runtime/tar上限和非法会话过期测试通过。
 - 故障注入：真实双进程锁、本地最终化中途失败全回滚/重试、并发导入唯一约束、payload篡改、旧项目响应晚到、会话校验不可用fail-closed均通过。
 - 真实平台：只执行授权测试登录和Token只读菜单校验，未连接、未执行SQL、未修改平台业务库结构或数据。
-- 主密钥真实集成：仅在授权隔离工作台Schema写入`key-poc-*`唯一配置/审计，覆盖迁移、数据库密码解耦、轮换失败回滚、成功轮换和跨电脑导入，结束后按唯一键删除并复查总数为0；Windows Credential Manager唯一测试引用已删除。
+- 主密钥真实集成：仅在授权隔离工作台Schema写入`key-poc-*`唯一配置/审计，覆盖迁移、数据库密码解耦和跨电脑导入，结束后按唯一键删除并复查总数为0；人工轮换已从生产和测试删除。
 - 最终默认Feature生产Release基于`a0008b62fd09af4530ee08c2e9b357652f091bdb`，大小11987968字节，SHA-256为`FBE660633418908A1784A002899C042DFE893EBCCB34B8E347C7BF5DBB65A1D3`；包含三项主密钥Command，无WebDriver/Fixture标记，已覆盖1668896至b5d8690的全部P1代码整改。依赖树不存在`rsa 0.10.0-rc.18`，`chacha20`为0.10.2。
 - 真实最终化：随机隔离Schema门禁通过stale fencing、事务触发器失败、成功/重复最终化；门禁前后`FINALIZATION_SCHEMA_RESIDUE_COUNT=0`。
 - 真实SSH/Docker：两节点临时Ed25519通过HostKey、2MiB SFTP、Agent和P1-08 Compose停启/恢复；唯一远端测试资产、公钥和本机密钥目录均精确删除。现有RSA 4096测试私钥仍保持拒绝。
@@ -698,12 +698,12 @@ Vue Page
 - 真实租约/Agent：P0-06唯一计数行清理为0；P0-09两节点在Compose前拒绝；P0-11两节点Compose/健康故障回滚和SSH/SFTP取消通过，第二批临时Ed25519及`p009/p011`资产零残留。
 - 正式Tauri：7.5-D数据目录切换、重启、About实际路径、回滚和非空阻断通过，专用数据目录清理完成；Computer Use辅助进程连续初始化失败后停止，未用PowerShell UI Automation绕过。
 - CI稳定性：完整App挂载在全量并发下实际耗时超过15秒，测试超时容量校准为30秒但断言完全不变；复跑18文件39项全部通过，避免发布流水线偶发假红。
-- 新阻断证据：Stage75Adapter的Preferred TLS在开发MySQL返回`platform-connect:io(kind=InvalidData)`，Native TLS同样失败且已回退，所有stage75b随机Schema残留为0；node121 rule-engine日志与只读PRAGMA证明`rule_definition`缺少`record_type`，node79同表具备该列，未修改任一边缘数据库。
-- rule-engine防复发：现有SSH预检新增只读Schema检查，缺列时阻断性remediation为`migrate_rule_engine_schema`；四项测试证明检查只在会重启rule-engine时运行、命令带`-readonly`、缺列阻断、存在通过、缺数据库警告且生产源码无ALTER。
+- 新阻断证据：Stage75Adapter的Preferred TLS在开发MySQL返回`platform-connect:io(kind=InvalidData)`，Native TLS同样失败且已回退，所有stage75b随机Schema残留为0；node121的`record_type`事故已确认是服务镜像Migration问题，不属于部署工具通用预检职责。
+- 反向精简已删除工具内rule-engine数据库路径、字段名、remediation和四组专用测试；服务镜像必须自行初始化/迁移Schema，工具继续检查通用runtime和容器健康。
 - node121恢复：唯一备份SHA-256为`5cd888d1aa232548d58fabe47c4f132e38dcc52d412c4d86bfeab3b3100c1228`，事务补列后规则行数仍17、integrity=ok、新哈希`f7fa3cda9dd53dee38651eb8455303db828e581be0c7959a1dd90dbb301c6e63`；迁移后容器running/0、6001监听且新启动日志无缺列/FATAL。
 - stage75b完整门禁：用户仅本次授权明文开发MySQL，临时desktop-e2e覆盖下两节点预检、服务升级、取消、共享历史和清理通过；覆盖随后撤回、Schema残留0、两节点四容器running、临时Ed25519和本机密钥零残留。生产TLS策略未改变。
 - P1-20当前事实：正式产物集`inxaiot-desk-buddy-0.1.0-f9adb6ec6845`绑定Tree `45e4aa36a36e0f1389379449e47da24b357c3394`；安装包4501624字节/SHA-256 `f7d2c2a4f355862caa4ab2868c4c7ac1c62c0a34ea279b8c353dc76974134da4`，裸程序12296704字节/SHA-256 `d51c613f1feccbfdf921ac5d812d66c0dbd02775f1c5fe2197127881885c9dd9`，均`NotSigned`，全部文件只读，双入口复验通过，staging残留0。内部证书三个存储区及已知私钥容器匹配均为0。
-- P0-10真实传播：版本/操作`p010-compose-01a05c5b79037261a3fd6efe223aea7e`在node79和node121分别得到Compose SHA-256 `9d5754654ff6884ffa99111cf985b8b27657b85d38d487858d3f96227144d5ef`、`f76ecd8eca958b74b26eb4e162c4ce89ed472099130edc96971d798052023e73`，容器label命中各自唯一节点值；两节点恢复后四容器均running/RestartCount=0，唯一Release、备份、staging、host-info备份、公钥和本机私钥目录均为0。生产批执行器失败隔离1项、批并发2项通过；未来真实门禁已直接接入`execute_deployment_targets` concurrency=2并通过编译/严格Clippy，本轮按成本权衡不重复整包远端部署。
+- P0-10真实传播：版本/操作`p010-compose-01a05c5b79037261a3fd6efe223aea7e`在node79和node121分别得到Compose SHA-256 `9d5754654ff6884ffa99111cf985b8b27657b85d38d487858d3f96227144d5ef`、`f76ecd8eca958b74b26eb4e162c4ce89ed472099130edc96971d798052023e73`并命中容器label；证据保留，重型测试删除，轻量契约进入既有整包门禁。
 
 ### 12.5 当前准入结论
 
@@ -722,3 +722,24 @@ Vue Page
 | 已知风险，接受 | 预检后四类事实同时变化、桌面人工panic/缺Handler、数据目录复制/改名瞬间断电和sidecar同时损坏 | 已有版本/哈希、fail-closed、journal、启动错误和人工恢复；发生概率低，进一步修复成本和侵入度不成比例 |
 | 外部前置条件 | 开发MySQL TLS、生产GRANT最小化、目标电脑内部安装策略 | 由部署环境/管理员解决；代码保持安全失败，不用隐式明文或复杂降级掩盖 |
 | 后续Backlog | P2拆分、日志稀疏索引、无障碍/高DPI、非关键体验优化 | 不阻断阶段8，不与高优先级整改混在一起 |
+
+## 13. 过度修复反向Review与精简结果
+
+本轮以`5f35b25`为起点，按“发生概率、影响、可恢复性、代码量、业务侵入度和维护成本”重新检查全部深审整改。没有整批revert；只删除能证明无生产价值或职责错误的代码。
+
+| 项目 | 处理 | 结果 |
+| --- | --- | --- |
+| 已取消内部签名 | 删除不可达签名实现和未使用脚本，保留两个兼容转发 | 删除531行，既有无签名产物仍可复验 |
+| P0-10一次性真实门禁 | 删除765行独立框架，关键断言合并模板、Agent和整包门禁 | 净删745行，不重复维护远端快照/恢复 |
+| SafeError仅输出类型 | 改为白名单代码/操作/IO/SQLx/HTTP类别，仍禁止原文 | 净增119行，恢复内部诊断能力 |
+| 人工主密钥轮换 | 删除Port→Command→Adapter→Repository→UI全链 | 净删268行；保留稳定密钥、迁移和接管包 |
+| rule-engine列检查 | 认定为服务镜像职责，删除业务SQLite专用预检 | 净删283行 |
+| 重复平台认证实现 | 删除无任何调用的Infrastructure副本 | 删除218行 |
+
+合计29文件新增183行、删除2107行，净减少1924行。生产Tauri Command与Real Adapter invoke从46对降为45对。
+
+反向Review后明确保留：SecretStore清理Outbox、数据目录journal、不可变任务快照、TaskQueue/Outcome Reconciler、租约/fencing最终化、Agent回滚/一致性备份、HostKey/SFTP安全、Release资源上限、跨电脑密钥包和Application端口边界。这些代码对应真实秘密、数据一致性、不可逆远端状态或明确产品主流程，回退风险高于维护成本。
+
+旧开发凭据迁移属于边界项：删除可以继续减码，但当前无法证明全部存量工作台Schema均已迁移，直接移除可能使发布参数不可读；本轮保持兼容，待只读盘点和用户单独授权后再决定。
+
+精简后完整门禁通过：前端18文件39项、typecheck、严格Lint和生产构建；Rust fmt、全目标全Feature严格Clippy、56项库单测及全部非忽略集成测试；默认Feature Release大小12277760字节、SHA-256 `af924506b4e7a4be5bfc4f7a8817720401d94fbb4c69acfb5e4cd4616f51013c`。该二进制仅为本地质量门禁，不替代不可覆盖内部发布产物。

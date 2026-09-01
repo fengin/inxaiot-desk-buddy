@@ -8,7 +8,7 @@
 | Review 范围 | Rust/Tauri、Vue/Pinia、SQLite/MySQL、平台认证、SSH/SFTP、Shell Agent、Release/模板、三类部署、任务/恢复、数据目录、日志/脱敏、测试、依赖与发布 |
 | 代码规模 | 283个正式文件；147个Rust、68个TypeScript、8个Vue、4个SQL；54个测试相关文件 |
 | IPC与测试 | 整改后46个Tauri Command、46个shared/api invoke点；17个前端Spec、38个Rust集成测试文件、36个真实环境ignore测试 |
-| 当前结论 | P0-06/P0-07/P0-09、P1-08及Ed25519双节点主链已关闭；P0-11故障回滚分支通过但暴露rule-engine旧SQLite迁移缺口，开发MySQL TLS、正式桌面故障和受信发布仍阻断阶段8 |
+| 当前结论 | P0-06/P0-07/P0-09/P0-11、P1-08/P1-20及Ed25519双节点主链已关闭；开发MySQL TLS、Compose配置传播和正式桌面故障门禁仍阻断阶段8 |
 
 ## 1. 执行摘要
 
@@ -541,8 +541,8 @@ Vue Page
 
 - 无CI配置。
 - 35个真实测试默认被ignore，正常`cargo test`不会执行。
-- Tauri bundle关闭，没有Windows安装包、签名、升级/回滚产物。
-- 修复：建立分层CI、受控真实环境流水线、Release SBOM/哈希/签名和安装包。
+- Tauri bundle关闭，没有Windows安装包、完整性清单、升级/回滚产物。
+- 修复：建立分层CI、受控真实环境流水线及内部Release的NSIS、SBOM、哈希、Git来源和不可覆盖产物集；代码签名是否需要由分发边界决定。
 
 ## 6. P2：工程质量与体验改进
 
@@ -573,7 +573,7 @@ Vue Page
 | 多实例/租约/恢复 | 不同实例测试通过 | 同实例接管、fencing TOCTOU、本机双进程恢复冲突 |
 | 数据目录 | 正常迁移/回滚通过 | 崩溃一致性、真实路径、配置损坏和启动维护容错不足 |
 | 关于/诊断 | 页面已接通 | Schema与数据目录状态可能虚假 |
-| Windows发布 | 裸exe可构建 | 无独立Git、CI、安装包、签名和升级回滚 |
+| Windows发布 | 内部无签名发布门禁已关闭 | 独立Git、内网CI、NSIS、SBOM、SHA-256、Git提交/Tree、不可覆盖产物集和离线复验已形成；外部分发代码签名另行立项 |
 
 ## 8. 现有测试没有覆盖的关键场景
 
@@ -609,7 +609,7 @@ Vue Page
 7. **统一认证和密钥**：持续会话验证、稳定项目主密钥、SecretStore补偿、TLS、非RSA SSH密钥、日志脱敏。
 8. **加固数据目录和日志**：迁移journal、best-effort启动维护、磁盘配额和日志保留。
 9. **完成用户规模与恢复**：300节点跨页选择、历史分页、活动任务恢复、真实服务状态与诊断。
-10. **建立发布门禁**：CI、真实环境流水线、installer、签名、SBOM、升级和回滚。
+10. **建立发布门禁**：CI、真实环境流水线、installer、SBOM、哈希、来源追溯、升级和回滚；签名按实际分发边界决策。
 
 ## 10. 阶段8准入条件
 
@@ -622,7 +622,7 @@ Vue Page
 - 使用非RSA测试/验收私钥，平台和MySQL生产连接策略明确。
 - 前端跨项目响应不会串数据，运行任务切项目后仍可跟踪。
 - 真实Compose、Release指纹、远端版本/健康和共享历史互相一致。
-- 项目进入独立Git仓库，CI与签名安装包可以追溯到同一提交。
+- 项目进入独立Git仓库，CI与内部安装包可以追溯到同一提交和Git Tree。
 
 ## 11. 最终Review结论
 
@@ -645,7 +645,7 @@ Vue Page
 
 | 编号 | 当前状态 | 已取得证据 | 未关闭门禁 |
 | --- | --- | --- | --- |
-| P0-01 | 能力已关闭 | 独立仓库、系列检查点、LF规则、凭据/镜像忽略、构建内提交ID、本地门禁、内网Jenkins分层流水线及NSIS/SBOM/签名脚本 | 当前无受信Code Signing证书，首个签名安装包仍属发布阻断 |
+| P0-01 | 已关闭 | 独立仓库、系列检查点、LF规则、凭据/镜像忽略、构建内提交ID、本地门禁、内网Jenkins分层流水线及NSIS/SBOM/SHA-256/Git Tree清单 | 无 |
 | P0-02 | 能力已关闭，桌面门禁待补 | 锁在日志/SQLite/恢复前获取；同进程与真实子进程竞争、释放后恢复测试通过；Windows启动错误对话框已接通 | 需用正式Tauri程序执行同数据目录双启动用户门禁 |
 | P0-03 | 已关闭 | execute_deployment Command、前端API、Real Adapter方法和应用层同步入口全部删除；契约测试确认仅保留preflight→submit→Handler路径 | 无 |
 | P0-04 | 能力已关闭，真实门禁待补 | payload包含版本化执行快照、Profile版本、节点版本、HostKey、发布物指纹；payload SHA-256校验；发布物复制到任务专属目录后复算指纹 | 需以非RSA密钥重跑预检后修改源文件/Profile/节点/HostKey的真实阻断门禁 |
@@ -678,7 +678,7 @@ Vue Page
 - P1-15：完整节点选择集、全项目搜索/全选、项目级版本聚合和共享历史分页完成，250节点跨页测试通过。
 - P1-19：Task事件合并刷新、5秒安全兜底和页面重入活动/finalizing_failed任务恢复完成。
 - P1-08：Agent 0.1.3停服一致性备份、服务相对路径、失败恢复、四容器验证及三个固定根30/14/3天治理通过两节点门禁。
-- P1-20：内网Jenkins、NSIS、CycloneDX、哈希、Authenticode、CMS清单签名、不可覆盖产物集与离线验证代码已建立；因当前无企业CA/既有证书且自签名Root/TrustedPublisher信任变更未获精确授权，仍不视为关闭。
+- P1-20：已关闭。用户确认内部应用取消签名硬门禁；内网Jenkins、无签名NSIS、CycloneDX、SHA-256、Git提交/Tree、不可覆盖产物集与离线验证形成正式链，安装包和裸程序必须明确为`NotSigned`。
 
 ### 12.4 本轮门禁证据
 
@@ -690,7 +690,7 @@ Vue Page
 - 最终默认Feature生产Release基于`a0008b62fd09af4530ee08c2e9b357652f091bdb`，大小11987968字节，SHA-256为`FBE660633418908A1784A002899C042DFE893EBCCB34B8E347C7BF5DBB65A1D3`；包含三项主密钥Command，无WebDriver/Fixture标记，已覆盖1668896至b5d8690的全部P1代码整改。依赖树不存在`rsa 0.10.0-rc.18`，`chacha20`为0.10.2。
 - 真实最终化：随机隔离Schema门禁通过stale fencing、事务触发器失败、成功/重复最终化；门禁前后`FINALIZATION_SCHEMA_RESIDUE_COUNT=0`。
 - 真实SSH/Docker：两节点临时Ed25519通过HostKey、2MiB SFTP、Agent和P1-08 Compose停启/恢复；唯一远端测试资产、公钥和本机密钥目录均精确删除。现有RSA 4096测试私钥仍保持拒绝。
-- 发布基础设施：CycloneDX 1.5实测905组件，Tauri发布配置完成debug/no-bundle构建；未签名NSIS冒烟包成功生成并被断言为`NotSigned`，记录大小/哈希后删除，临时配置零残留。发布脚本以target内临时配置注入签名脚本绝对路径，正式产物根要求管理员预置并拒绝宽泛写ACL。创建自签名证书及加入CurrentUser Root/TrustedPublisher的命令在执行前被安全审查拒绝；复查My/Root/TrustedPublisher计数均0，`D:\inxaiot-release-artifacts`不存在，无持久副作用。
+- 发布基础设施历史与收口：早期CycloneDX 1.5/未签名NSIS冒烟只证明工具链；最终提交`f9adb6ec6845b8e5267a9bf7a19551b6eb8245fc`建立无签名正式链，产物根要求管理员预置并拒绝宽泛写ACL，版本+提交目录已存在时拒绝覆盖，文件集合/哈希/Git Tree/只读/NotSigned由独立脚本复验。
 - 真实租约/Agent：P0-06唯一计数行清理为0；P0-09两节点在Compose前拒绝；P0-11两节点Compose/健康故障回滚和SSH/SFTP取消通过，第二批临时Ed25519及`p009/p011`资产零残留。
 - 正式Tauri：7.5-D数据目录切换、重启、About实际路径、回滚和非空阻断通过，专用数据目录清理完成；Computer Use辅助进程连续初始化失败后停止，未用PowerShell UI Automation绕过。
 - CI稳定性：完整App挂载在全量并发下实际耗时超过15秒，测试超时容量校准为30秒但断言完全不变；复跑18文件39项全部通过，避免发布流水线偶发假红。
@@ -698,12 +698,12 @@ Vue Page
 - rule-engine防复发：现有SSH预检新增只读Schema检查，缺列时阻断性remediation为`migrate_rule_engine_schema`；四项测试证明检查只在会重启rule-engine时运行、命令带`-readonly`、缺列阻断、存在通过、缺数据库警告且生产源码无ALTER。
 - node121恢复：唯一备份SHA-256为`5cd888d1aa232548d58fabe47c4f132e38dcc52d412c4d86bfeab3b3100c1228`，事务补列后规则行数仍17、integrity=ok、新哈希`f7fa3cda9dd53dee38651eb8455303db828e581be0c7959a1dd90dbb301c6e63`；迁移后容器running/0、6001监听且新启动日志无缺列/FATAL。
 - stage75b完整门禁：用户仅本次授权明文开发MySQL，临时desktop-e2e覆盖下两节点预检、服务升级、取消、共享历史和清理通过；覆盖随后撤回、Schema残留0、两节点四容器running、临时Ed25519和本机密钥零残留。生产TLS策略未改变。
-- P1-20当前事实：非导出CNG证书`4B6FA6B7CBF774B4BB0BFACEE8EC51EE8A7FC3C1`及CurrentUser信任、受控ACL产物根已建立；手工Authenticode和DigiCert时间戳为Valid。Tauri打包尚未生成正式产物，原生签名剩SignTool PATH问题；内部应用是否需要把签名作为硬门禁待用户决策。
+- P1-20当前事实：正式产物集`inxaiot-desk-buddy-0.1.0-f9adb6ec6845`绑定Tree `45e4aa36a36e0f1389379449e47da24b357c3394`；安装包4501624字节/SHA-256 `f7d2c2a4f355862caa4ab2868c4c7ac1c62c0a34ea279b8c353dc76974134da4`，裸程序12296704字节/SHA-256 `d51c613f1feccbfdf921ac5d812d66c0dbd02775f1c5fe2197127881885c9dd9`，均`NotSigned`，全部文件只读，双入口复验通过，staging残留0。内部证书三个存储区及已知私钥容器匹配均为0。
 
 ### 12.5 当前准入结论
 
 - 阶段7.5-D仍为“整改中”，阶段8继续暂停。
-- P0-06/P0-07/P0-09与P1-08已关闭，Ed25519双节点主链及P0-11故障回滚分支已通过；代码门禁仍不能替代剩余正式桌面和跨服务数据迁移门禁。
+- P0-06/P0-07/P0-09/P0-11与P1-08/P1-20已关闭，Ed25519双节点主链通过；代码和产物门禁仍不能替代剩余正式桌面、安装升级回滚和跨服务数据迁移用户门禁。
 - node121迁移与stage75b完整真实编排已经关闭；生产MySQL受信TLS仍未解决，本次明文授权不改变生产策略。
-- P1-20内部签名技术链已证明可用但Tauri正式产物尚未形成；鉴于应用只内部使用，应由产品层决定“继续修SignTool PATH并保留签名硬门禁”或“取消签名硬门禁，保留SHA-256＋提交/CMS清单追溯”。
-- 阶段7.5-D仍为“整改中”，阶段8继续暂停；不得以重启掩盖Schema漂移，也不得把未受信安装包记为完成。
+- P1-20已按产品决策关闭：内部应用取消签名硬门禁，保留无签名NSIS、SHA-256、提交/Tree清单、受控ACL和不可覆盖产物集；该结论不替代其余P0/正式桌面门禁。
+- 阶段7.5-D仍为“整改中”，阶段8继续暂停；不得以重启掩盖Schema漂移，也不得把来源不明、哈希未复验或可被覆盖的安装包记为内部正式产物。

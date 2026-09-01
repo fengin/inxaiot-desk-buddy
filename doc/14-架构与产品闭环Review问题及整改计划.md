@@ -5,7 +5,7 @@
 | 文档日期 | 2026-08-31 |
 | 适用项目 | `inxaiot-desk-buddy` |
 | 输入基线 | 产品设计v0.4、界面规范、技术方案v1.15、阶段0～7.5代码与验收记录 |
-| 当前状态 | P0-13稳定项目主密钥能力、隔离MySQL集成和自动用户门禁已关闭；非RSA双节点、正式桌面故障场景及外部发布门禁仍阻断阶段8 |
+| 当前状态 | P0-13稳定项目主密钥、Ed25519双节点主链和P1-20内部无签名发布门禁已关闭；正式桌面故障场景、Compose配置传播及生产MySQL TLS仍阻断阶段8 |
 | 目标 | 修复 P0～P2 问题，形成可从空白安装开始操作的真实桌面产品，并为智能屏、网关保留稳定扩展内核 |
 
 ## 1. Review 结论与阶段状态纠正
@@ -315,11 +315,11 @@ TaskSubmissionService
 - 全仓深审P1-09代码/开发集成已关闭：固定工作台Schema边界、平台session只读和工作台读写真实标志通过；生产账号GRANT最小化仍待部署验收。
 - 最终默认Feature Release基于a0008b6，大小11987968字节，SHA-256为FBE660633418908A1784A002899C042DFE893EBCCB34B8E347C7BF5DBB65A1D3，无WebDriver/Fixture标记。
 - P1-08已关闭：用户明确授权后，Agent 0.1.3仅在三个固定根目录按30/14/3天清理直接子目录；两节点实证递归清理边界、停服复制、相对路径、恢复启动和四容器运行状态，所有唯一测试资产精确删除。
-- P1-20采用现有公司内网Jenkins专用Windows Runner，不向GitHub等第三方上传源码；NSIS、CycloneDX、SHA-256、CMS清单签名、Authenticode和外部不可覆盖产物根脚本已建立。受信签名证书尚未激活：当前无企业CA/既有证书，将自签名证书加入CurrentUser Root/TrustedPublisher需要单独明确授权，未获前不得标记关闭。
+- P1-20已按用户确认的内部产品边界关闭：采用公司内网Jenkins专用Windows Runner，不向第三方上传源码；正式链生成无签名NSIS、CycloneDX、SHA-256、Git提交/Tree清单和外部不可覆盖产物集，离线校验明确要求`NotSigned`。外部分发时必须另行立项启用组织代码签名。
 - P0-06已关闭真实门禁：同instanceId第二Operation和不同实例竞争均被拒，释放后fencing递增，唯一租约计数行清理为0。
 - P0-09已关闭：两节点路径穿越和同版本Release均在Compose前拒绝，`current`不变且fixture零残留。
 - P0-11已关闭：两节点Compose启动失败与健康失败均按84/86返回并恢复.env、原镜像和running；SSH/SFTP取消与超时分类通过；整包/rule-engine单服升级停服前只读阻断缺列。node121已完成唯一备份、事务补列、integrity/规则行数/端口/日志验证并恢复RestartCount=0，原备份按30天策略保留。
 - 开发MySQL的私网Preferred TLS在Rustls和Windows Native TLS下均无法完成握手；用户仅授权本次验收明文连接，stage75b两节点真实编排已通过且临时开关撤回。生产默认仍fail-closed，stage75b随机Schema均已清理，平台业务库没有写入。
-- P1-20内部证书、当前用户信任和ACL产物根已经建立，手工Authenticode/RFC3161为Valid；Tauri原生签名剩SignTool PATH集成，尚无正式产物。考虑应用只在内部使用，签名安装包是否继续作为阶段8硬门禁需产品层明确取舍。
+- P1-20正式产物集`inxaiot-desk-buddy-0.1.0-f9adb6ec6845`已通过完整质量门禁和双入口离线复验，安装包/裸程序均为`NotSigned`，哈希分别为`f7d2c2a4f355862caa4ab2868c4c7ac1c62c0a34ea279b8c353dc76974134da4`和`d51c613f1feccbfdf921ac5d812d66c0dbd02775f1c5fe2197127881885c9dd9`，staging残留0；内部证书、三个信任库记录和已知私钥容器已精确清理，受控ACL产物根保留。
 - 7.5-D正式Tauri数据目录切换/回滚/非空阻断复验通过并清理目录；原生第二进程对话框、系统文件对话框和其余故障场景仍需人工/工具恢复后补验。
 - 阶段7.5-D继续保持“整改中”，阶段8、当前Release对外分发和原工作台退役继续冻结。

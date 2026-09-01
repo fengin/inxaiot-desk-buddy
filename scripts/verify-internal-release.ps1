@@ -49,12 +49,21 @@ if ((Split-Path -Leaf $root) -ne $expectedDirectory) {
 }
 
 $manifestNames = @{}
+$roleCounts = @{}
 foreach ($entry in $manifest.files) {
     $name = [string]$entry.name
     if ([System.IO.Path]::GetFileName($name) -ne $name -or $manifestNames.ContainsKey($name)) {
         throw "清单文件名非法或重复：$name"
     }
     $manifestNames[$name] = $true
+    $role = [string]$entry.role
+    if ($role -notin @("portable", "installer", "sbom")) {
+        throw "清单文件角色非法：$role"
+    }
+    if (-not $roleCounts.ContainsKey($role)) {
+        $roleCounts[$role] = 0
+    }
+    $roleCounts[$role] += 1
     $filePath = Join-Path $root $name
     if (-not [System.IO.File]::Exists($filePath)) {
         throw "清单文件不存在：$name"
@@ -67,11 +76,16 @@ foreach ($entry in $manifest.files) {
     if ($hash -ne [string]$entry.sha256) {
         throw "文件哈希不一致：$name"
     }
-    if ($entry.role -in @("portable", "installer")) {
+    if ($role -in @("portable", "installer")) {
         $authenticode = Get-AuthenticodeSignature -FilePath $filePath
         if ($authenticode.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
             throw "内部无签名策略要求NotSigned：$name，实际状态：$($authenticode.Status)"
         }
+    }
+}
+foreach ($requiredRole in @("portable", "installer", "sbom")) {
+    if (-not $roleCounts.ContainsKey($requiredRole) -or $roleCounts[$requiredRole] -ne 1) {
+        throw "清单必须且只能包含一个$requiredRole文件"
     }
 }
 

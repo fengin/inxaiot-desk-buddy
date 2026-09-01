@@ -115,6 +115,22 @@ try {
     Invoke-NativeStep "构建内部NSIS安装包" {
         pnpm tauri build --bundles nsis --config src-tauri/tauri.release.conf.json
     }
+    $buildDependencyMetadata = Join-Path $projectRoot "src-tauri\target\release\deps\inxaiot_desk_buddy_lib.d"
+    if (-not [System.IO.File]::Exists($buildDependencyMetadata)) {
+        throw "缺少Rust Release构建依赖元数据，无法验证内嵌提交"
+    }
+    $expectedBuildCommit = "# env-dep:INX_BUILD_GIT_COMMIT=$shortCommit"
+    $buildMetadataLines = [System.IO.File]::ReadAllLines($buildDependencyMetadata)
+    if ($buildMetadataLines -notcontains $expectedBuildCommit) {
+        throw "Rust Release构建未绑定当前干净Git提交"
+    }
+    $afterBuildStatus = Invoke-NativeText "复查发布构建后的Git状态" { git status --porcelain=v1 --untracked-files=all }
+    $afterBuildCommit = (Invoke-NativeText "复查发布构建后的Git提交" { git rev-parse HEAD }).ToLowerInvariant()
+    $afterBuildTree = (Invoke-NativeText "复查发布构建后的Git Tree" { git rev-parse 'HEAD^{tree}' }).ToLowerInvariant()
+    if (-not [string]::IsNullOrWhiteSpace($afterBuildStatus) -or
+        $afterBuildCommit -ne $commit -or $afterBuildTree -ne $tree) {
+        throw "发布构建期间源码、Git提交或Tree发生变化"
+    }
     $portableSource = Join-Path $projectRoot "src-tauri\target\release\inxaiot-desk-buddy.exe"
     $installerSource = Get-ChildItem (Join-Path $projectRoot "src-tauri\target\release\bundle\nsis") -Filter "*.exe" -File |
         Where-Object { $_.LastWriteTimeUtc -ge $buildStarted } |

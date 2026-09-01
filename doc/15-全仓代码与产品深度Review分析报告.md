@@ -690,7 +690,7 @@ Vue Page
 - 最终默认Feature生产Release基于`a0008b62fd09af4530ee08c2e9b357652f091bdb`，大小11987968字节，SHA-256为`FBE660633418908A1784A002899C042DFE893EBCCB34B8E347C7BF5DBB65A1D3`；包含三项主密钥Command，无WebDriver/Fixture标记，已覆盖1668896至b5d8690的全部P1代码整改。依赖树不存在`rsa 0.10.0-rc.18`，`chacha20`为0.10.2。
 - 真实最终化：随机隔离Schema门禁通过stale fencing、事务触发器失败、成功/重复最终化；门禁前后`FINALIZATION_SCHEMA_RESIDUE_COUNT=0`。
 - 真实SSH/Docker：两节点临时Ed25519通过HostKey、2MiB SFTP、Agent和P1-08 Compose停启/恢复；唯一远端测试资产、公钥和本机密钥目录均精确删除。现有RSA 4096测试私钥仍保持拒绝。
-- 发布基础设施：CycloneDX 1.5实测905组件，Tauri发布配置完成debug/no-bundle构建。创建自签名证书及加入CurrentUser Root/TrustedPublisher的命令在执行前被安全审查拒绝；复查My/Root/TrustedPublisher计数均0，`D:\inxaiot-release-artifacts`不存在，无持久副作用。
+- 发布基础设施：CycloneDX 1.5实测905组件，Tauri发布配置完成debug/no-bundle构建；未签名NSIS冒烟包成功生成并被断言为`NotSigned`，记录大小/哈希后删除，临时配置零残留。发布脚本以target内临时配置注入签名脚本绝对路径，正式产物根要求管理员预置并拒绝宽泛写ACL。创建自签名证书及加入CurrentUser Root/TrustedPublisher的命令在执行前被安全审查拒绝；复查My/Root/TrustedPublisher计数均0，`D:\inxaiot-release-artifacts`不存在，无持久副作用。
 
 ### 12.5 当前准入结论
 

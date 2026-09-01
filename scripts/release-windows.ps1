@@ -88,14 +88,36 @@ $artifactRootFull = [System.IO.Path]::GetFullPath($ArtifactRoot)
 if ($artifactRootFull.StartsWith($projectRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "正式产物根目录必须位于源码仓库之外"
 }
-$null = New-Item -ItemType Directory -Path $artifactRootFull -Force
+if (-not [System.IO.Directory]::Exists($artifactRootFull)) {
+    throw "正式产物根目录必须由管理员预先创建并配置ACL：$artifactRootFull"
+}
 $artifactRootItem = Get-Item -LiteralPath $artifactRootFull
 if (($artifactRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw "正式产物根目录不能是联接或符号链接"
 }
+$broadWriteSids = @("S-1-1-0", "S-1-5-11", "S-1-5-32-545")
+$writeRights = [System.Security.AccessControl.FileSystemRights]::Write -bor
+    [System.Security.AccessControl.FileSystemRights]::Modify -bor
+    [System.Security.AccessControl.FileSystemRights]::FullControl
+$unsafeRules = @((Get-Acl -LiteralPath $artifactRootFull).Access | Where-Object {
+    if ($_.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) {
+        return $false
+    }
+    try {
+        $sid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    }
+    catch {
+        return $true
+    }
+    return $sid -in $broadWriteSids -and ($_.FileSystemRights -band $writeRights) -ne 0
+})
+if ($unsafeRules.Count -gt 0) {
+    throw "正式产物根目录向Everyone、Authenticated Users或Users开放写权限"
+}
 
 Push-Location $projectRoot
 $staging = $null
+$generatedTauriConfig = $null
 try {
     $status = Invoke-NativeText "读取Git状态" { git status --porcelain=v1 --untracked-files=all }
     if (-not [string]::IsNullOrWhiteSpace($status)) {
@@ -145,9 +167,21 @@ try {
     Invoke-NativeStep "生成CycloneDX SBOM" {
         & (Join-Path $PSScriptRoot "generate-sbom.ps1") -OutputPath (Join-Path $staging "sbom.cdx.json") -Commit $commit
     }
+    $releaseConfigPath = Join-Path $projectRoot "src-tauri\tauri.release.conf.json"
+    $releaseConfig = [System.IO.File]::ReadAllText($releaseConfigPath) | ConvertFrom-Json
+    $signArguments = @($releaseConfig.bundle.windows.signCommand.args)
+    $relativeSignScriptIndex = [Array]::IndexOf($signArguments, "scripts/sign-windows.ps1")
+    if ($relativeSignScriptIndex -lt 0) {
+        throw "Tauri发布配置缺少受控签名脚本占位路径"
+    }
+    $releaseConfig.bundle.windows.signCommand.args[$relativeSignScriptIndex] = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "sign-windows.ps1"))
+    $generatedConfigRoot = Join-Path $projectRoot "src-tauri\target\release-evidence"
+    $null = New-Item -ItemType Directory -Path $generatedConfigRoot -Force
+    $generatedTauriConfig = Join-Path $generatedConfigRoot ("tauri.release." + [Guid]::NewGuid().ToString("N") + ".json")
+    [System.IO.File]::WriteAllText($generatedTauriConfig, ($releaseConfig | ConvertTo-Json -Depth 30), [System.Text.UTF8Encoding]::new($false))
     $buildStarted = (Get-Date).ToUniversalTime().AddMinutes(-1)
     Invoke-NativeStep "构建并签名NSIS安装包" {
-        pnpm tauri build --bundles nsis --config src-tauri/tauri.release.conf.json
+        pnpm tauri build --bundles nsis --config $generatedTauriConfig
     }
 
     $portableSource = Join-Path $projectRoot "src-tauri\target\release\inxaiot-desk-buddy.exe"
@@ -235,6 +269,14 @@ try {
     Write-Host "SIGNING_CERTIFICATE=$thumbprint"
 }
 finally {
+    if ($null -ne $generatedTauriConfig -and (Test-Path -LiteralPath $generatedTauriConfig)) {
+        $generatedConfigFull = [System.IO.Path]::GetFullPath($generatedTauriConfig)
+        $allowedConfigRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "src-tauri\target\release-evidence"))
+        if ($generatedConfigFull.StartsWith($allowedConfigRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -and
+            (Split-Path -Leaf $generatedConfigFull).StartsWith("tauri.release.")) {
+            Remove-Item -LiteralPath $generatedConfigFull -Force
+        }
+    }
     if ($null -ne $staging -and (Test-Path -LiteralPath $staging)) {
         $stagingFull = [System.IO.Path]::GetFullPath($staging)
         if ($stagingFull.StartsWith($artifactRootFull + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -and

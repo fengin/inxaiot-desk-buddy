@@ -12,6 +12,7 @@
 - `scripts/sign-windows.ps1`要求显式40位证书指纹、Code Signing EKU、有效私钥、有效信任链和RFC 3161时间戳，拒绝签署`src-tauri/target`之外的文件。
 - `scripts/release-windows.ps1`要求Git工作区干净，以版本+12位提交ID创建不可覆盖产物目录，输出签名安装包、签名裸程序、SBOM、证书公钥、SHA-256、提交/Tree清单和CMS分离签名。
 - `scripts/verify-release.ps1`离线复验CMS、证书链、清单文件大小/SHA-256和安装包/裸程序Authenticode签名。
+- Tauri/NSIS未签名冒烟构建已通过，生成包被明确识别为`NotSigned`并在记录大小/SHA-256后删除；该证据只证明安装包工具链，不构成发布产物。
 
 当前未完成：受信Code Signing证书尚未创建，首个签名产物集尚未生成，因此P1-20仍为未关闭。
 
@@ -42,8 +43,9 @@
 
 ### 2.3 产物基础设施
 
-- 根目录：`D:\inxaiot-release-artifacts`，位于源码仓库之外且不得为联接/符号链接。
+- 根目录：`D:\inxaiot-release-artifacts`，必须由管理员预先创建，位于源码仓库之外且不得为联接/符号链接；发布脚本不会自行创建或放宽ACL。
 - ACL只允许发布Runner身份、`SYSTEM`和本机`Administrators`完全控制，移除继承权限。
+- 发布前脚本按SID拒绝Everyone、Authenticated Users或Builtin Users的写入/修改/完全控制权限。
 - 每个目录名固定为`inxaiot-desk-buddy-{version}-{commit12}`，存在时发布脚本拒绝覆盖。
 - 产物文件发布后设置只读属性；旧版本不自动删除，作为回滚源。
 - 目录仍需纳入公司备份和异机复制。单机D盘不是最终灾备，P1-20关闭证据只证明构建、签名、追溯和不可覆盖契约。

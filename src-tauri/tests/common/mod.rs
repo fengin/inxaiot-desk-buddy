@@ -14,7 +14,6 @@ use inxaiot_desk_buddy_lib::core::secret::SecretValue;
 use inxaiot_desk_buddy_lib::infrastructure::remote::{RemoteSession, RusshConnector};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone)]
 pub struct RemoteTestConfig {
     pub hosts: Vec<String>,
     pub user: String,

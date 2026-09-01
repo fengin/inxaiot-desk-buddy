@@ -9,7 +9,7 @@ use inxaiot_desk_buddy_lib::domain::aio::deployment::{
 };
 use inxaiot_desk_buddy_lib::domain::aio::release::{
     ReleaseImage, ReleaseManifest, ReleaseTemplates, inspect_image_archive,
-    inspect_release_directory,
+    inspect_release_directory, sha256_file,
 };
 use inxaiot_desk_buddy_lib::domain::aio::release_render::ReleaseRenderContext;
 use inxaiot_desk_buddy_lib::infrastructure::deployment_remote::{
@@ -162,6 +162,7 @@ async fn full_upgrade_backs_up_installs_checks_and_cleans_exact_staging() {
         std::fs::write(&env, rendered.env).expect("node env");
         std::fs::write(&host_info, rendered.host_info_json).expect("host info");
         std::fs::write(&rendered_compose, rendered.compose_preview).expect("node compose");
+        let expected_compose_sha256 = sha256_file(&rendered_compose).expect("compose sha256");
         let session = connect_pinned(&config, host).await;
         let mac = &plan.target_macs[index];
         let staging = format!("/opt/data/.inxaiot-desk-buddy/{operation_id}/{mac}");
@@ -207,9 +208,25 @@ async fn full_upgrade_backs_up_installs_checks_and_cleans_exact_staging() {
             BTreeMap::new(),
         )
         .await;
+        let remote_compose_hash = run(
+            &session,
+            "sha256sum",
+            vec![
+                "--".into(),
+                "/opt/data/deploy/inxvision-edge/current/docker-compose.yml".into(),
+            ],
+            BTreeMap::new(),
+        )
+        .await;
         session.disconnect().await.expect("disconnect");
         result.expect("full upgrade");
         assert_eq!(current.exit_status, 0);
+        assert_eq!(remote_compose_hash.exit_status, 0);
+        assert_eq!(
+            remote_compose_hash.stdout.split_whitespace().next(),
+            Some(expected_compose_sha256.as_str()),
+            "rendered Compose did not reach remote current release"
+        );
     }
     let services = images
         .iter()

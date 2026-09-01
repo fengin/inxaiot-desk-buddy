@@ -57,5 +57,8 @@ mod tests {
         assert!(AGENT_SOURCE.contains("stopping current release for consistent database backup"));
         assert!(AGENT_SOURCE.contains("target_file=\"$backup_dir/data/$relative_path\""));
         assert!(AGENT_SOURCE.contains("REMOTE_COMPOSE"));
+        assert!(
+            AGENT_SOURCE.contains("cp \"$REMOTE_COMPOSE\" \"$new_release_dir/docker-compose.yml\"")
+        );
     }
 }

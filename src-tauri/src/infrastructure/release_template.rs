@@ -242,14 +242,15 @@ mod tests {
     #[test]
     fn renders_env_json_and_compose_with_defaults() {
         let output = render_release_templates(
-            "RELEASE={{release.version}}\nAPP_IMAGE={{images.device-edge}}\n",
+            "RELEASE={{release.version}}\nAPP_IMAGE={{images.device-edge}}\nCONFIG_MARKER={{node.name}}\n",
             r#"{"name":"{{node.name}}","password":"{{platform.password}}"}"#,
-            "services:\n  app:\n    image: ${APP_IMAGE}\n  fallback:\n    image: ${OTHER:-busybox:latest}\n",
+            "services:\n  app:\n    image: ${APP_IMAGE}\n    labels:\n      config-marker: ${CONFIG_MARKER}\n  fallback:\n    image: ${OTHER:-busybox:latest}\n",
             &context(),
         )
         .expect("render");
         assert!(output.env.contains("APP_IMAGE=device-edge:1"));
         assert!(output.host_info_json.contains(r#"p\"ass"#));
+        assert!(output.compose_preview.contains("config-marker: AIO-1"));
         assert!(!output.compose_preview.contains("${"));
     }
 

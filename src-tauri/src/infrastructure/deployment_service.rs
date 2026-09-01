@@ -120,9 +120,6 @@ async fn launch_deployment_inner(
         &ReleaseProfileRepository::new(pools.workbench.clone()),
         local_project_id,
         "default",
-        &connection.db_password,
-        &operator,
-        &instance_id,
     )
     .await
     .map_err(map_formal_error)?;

@@ -2,9 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use inxaiot_desk_buddy_lib::formal::credential_crypto::{
-    ProjectMasterKey, ReleaseCredentials, encrypt_release_credentials_legacy,
-};
+use inxaiot_desk_buddy_lib::formal::credential_crypto::{ProjectMasterKey, ReleaseCredentials};
 use inxaiot_desk_buddy_lib::formal::error::FormalError;
 use inxaiot_desk_buddy_lib::formal::mysql::{MySqlConnectionSpec, MySqlTlsMode, ProjectMySqlPools};
 use inxaiot_desk_buddy_lib::formal::release_master_key::{
@@ -189,8 +187,8 @@ async fn encrypted_profile_version_audit_and_exact_cleanup() {
 }
 
 #[tokio::test]
-#[ignore = "migrates, transfers and exactly removes one isolated release profile"]
-async fn project_master_key_migration_and_cross_machine_transfer() {
+#[ignore = "transfers and exactly removes one isolated release profile"]
+async fn project_master_key_cross_machine_transfer() {
     let config = config();
     let pools = ProjectMySqlPools::connect(&config)
         .await
@@ -205,51 +203,24 @@ async fn project_master_key_migration_and_cross_machine_transfer() {
     let first_project_id = format!("project-{suffix}");
     let second_project_id = format!("project-copy-{suffix}");
     let credentials = credentials();
-    let legacy_values = values();
-    let legacy_envelope = encrypt_release_credentials_legacy(&config.password, &credentials)
-        .expect("encrypt isolated legacy credentials");
-    sqlx::query(
-        "INSERT INTO aio_release_profile \
-         (profile_key, env_template, compose_template, platform_host, platform_api_port, \
-          platform_mqtt_host, platform_mqtt_port, ssh_port, ssh_timeout_seconds, \
-          aio_data_root, aio_deploy_root, credential_scheme, credential_key_version, \
-          credential_salt, credential_nonce, credential_ciphertext, version, updated_by, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'key-migration-test', UTC_TIMESTAMP(6))",
-    )
-    .bind(&profile_key)
-    .bind(&legacy_values.env_template)
-    .bind(&legacy_values.compose_template)
-    .bind(&legacy_values.platform_host)
-    .bind(u32::from(legacy_values.platform_api_port))
-    .bind(&legacy_values.platform_mqtt_host)
-    .bind(u32::from(legacy_values.platform_mqtt_port))
-    .bind(u32::from(legacy_values.ssh_port))
-    .bind(legacy_values.ssh_timeout_seconds)
-    .bind(&legacy_values.aio_data_root)
-    .bind(&legacy_values.aio_deploy_root)
-    .bind(&legacy_envelope.scheme)
-    .bind(legacy_envelope.key_version)
-    .bind(legacy_envelope.salt.as_slice())
-    .bind(legacy_envelope.nonce.as_slice())
-    .bind(&legacy_envelope.ciphertext)
-    .execute(pools.workbench())
-        .await
-        .expect("create isolated legacy profile");
-
     let first_store = Arc::new(MemorySecretStore::default());
     let first_manager = ReleaseMasterKeyManager::new(first_store);
-    let migrated = first_manager
-        .load_profile(
+    let created = first_manager
+        .save_profile(
             &repository,
             &first_project_id,
-            &profile_key,
-            &config.password,
-            "key-migration-test",
-            "instance-migrate",
+            ReleaseProfileWrite {
+                profile_key: profile_key.clone(),
+                values: values(),
+                credentials: credentials.clone(),
+                expected_version: None,
+                operator_name: "key-transfer-test".into(),
+                instance_id: "instance-create".into(),
+            },
         )
         .await
-        .expect("migrate legacy ciphertext");
-    assert_eq!(migrated.credentials, credentials);
+        .expect("create current encrypted profile");
+    assert_eq!(created.credentials, credentials);
     let metadata = repository
         .credential_metadata(&profile_key)
         .await
@@ -257,19 +228,6 @@ async fn project_master_key_migration_and_cross_machine_transfer() {
         .expect("profile metadata");
     assert!(metadata.is_project_key());
     assert_eq!(metadata.key_version, 1);
-
-    let after_database_password_change = first_manager
-        .load_profile(
-            &repository,
-            &first_project_id,
-            &profile_key,
-            "completely-different-database-password",
-            "key-migration-test",
-            "instance-read",
-        )
-        .await
-        .expect("database password is no longer the credential key");
-    assert_eq!(after_database_password_change.credentials, credentials);
 
     let binding = ReleaseKeyProjectBinding {
         platform_url: "http://isolated-platform.example:8055".into(),
@@ -284,9 +242,6 @@ async fn project_master_key_migration_and_cross_machine_transfer() {
             &repository,
             &first_project_id,
             &profile_key,
-            &config.password,
-            "key-migration-test",
-            "instance-export",
             &binding,
             &package_path,
             "isolated-strong-passphrase",
@@ -317,14 +272,7 @@ async fn project_master_key_migration_and_cross_machine_transfer() {
         .expect("import key package on another machine");
     assert_eq!(
         second_manager
-            .load_profile(
-                &repository,
-                &second_project_id,
-                &profile_key,
-                "unrelated-database-password",
-                "key-migration-test",
-                "instance-copy-read",
-            )
+            .load_profile(&repository, &second_project_id, &profile_key,)
             .await
             .expect("second machine decrypts profile")
             .credentials,

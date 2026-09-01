@@ -334,33 +334,6 @@ impl ProjectManagementPort for Stage75Adapter<'_> {
         input: ProjectInput,
     ) -> AppResult<ProjectOverview> {
         self.ensure_project_mutable(project_id).await?;
-        if let Some(new_password) = input
-            .db_password
-            .as_deref()
-            .filter(|password| !password.is_empty())
-        {
-            let existing = self
-                .projects()
-                .connection_secrets(project_id)
-                .await
-                .map_err(map_formal_error)?;
-            if new_password != existing.db_password {
-                let pools = self.ready_pools(project_id).await?;
-                let session = self.session_view(project_id).await?;
-                let operator = session.username.as_deref().unwrap_or("local-workbench");
-                self.release_master_keys()
-                    .migrate_if_needed(
-                        &ReleaseProfileRepository::new(pools.workbench.clone()),
-                        project_id,
-                        "default",
-                        &existing.db_password,
-                        operator,
-                        application_instance_id(),
-                    )
-                    .await
-                    .map_err(map_formal_error)?;
-            }
-        }
         self.register_secrets(input.db_password.clone());
         self.close_runtime_if_open(project_id).await;
         let record = self
@@ -640,33 +613,19 @@ impl ProjectAccessPort for Stage75Adapter<'_> {
 
 impl ReleaseProfileManagementPort for Stage75Adapter<'_> {
     async fn get_release_profile(&self, project_id: &str) -> AppResult<Option<ReleaseProfileView>> {
-        let session = self.require_active_session(project_id).await?;
-        let operator_name = session
-            .username
-            .ok_or_else(|| AppError::Authentication("平台会话缺少用户名".into()))?;
+        self.require_active_session(project_id).await?;
         let pools = self.ready_pools(project_id).await?;
-        let connection = self
-            .projects()
-            .connection_secrets(project_id)
-            .await
-            .map_err(map_formal_error)?;
         match self
             .release_master_keys()
             .load_profile(
                 &ReleaseProfileRepository::new(pools.workbench.clone()),
                 project_id,
                 "default",
-                &connection.db_password,
-                &operator_name,
-                application_instance_id(),
             )
             .await
         {
             Ok(record) => {
-                self.register_secrets(
-                    stored_release_secret_values(&record.credentials)
-                        .chain([connection.db_password]),
-                );
+                self.register_secrets(stored_release_secret_values(&record.credentials));
                 Ok(Some(map_release_profile(record)))
             }
             Err(FormalError::NotFound(_)) => Ok(None),
@@ -693,17 +652,11 @@ impl ReleaseProfileManagementPort for Stage75Adapter<'_> {
             .username
             .ok_or_else(|| AppError::Authentication("平台会话缺少用户名".into()))?;
         let pools = self.ready_pools(project_id).await?;
-        let connection = self
-            .projects()
-            .connection_secrets(project_id)
-            .await
-            .map_err(map_formal_error)?;
         let record = self
             .release_master_keys()
             .save_profile(
                 &ReleaseProfileRepository::new(pools.workbench.clone()),
                 project_id,
-                &connection.db_password,
                 ReleaseProfileWrite {
                     profile_key: "default".into(),
                     values: StoredReleaseProfileValues {
@@ -744,14 +697,11 @@ impl ReleaseProfileManagementPort for Stage75Adapter<'_> {
         request: ReleaseMasterKeyTransferRequest,
     ) -> AppResult<ReleaseMasterKeyOperationResult> {
         self.register_secrets([request.passphrase.clone()]);
-        let session = self.require_active_session(project_id).await?;
-        let operator_name = session
-            .username
-            .ok_or_else(|| AppError::Authentication("平台会话缺少用户名".into()))?;
+        self.require_active_session(project_id).await?;
         let pools = self.ready_pools(project_id).await?;
-        let connection = self
+        let project = self
             .projects()
-            .connection_secrets(project_id)
+            .get(project_id)
             .await
             .map_err(map_formal_error)?;
         let key_version = self
@@ -760,10 +710,7 @@ impl ReleaseProfileManagementPort for Stage75Adapter<'_> {
                 &ReleaseProfileRepository::new(pools.workbench.clone()),
                 project_id,
                 "default",
-                &connection.db_password,
-                &operator_name,
-                application_instance_id(),
-                &release_key_binding(&connection.project),
+                &release_key_binding(&project),
                 Path::new(request.file_path.trim()),
                 &request.passphrase,
             )
@@ -881,32 +828,18 @@ impl Stage75Adapter<'_> {
         project_id: &str,
         request: &HostKeyCaptureRequest,
     ) -> AppResult<(RemoteTarget, HostKeyIdentity)> {
-        let session = self.require_active_session(project_id).await?;
-        let operator_name = session
-            .username
-            .ok_or_else(|| AppError::Authentication("平台会话缺少用户名".into()))?;
+        self.require_active_session(project_id).await?;
         let pools = self.ready_pools(project_id).await?;
-        let connection = self
-            .projects()
-            .connection_secrets(project_id)
-            .await
-            .map_err(map_formal_error)?;
         let profile = self
             .release_master_keys()
             .load_profile(
                 &ReleaseProfileRepository::new(pools.workbench.clone()),
                 project_id,
                 "default",
-                &connection.db_password,
-                &operator_name,
-                application_instance_id(),
             )
             .await
             .map_err(map_formal_error)?;
-        self.register_secrets(
-            stored_release_secret_values(&profile.credentials)
-                .chain([connection.db_password.clone()]),
-        );
+        self.register_secrets(stored_release_secret_values(&profile.credentials));
         let target = RemoteTarget {
             host: request.host.trim().into(),
             port: request.port.unwrap_or(profile.values.ssh_port),

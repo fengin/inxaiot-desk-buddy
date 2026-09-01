@@ -25,11 +25,10 @@ use crate::domain::aio::release::{
     sha256_file,
 };
 use crate::formal::app_state::FormalAppState;
-use crate::formal::project_repository::LocalProjectRepository;
 use crate::formal::release_master_key::ReleaseMasterKeyManager;
 use crate::formal::release_profile_repository::{ReleaseProfileRecord, ReleaseProfileRepository};
 use crate::formal::resource_lease_repository::ResourceLeaseRepository;
-use crate::infrastructure::aio_assets_service::{application_instance_id, project_operator};
+use crate::infrastructure::aio_assets_service::project_operator;
 use crate::infrastructure::local_sqlite::host_key_repository::HostKeyRepository;
 use crate::infrastructure::project_context::{map_formal_error, project_database};
 use crate::infrastructure::remote::RusshConnector;
@@ -70,7 +69,7 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
         let artifact_fingerprint = inspected.fingerprint;
         let runtime = inspected.runtime;
 
-        let operator = match project_operator(self.state, project_id).await {
+        let session_ready = match project_operator(self.state, project_id).await {
             Ok(operator) => {
                 checks.push(passed(
                     "project_session",
@@ -78,7 +77,7 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
                     None,
                     format!("已登录：{operator}"),
                 ));
-                Some(operator)
+                true
             }
             Err(error) => {
                 checks.push(failed(
@@ -88,7 +87,7 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
                     error.to_string(),
                     remediation("login_project", "重新登录", None, None),
                 ));
-                None
+                false
             }
         };
 
@@ -113,38 +112,16 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
                 return Ok(report(checks, normalized, None, checked_at));
             }
         };
-        let projects = LocalProjectRepository::new(
-            self.state.local_store.pool().clone(),
-            self.state.secret_store.clone(),
-        );
-        let connection = match projects.connection_secrets(project_id).await {
-            Ok(value) => value,
-            Err(error) => {
-                checks.push(failed(
-                    "release_profile",
-                    "发布参数",
-                    None,
-                    map_formal_error(error).to_string(),
-                    remediation(
-                        "open_release_profile",
-                        "维护发布参数",
-                        Some("/aio/release"),
-                        None,
-                    ),
-                ));
-                return Ok(report(checks, normalized, None, checked_at));
-            }
-        };
-        let Some(operator) = operator else {
+        if !session_ready {
             checks.push(failed(
                 "release_profile",
                 "发布参数",
                 None,
-                "平台会话未就绪，发布凭据读取与旧密文迁移已阻止".into(),
+                "平台会话未就绪，发布凭据读取已阻止".into(),
                 remediation("login_project", "重新登录", None, None),
             ));
             return Ok(report(checks, normalized, None, checked_at));
-        };
+        }
         let profile = match ReleaseMasterKeyManager::with_local_registry(
             self.state.secret_store.clone(),
             self.state.local_store.pool().clone(),
@@ -153,9 +130,6 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
             &ReleaseProfileRepository::new(pools.workbench.clone()),
             project_id,
             "default",
-            &connection.db_password,
-            &operator,
-            application_instance_id(),
         )
         .await
         {

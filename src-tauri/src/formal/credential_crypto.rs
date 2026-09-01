@@ -8,11 +8,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use super::error::{FormalError, FormalResult};
 
-pub const LEGACY_CREDENTIAL_SCHEME: &str = "argon2id-aes256gcm";
 pub const PROJECT_KEY_CREDENTIAL_SCHEME: &str = "argon2id-aes256gcm-project-key";
 pub const PROJECT_MASTER_KEY_BYTES: usize = 32;
-const LEGACY_KEY_VERSION: u32 = 1;
-const LEGACY_ASSOCIATED_DATA: &[u8] = b"inxaiot-desk-buddy:aio-release-profile:v1";
 const PROJECT_KEY_ASSOCIATED_DATA_PREFIX: &str =
     "inxaiot-desk-buddy:aio-release-profile:project-key:v1";
 
@@ -101,10 +98,6 @@ pub struct CredentialMetadata {
 }
 
 impl CredentialMetadata {
-    pub fn is_legacy(&self) -> bool {
-        self.scheme == LEGACY_CREDENTIAL_SCHEME && self.key_version == LEGACY_KEY_VERSION
-    }
-
     pub fn is_project_key(&self) -> bool {
         self.scheme == PROJECT_KEY_CREDENTIAL_SCHEME && self.key_version > 0
     }
@@ -124,22 +117,6 @@ pub fn encrypt_release_credentials(
     )
 }
 
-pub fn encrypt_release_credentials_legacy(
-    database_password: &str,
-    credentials: &ReleaseCredentials,
-) -> FormalResult<CredentialEnvelope> {
-    if database_password.is_empty() {
-        return Err(FormalError::InvalidConfig("数据库密码不能为空".into()));
-    }
-    encrypt_with_material(
-        database_password.as_bytes(),
-        LEGACY_CREDENTIAL_SCHEME,
-        LEGACY_KEY_VERSION,
-        LEGACY_ASSOCIATED_DATA,
-        credentials,
-    )
-}
-
 pub fn decrypt_release_credentials(
     key: &ProjectMasterKey,
     envelope: &CredentialEnvelope,
@@ -154,20 +131,6 @@ pub fn decrypt_release_credentials(
     }
     let associated_data = project_key_associated_data(envelope.key_version);
     decrypt_with_material(key.material(), envelope, associated_data.as_bytes())
-}
-
-pub fn decrypt_release_credentials_legacy(
-    database_password: &str,
-    envelope: &CredentialEnvelope,
-) -> FormalResult<ReleaseCredentials> {
-    if envelope.scheme != LEGACY_CREDENTIAL_SCHEME || envelope.key_version != LEGACY_KEY_VERSION {
-        return Err(FormalError::InvalidConfig("不支持的旧凭据加密格式".into()));
-    }
-    decrypt_with_material(
-        database_password.as_bytes(),
-        envelope,
-        LEGACY_ASSOCIATED_DATA,
-    )
 }
 
 fn encrypt_with_material(
@@ -262,10 +225,8 @@ fn project_key_associated_data(version: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CredentialMetadata, LEGACY_CREDENTIAL_SCHEME, PROJECT_KEY_CREDENTIAL_SCHEME,
-        ProjectMasterKey, ReleaseCredentials, decrypt_release_credentials,
-        decrypt_release_credentials_legacy, encrypt_release_credentials,
-        encrypt_release_credentials_legacy,
+        PROJECT_KEY_CREDENTIAL_SCHEME, ProjectMasterKey, ReleaseCredentials,
+        decrypt_release_credentials, encrypt_release_credentials,
     };
 
     fn fixture() -> ReleaseCredentials {
@@ -302,27 +263,5 @@ mod tests {
             ProjectMasterKey::from_bytes(4, key.material().to_vec()).expect("wrong version key");
         assert!(decrypt_release_credentials(&wrong_version, &envelope).is_err());
         assert!(!format!("{key:?}").contains(&hex::encode(key.material())));
-    }
-
-    #[test]
-    fn legacy_envelope_remains_readable_only_by_legacy_path() {
-        let credentials = fixture();
-        let envelope = encrypt_release_credentials_legacy("database-password", &credentials)
-            .expect("encrypt legacy credentials");
-        assert_eq!(envelope.scheme, LEGACY_CREDENTIAL_SCHEME);
-        assert_eq!(
-            decrypt_release_credentials_legacy("database-password", &envelope)
-                .expect("decrypt legacy credentials"),
-            credentials
-        );
-        assert!(decrypt_release_credentials_legacy("wrong-password", &envelope).is_err());
-        assert!(
-            CredentialMetadata {
-                scheme: envelope.scheme,
-                key_version: envelope.key_version,
-            }
-            .is_legacy()
-        );
-        assert!(!format!("{credentials:?}").contains("auth-key-secret"));
     }
 }

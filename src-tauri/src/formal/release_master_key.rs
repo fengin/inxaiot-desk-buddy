@@ -77,14 +77,6 @@ struct EncryptedKeyPackage {
     ciphertext: String,
 }
 
-struct KeyResolutionContext<'a> {
-    project_id: &'a str,
-    profile_key: &'a str,
-    legacy_database_password: &'a str,
-    operator_name: &'a str,
-    instance_id: &'a str,
-}
-
 #[derive(Clone)]
 pub struct ReleaseMasterKeyManager {
     secrets: Arc<dyn SecretStore>,
@@ -111,28 +103,13 @@ impl ReleaseMasterKeyManager {
         repository: &ReleaseProfileRepository,
         project_id: &str,
         profile_key: &str,
-        legacy_database_password: &str,
-        operator_name: &str,
-        instance_id: &str,
     ) -> FormalResult<ReleaseProfileRecord> {
         let _guard = RELEASE_KEY_OPERATION_LOCK.lock().await;
         let metadata = repository
             .credential_metadata(profile_key)
             .await?
             .ok_or_else(|| FormalError::NotFound(format!("发布配置不存在：{profile_key}")))?;
-        let key = self
-            .resolve_key_locked(
-                repository,
-                &KeyResolutionContext {
-                    project_id,
-                    profile_key,
-                    legacy_database_password,
-                    operator_name,
-                    instance_id,
-                },
-                metadata,
-            )
-            .await?;
+        let key = self.resolve_key_locked(project_id, metadata).await?;
         repository.get(&key, profile_key).await
     }
 
@@ -140,27 +117,12 @@ impl ReleaseMasterKeyManager {
         &self,
         repository: &ReleaseProfileRepository,
         project_id: &str,
-        legacy_database_password: &str,
         write: ReleaseProfileWrite,
     ) -> FormalResult<ReleaseProfileRecord> {
         let _guard = RELEASE_KEY_OPERATION_LOCK.lock().await;
         let metadata = repository.credential_metadata(&write.profile_key).await?;
         let (key, created) = match metadata {
-            Some(metadata) => (
-                self.resolve_key_locked(
-                    repository,
-                    &KeyResolutionContext {
-                        project_id,
-                        profile_key: &write.profile_key,
-                        legacy_database_password,
-                        operator_name: &write.operator_name,
-                        instance_id: &write.instance_id,
-                    },
-                    metadata,
-                )
-                .await?,
-                false,
-            ),
+            Some(metadata) => (self.resolve_key_locked(project_id, metadata).await?, false),
             None => self.ensure_key(project_id, 1).await?,
         };
         let result = repository.save(&key, write).await;
@@ -170,43 +132,11 @@ impl ReleaseMasterKeyManager {
         result
     }
 
-    pub async fn migrate_if_needed(
-        &self,
-        repository: &ReleaseProfileRepository,
-        project_id: &str,
-        profile_key: &str,
-        legacy_database_password: &str,
-        operator_name: &str,
-        instance_id: &str,
-    ) -> FormalResult<()> {
-        let _guard = RELEASE_KEY_OPERATION_LOCK.lock().await;
-        let Some(metadata) = repository.credential_metadata(profile_key).await? else {
-            return Ok(());
-        };
-        self.resolve_key_locked(
-            repository,
-            &KeyResolutionContext {
-                project_id,
-                profile_key,
-                legacy_database_password,
-                operator_name,
-                instance_id,
-            },
-            metadata,
-        )
-        .await?;
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub async fn export_key_package(
         &self,
         repository: &ReleaseProfileRepository,
         project_id: &str,
         profile_key: &str,
-        legacy_database_password: &str,
-        operator_name: &str,
-        instance_id: &str,
         binding: &ReleaseKeyProjectBinding,
         file_path: &Path,
         passphrase: &str,
@@ -216,19 +146,7 @@ impl ReleaseMasterKeyManager {
             .credential_metadata(profile_key)
             .await?
             .ok_or_else(|| FormalError::NotFound(format!("发布配置不存在：{profile_key}")))?;
-        let key = self
-            .resolve_key_locked(
-                repository,
-                &KeyResolutionContext {
-                    project_id,
-                    profile_key,
-                    legacy_database_password,
-                    operator_name,
-                    instance_id,
-                },
-                metadata,
-            )
-            .await?;
+        let key = self.resolve_key_locked(project_id, metadata).await?;
         let project_binding = binding.fingerprint()?;
         let package = encrypt_transfer_package(&key, &project_binding, passphrase)?;
         let contents = serde_json::to_vec_pretty(&package)
@@ -317,44 +235,21 @@ impl ReleaseMasterKeyManager {
 
     async fn resolve_key_locked(
         &self,
-        repository: &ReleaseProfileRepository,
-        context: &KeyResolutionContext<'_>,
+        project_id: &str,
         metadata: CredentialMetadata,
     ) -> FormalResult<ProjectMasterKey> {
-        if metadata.is_project_key() {
-            let key = self.load_key(context.project_id, metadata.key_version)?;
-            self.track_key(
-                context.project_id,
-                metadata.key_version,
-                &key_reference(context.project_id, metadata.key_version)?,
-            )
-            .await?;
-            return Ok(key);
+        if !metadata.is_project_key() {
+            return Err(FormalError::InvalidConfig(
+                "发布凭据来自不再支持的旧开发格式，请重建发布参数".into(),
+            ));
         }
-        if !metadata.is_legacy() {
-            return Err(FormalError::InvalidConfig(format!(
-                "不支持的发布凭据加密格式：{} v{}",
-                metadata.scheme, metadata.key_version
-            )));
-        }
-        let (key, created) = self.ensure_key(context.project_id, 1).await?;
-        let migration = repository
-            .migrate_legacy_credentials(
-                context.profile_key,
-                context.legacy_database_password,
-                &key,
-                context.operator_name,
-                context.instance_id,
-            )
-            .await;
-        if let Err(error) = migration {
-            if created {
-                let _ = self
-                    .delete_key_tracked(context.project_id, key.version())
-                    .await;
-            }
-            return Err(error);
-        }
+        let key = self.load_key(project_id, metadata.key_version)?;
+        self.track_key(
+            project_id,
+            metadata.key_version,
+            &key_reference(project_id, metadata.key_version)?,
+        )
+        .await?;
         Ok(key)
     }
 

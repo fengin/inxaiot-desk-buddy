@@ -655,7 +655,7 @@ Vue Page
 | P0-08 | 能力已关闭 | 正式Outcome Reconciler已接入；缺失Handler、spawn失败、panic、abort、cancel统一持久化；dispatching状态消除取消边界；广播滞后审计未跟踪任务 | 需桌面任务panic/缺失Handler故障注入门禁 |
 | P0-09 | 已关闭 | 两节点`../escape-*`以40拒绝、同版本以37拒绝，事件流均未进入Compose；current不变且fixture零残留 | 无 |
 | P0-10 | 代码已关闭，Linux门禁待补 | 渲染Compose写入每节点任务文件、SFTP上传并传递REMOTE_COMPOSE，Agent覆盖Release内Compose后才启动；全部上传文件带SHA-256 | 需两节点修改Compose值后远端实际文件/容器配置变化门禁 |
-| P0-11 | 故障分支通过，数据迁移阻断 | Agent 0.1.3两节点Compose启动失败/健康失败分别以84/86返回并发出rollback success，恢复.env哈希、原镜像和running；SSH非零/超时/取消及SFTP预取消通过 | node121旧rule-engine SQLite缺少record_type，跨服务重启前缺少Schema迁移/预检契约；修复和两节点Compose配置传播后才能关闭 |
+| P0-11 | 故障分支与防复发代码通过，现网迁移阻断 | Agent 0.1.3两节点Compose启动失败/健康失败分别以84/86返回并恢复.env/原镜像/running；SSH取消通过；整包/rule-engine单服升级新增sqlite3 -readonly缺列阻断，首次部署/其他服务不误拦截 | node121旧rule-engine SQLite仍缺少record_type；完成受控备份迁移、服务恢复和两节点Compose配置传播后才能关闭 |
 | P0-12 | 真实集成已通过，桌面过期门禁待补 | 缺失expires_in强制30分钟；每60秒真实Token只读校验；401/403清理会话，网络异常fail-closed；授权平台真实登录+ /sys/menu/nav 契约通过 | 需桌面Token撤销/到期后页面立即关闭业务入口门禁 |
 | P0-13 | 能力、隔离集成和自动用户门禁已关闭 | 随机版本化项目主密钥、旧密文事务迁移、数据库密码解耦、轮换失败回滚、Windows Credential Manager、项目绑定口令包、缺钥页面恢复入口和精确清理均通过 | 需正式Tauri原生保存/打开对话框执行一次人工用户门禁；不再属于架构或数据可恢复性缺口 |
 | P0-14 | 能力关闭，正常桌面门禁通过 | 既有崩溃一致性能力不变；正式Tauri空白identifier完成切换、重启生效、实际路径、回滚、再次重启和非空阻断，目录零残留 | 仍需复制中断/改名后崩溃/损坏sidecar桌面门禁 |
@@ -695,6 +695,7 @@ Vue Page
 - 正式Tauri：7.5-D数据目录切换、重启、About实际路径、回滚和非空阻断通过，专用数据目录清理完成；Computer Use辅助进程连续初始化失败后停止，未用PowerShell UI Automation绕过。
 - CI稳定性：完整App挂载在全量并发下实际耗时超过15秒，测试超时容量校准为30秒但断言完全不变；复跑18文件39项全部通过，避免发布流水线偶发假红。
 - 新阻断证据：Stage75Adapter的Preferred TLS在开发MySQL返回`platform-connect:io(kind=InvalidData)`，Native TLS同样失败且已回退，所有stage75b随机Schema残留为0；node121 rule-engine日志与只读PRAGMA证明`rule_definition`缺少`record_type`，node79同表具备该列，未修改任一边缘数据库。
+- rule-engine防复发：现有SSH预检新增只读Schema检查，缺列时阻断性remediation为`migrate_rule_engine_schema`；四项测试证明检查只在会重启rule-engine时运行、命令带`-readonly`、缺列阻断、存在通过、缺数据库警告且生产源码无ALTER。
 
 ### 12.5 当前准入结论
 

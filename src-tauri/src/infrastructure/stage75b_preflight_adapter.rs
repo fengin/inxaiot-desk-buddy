@@ -296,6 +296,7 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
                 &profile,
                 host_key.identity,
                 &runtime,
+                &normalized,
             )
             .await;
         }
@@ -325,6 +326,7 @@ async fn append_remote_runtime_checks(
     profile: &ReleaseProfileRecord,
     host_key: HostKeyIdentity,
     runtime: &ReleaseRuntime,
+    plan: &DeploymentPlanInput,
 ) {
     let auth = match remote_auth(profile) {
         Ok(auth) => auth,
@@ -467,6 +469,10 @@ async fn append_remote_runtime_checks(
             )),
         }
     }
+    if requires_rule_engine_schema_check(plan.mode, plan.service_name.as_deref()) {
+        append_rule_engine_schema_check(checks, mac, &connection, &profile.values.aio_data_root)
+            .await;
+    }
     if let Err(error) = connection.disconnect().await {
         checks.push(warning(
             "ssh_disconnect",
@@ -474,6 +480,146 @@ async fn append_remote_runtime_checks(
             Some(mac),
             error.to_string(),
         ));
+    }
+}
+
+fn requires_rule_engine_schema_check(mode: DeploymentMode, service_name: Option<&str>) -> bool {
+    mode == DeploymentMode::FullUpgrade
+        || (mode == DeploymentMode::ServiceUpgrade && service_name == Some("rule-engine"))
+}
+
+async fn append_rule_engine_schema_check(
+    checks: &mut Vec<DeploymentPreflightCheck>,
+    mac: &str,
+    connection: &impl RemoteCommandExecutor,
+    data_root: &str,
+) {
+    let database = format!(
+        "{}/rule-engine/db/rules_engine.db",
+        data_root.trim_end_matches('/')
+    );
+    let cancellation = CancellationToken::new();
+    let exists = connection
+        .run(
+            &ExecRequest {
+                program: "test".into(),
+                args: vec!["-e".into(), database.clone()],
+                env: BTreeMap::new(),
+                stdin: None,
+                total_timeout: Duration::from_secs(15),
+                inactivity_timeout: Duration::from_secs(10),
+            },
+            &cancellation,
+            &NoopRemoteOutputSink,
+        )
+        .await;
+    match exists {
+        Ok(result) if result.exit_status == 1 => {
+            checks.push(warning(
+                "rule_engine_schema",
+                "规则引擎数据Schema",
+                Some(mac),
+                "规则库尚不存在，将由Release首次初始化；本次没有存量迁移对象".into(),
+            ));
+            return;
+        }
+        Ok(result) if result.exit_status == 0 => {}
+        Ok(result) => {
+            checks.push(failed(
+                "rule_engine_schema",
+                "规则引擎数据Schema",
+                Some(mac),
+                format!("无法确认规则库是否存在，test退出码{}", result.exit_status),
+                remediation(
+                    "inspect_rule_engine_schema",
+                    "检查规则库文件",
+                    None,
+                    Some(mac),
+                ),
+            ));
+            return;
+        }
+        Err(error) => {
+            checks.push(failed(
+                "rule_engine_schema",
+                "规则引擎数据Schema",
+                Some(mac),
+                error.to_string(),
+                remediation(
+                    "inspect_rule_engine_schema",
+                    "检查规则库文件",
+                    None,
+                    Some(mac),
+                ),
+            ));
+            return;
+        }
+    }
+
+    let inspection = connection
+        .run(
+            &ExecRequest {
+                program: "sqlite3".into(),
+                args: vec![
+                    "-readonly".into(),
+                    database,
+                    "SELECT COUNT(*) FROM pragma_table_info('rule_definition') WHERE name='record_type';"
+                        .into(),
+                ],
+                env: BTreeMap::new(),
+                stdin: None,
+                total_timeout: Duration::from_secs(15),
+                inactivity_timeout: Duration::from_secs(10),
+            },
+            &cancellation,
+            &NoopRemoteOutputSink,
+        )
+        .await;
+    match inspection {
+        Ok(result) if result.exit_status == 0 && result.stdout.trim() == "1" => {
+            checks.push(passed(
+                "rule_engine_schema",
+                "规则引擎数据Schema",
+                Some(mac),
+                "rule_definition.record_type已就绪，可安全重启rule-engine".into(),
+            ));
+        }
+        Ok(result) if result.exit_status == 0 => checks.push(failed(
+            "rule_engine_schema",
+            "规则引擎数据Schema",
+            Some(mac),
+            "存量规则库缺少rule_definition.record_type，重启将导致rule-engine失败".into(),
+            remediation(
+                "migrate_rule_engine_schema",
+                "先备份并迁移规则库",
+                None,
+                Some(mac),
+            ),
+        )),
+        Ok(result) => checks.push(failed(
+            "rule_engine_schema",
+            "规则引擎数据Schema",
+            Some(mac),
+            format!("sqlite3只读检查失败，退出码{}", result.exit_status),
+            remediation(
+                "inspect_rule_engine_schema",
+                "检查sqlite3和规则库",
+                None,
+                Some(mac),
+            ),
+        )),
+        Err(error) => checks.push(failed(
+            "rule_engine_schema",
+            "规则引擎数据Schema",
+            Some(mac),
+            error.to_string(),
+            remediation(
+                "inspect_rule_engine_schema",
+                "检查sqlite3和规则库",
+                None,
+                Some(mac),
+            ),
+        )),
     }
 }
 
@@ -685,8 +831,60 @@ fn timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::failed;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use super::{append_rule_engine_schema_check, failed, requires_rule_engine_schema_check};
+    use crate::application::ports::remote_command::{
+        ExecRequest, RemoteCommandExecutor, RemoteCommandResult, RemoteOutputSink,
+    };
+    use crate::core::error::AppResult;
+    use crate::domain::aio::deployment::DeploymentMode;
     use crate::domain::aio::deployment_workflow::{PreflightRemediation, PreflightStatus};
+    use tokio_util::sync::CancellationToken;
+
+    struct FakeRemote {
+        results: Mutex<VecDeque<RemoteCommandResult>>,
+        requests: Mutex<Vec<ExecRequest>>,
+    }
+
+    impl FakeRemote {
+        fn new(results: impl IntoIterator<Item = RemoteCommandResult>) -> Self {
+            Self {
+                results: Mutex::new(results.into_iter().collect()),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl RemoteCommandExecutor for FakeRemote {
+        async fn run(
+            &self,
+            request: &ExecRequest,
+            _cancellation: &CancellationToken,
+            _output: &dyn RemoteOutputSink,
+        ) -> AppResult<RemoteCommandResult> {
+            self.requests
+                .lock()
+                .expect("requests")
+                .push(request.clone());
+            Ok(self
+                .results
+                .lock()
+                .expect("results")
+                .pop_front()
+                .expect("fake remote result"))
+        }
+    }
+
+    fn result(exit_status: u32, stdout: &str) -> RemoteCommandResult {
+        RemoteCommandResult {
+            exit_status,
+            stdout: stdout.into(),
+            stderr: String::new(),
+            duration_ms: 1,
+        }
+    }
 
     #[test]
     fn unexecuted_remote_gate_is_blocking() {
@@ -704,5 +902,90 @@ mod tests {
         );
         assert_eq!(check.status, PreflightStatus::Failed);
         assert!(check.blocking);
+    }
+
+    #[test]
+    fn rule_engine_schema_gate_runs_only_before_rule_engine_restart() {
+        assert!(requires_rule_engine_schema_check(
+            DeploymentMode::FullUpgrade,
+            None
+        ));
+        assert!(requires_rule_engine_schema_check(
+            DeploymentMode::ServiceUpgrade,
+            Some("rule-engine")
+        ));
+        assert!(!requires_rule_engine_schema_check(
+            DeploymentMode::ServiceUpgrade,
+            Some("device-edge")
+        ));
+        assert!(!requires_rule_engine_schema_check(
+            DeploymentMode::FirstDeploy,
+            None
+        ));
+    }
+
+    #[test]
+    fn rule_engine_schema_gate_is_strictly_read_only() {
+        let source = include_str!("stage75b_preflight_adapter.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production preflight source");
+        assert!(production.contains("\"-readonly\".into()"));
+        assert!(production.contains("pragma_table_info('rule_definition')"));
+        assert!(!production.contains("ALTER TABLE"));
+    }
+
+    #[tokio::test]
+    async fn rule_engine_schema_gate_blocks_missing_column_with_readonly_command() {
+        let remote = FakeRemote::new([result(0, ""), result(0, "0\n")]);
+        let mut checks = Vec::new();
+        append_rule_engine_schema_check(&mut checks, "001122334455", &remote, "/opt/data").await;
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].code, "rule_engine_schema");
+        assert_eq!(checks[0].status, PreflightStatus::Failed);
+        assert!(checks[0].blocking);
+        assert_eq!(
+            checks[0]
+                .remediation
+                .as_ref()
+                .map(|item| item.action.as_str()),
+            Some("migrate_rule_engine_schema")
+        );
+        let requests = remote.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].program, "sqlite3");
+        assert_eq!(requests[1].args[0], "-readonly");
+        assert_eq!(
+            requests[1].args[1],
+            "/opt/data/rule-engine/db/rules_engine.db"
+        );
+    }
+
+    #[tokio::test]
+    async fn rule_engine_schema_gate_passes_present_column_and_warns_for_new_database() {
+        let present = FakeRemote::new([result(0, ""), result(0, "1\n")]);
+        let mut present_checks = Vec::new();
+        append_rule_engine_schema_check(
+            &mut present_checks,
+            "001122334455",
+            &present,
+            "/opt/data/",
+        )
+        .await;
+        assert_eq!(present_checks[0].status, PreflightStatus::Passed);
+        assert!(!present_checks[0].blocking);
+
+        let missing_database = FakeRemote::new([result(1, "")]);
+        let mut missing_checks = Vec::new();
+        append_rule_engine_schema_check(
+            &mut missing_checks,
+            "001122334455",
+            &missing_database,
+            "/opt/data",
+        )
+        .await;
+        assert_eq!(missing_checks[0].status, PreflightStatus::Warning);
+        assert!(!missing_checks[0].blocking);
     }
 }

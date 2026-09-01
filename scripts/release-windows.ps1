@@ -169,6 +169,13 @@ try {
     }
     $releaseConfigPath = Join-Path $projectRoot "src-tauri\tauri.release.conf.json"
     $releaseConfig = [System.IO.File]::ReadAllText($releaseConfigPath) | ConvertFrom-Json
+    $windowsPowerShell = [System.IO.Path]::GetFullPath(
+        (Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe")
+    )
+    if (-not [System.IO.File]::Exists($windowsPowerShell)) {
+        throw "未找到Windows PowerShell签名解释器：$windowsPowerShell"
+    }
+    $releaseConfig.bundle.windows.signCommand.cmd = $windowsPowerShell
     $signArguments = @($releaseConfig.bundle.windows.signCommand.args)
     $relativeSignScriptIndex = [Array]::IndexOf($signArguments, "scripts/sign-windows.ps1")
     if ($relativeSignScriptIndex -lt 0) {

@@ -14,7 +14,7 @@
 - `scripts/verify-release.ps1`离线复验CMS、证书链、清单文件大小/SHA-256和安装包/裸程序Authenticode签名。
 - Tauri/NSIS未签名冒烟构建已通过，生成包被明确识别为`NotSigned`并在记录大小/SHA-256后删除；该证据只证明安装包工具链，不构成发布产物。
 
-当前未完成：受信Code Signing证书尚未创建，首个签名产物集尚未生成，因此P1-20仍为未关闭。
+当前状态：内部证书与CurrentUser信任已经创建，最终Thumbprint为`4B6FA6B7CBF774B4BB0BFACEE8EC51EE8A7FC3C1`，私钥为持久非导出CNG密钥；ACL产物根已建立，手工Authenticode与DigiCert RFC3161时间戳验证为Valid。Tauri正式NSIS尚未形成，原生签名剩SignTool PATH集成。鉴于产品仅内部使用，签名是否继续作为阶段8硬门禁需用户确认；取消时应按第4节撤销证书并保留SHA-256/提交清单方案。
 
 ## 2. 指定基础设施
 

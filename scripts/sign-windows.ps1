@@ -67,7 +67,17 @@ if ($certificate.NotBefore -gt (Get-Date) -or $certificate.NotAfter -le (Get-Dat
     throw "签名证书不在有效期内"
 }
 $codeSigningOid = "1.3.6.1.5.5.7.3.3"
-if (-not ($certificate.EnhancedKeyUsageList.ObjectId.Value -contains $codeSigningOid)) {
+$enhancedKeyUsageOids = @($certificate.EnhancedKeyUsageList | ForEach-Object {
+    $directValue = $_.PSObject.Properties["Value"]
+    if ($null -ne $directValue) {
+        return [string]$directValue.Value
+    }
+    $objectId = $_.PSObject.Properties["ObjectId"]
+    if ($null -ne $objectId -and $null -ne $objectId.Value) {
+        return [string]$objectId.Value
+    }
+})
+if (-not ($enhancedKeyUsageOids -contains $codeSigningOid)) {
     throw "证书缺少 Code Signing EKU"
 }
 $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::new()

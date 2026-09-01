@@ -9,12 +9,11 @@ pipeline {
 
     parameters {
         booleanParam(name: 'RUN_REAL_GATES', defaultValue: false, description: '在受控开发MySQL和两节点上执行显式ignore真实门禁')
-        booleanParam(name: 'PUBLISH_SIGNED_RELEASE', defaultValue: false, description: '生成不可覆盖的签名NSIS产物集')
+        booleanParam(name: 'PUBLISH_INTERNAL_RELEASE', defaultValue: false, description: '生成无签名、SHA-256校验且不可覆盖的内部NSIS产物集')
     }
 
     environment {
         INX_RELEASE_ARTIFACT_ROOT = 'D:\inxaiot-release-artifacts'
-        INX_SIGN_TIMESTAMP_URL = 'http://timestamp.digicert.com'
     }
 
     stages {
@@ -50,12 +49,10 @@ pipeline {
                 }
             }
         }
-        stage('签名发布') {
-            when { expression { params.PUBLISH_SIGNED_RELEASE } }
+        stage('内部发布') {
+            when { expression { params.PUBLISH_INTERNAL_RELEASE } }
             steps {
-                withCredentials([string(credentialsId: 'inxaiot-windows-signing-thumbprint', variable: 'INX_SIGN_CERT_THUMBPRINT')]) {
-                    powershell '.\\scripts\\release-windows.ps1 -SkipQualityGate'
-                }
+                powershell '.\\scripts\\release-internal.ps1 -SkipQualityGate'
             }
         }
     }

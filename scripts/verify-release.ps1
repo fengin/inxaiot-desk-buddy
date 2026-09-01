@@ -7,6 +7,10 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+# 兼容历史入口：统一复验内部无签名产物集。
+& (Join-Path $PSScriptRoot "verify-internal-release.ps1") -ArtifactSet $ArtifactSet
+return
+
 $root = [System.IO.Path]::GetFullPath($ArtifactSet)
 if (-not [System.IO.Directory]::Exists($root)) {
     throw "产物集目录不存在：$root"

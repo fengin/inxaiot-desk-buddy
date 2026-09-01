@@ -6,21 +6,6 @@
     "publisher": "INXVision",
     "windows": {
       "allowDowngrades": true,
-      "digestAlgorithm": "sha256",
-      "timestampUrl": "http://timestamp.digicert.com",
-      "tsp": true,
-      "signCommand": {
-        "cmd": "powershell.exe",
-        "args": [
-          "-NoProfile",
-          "-ExecutionPolicy",
-          "Bypass",
-          "-File",
-          "scripts/sign-windows.ps1",
-          "-Path",
-          "%1"
-        ]
-      },
       "nsis": {
         "installMode": "currentUser",
         "languages": ["SimpChinese", "English"],

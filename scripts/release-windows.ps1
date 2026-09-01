@@ -6,6 +6,10 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+# 兼容历史入口：内部发布已取消 Authenticode 硬门禁，统一委托给无签名发布链。
+& (Join-Path $PSScriptRoot "release-internal.ps1") -ArtifactRoot $ArtifactRoot -SkipQualityGate:$SkipQualityGate
+return
+
 function Invoke-NativeStep {
     param(
         [string]$Name,

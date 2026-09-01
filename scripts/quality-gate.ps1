@@ -28,6 +28,7 @@ try {
         Invoke-NativeStep "Rust格式检查" { cargo fmt --all --check }
         Invoke-NativeStep "Rust严格Clippy" { cargo clippy --all-targets --all-features -- -D warnings }
         Invoke-NativeStep "Rust非忽略测试" { cargo test --all-targets --all-features }
+        Invoke-NativeStep "清理桌面E2E可选插件构建缓存" { cargo clean -p tauri-plugin-wdio-webdriver }
     }
     finally {
         Pop-Location

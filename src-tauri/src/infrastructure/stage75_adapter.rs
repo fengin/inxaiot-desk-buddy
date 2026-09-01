@@ -805,38 +805,6 @@ impl ReleaseProfileManagementPort for Stage75Adapter<'_> {
             message: format!("项目主密钥v{key_version}已验证并保存到本机安全存储"),
         })
     }
-
-    async fn rotate_release_master_key(
-        &self,
-        project_id: &str,
-    ) -> AppResult<ReleaseMasterKeyOperationResult> {
-        let session = self.require_active_session(project_id).await?;
-        let operator_name = session
-            .username
-            .ok_or_else(|| AppError::Authentication("平台会话缺少用户名".into()))?;
-        let pools = self.ready_pools(project_id).await?;
-        let connection = self
-            .projects()
-            .connection_secrets(project_id)
-            .await
-            .map_err(map_formal_error)?;
-        let key_version = self
-            .release_master_keys()
-            .rotate(
-                &ReleaseProfileRepository::new(pools.workbench.clone()),
-                project_id,
-                "default",
-                &connection.db_password,
-                &operator_name,
-                application_instance_id(),
-            )
-            .await
-            .map_err(map_formal_error)?;
-        Ok(ReleaseMasterKeyOperationResult {
-            key_version,
-            message: format!("项目主密钥已轮换到v{key_version}；其他电脑必须导入新版本密钥包"),
-        })
-    }
 }
 
 impl HostKeyManagementPort for Stage75Adapter<'_> {

@@ -12,7 +12,6 @@ use crate::application::project_management::{
     import_release_master_key as import_release_master_key_use_case,
     list_host_keys as list_host_keys_use_case, list_projects as list_projects_use_case,
     login_project as login_project_use_case, logout_project as logout_project_use_case,
-    rotate_release_master_key as rotate_release_master_key_use_case,
     save_release_profile as save_release_profile_use_case,
     switch_project as switch_project_use_case,
     test_project_connection as test_project_connection_use_case,
@@ -189,16 +188,6 @@ pub async fn import_release_master_key(
     request: ReleaseMasterKeyTransferRequest,
 ) -> Result<ReleaseMasterKeyOperationResult, CommandErrorDto> {
     import_release_master_key_use_case(&Stage75Adapter::new(&state), &project_id, request)
-        .await
-        .map_err(CommandErrorDto::from)
-}
-
-#[tauri::command]
-pub async fn rotate_release_master_key(
-    state: State<'_, FormalAppState>,
-    project_id: String,
-) -> Result<ReleaseMasterKeyOperationResult, CommandErrorDto> {
-    rotate_release_master_key_use_case(&Stage75Adapter::new(&state), &project_id)
         .await
         .map_err(CommandErrorDto::from)
 }

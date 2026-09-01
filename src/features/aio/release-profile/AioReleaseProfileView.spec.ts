@@ -63,6 +63,8 @@ describe("发布参数项目主密钥恢复入口", () => {
       '[data-testid="release-key-passphrase"] input'
     );
     expect(passphrase).not.toBeNull();
+    expect(document.querySelector('[data-testid="release-key-export"]')).toBeNull();
+    expect(document.querySelector('[data-testid="release-key-rotate"]')).toBeNull();
     passphrase!.value = "strong-passphrase";
     passphrase!.dispatchEvent(new Event("input", { bubbles: true }));
     await flushPromises();

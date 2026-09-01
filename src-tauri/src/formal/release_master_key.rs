@@ -198,57 +198,6 @@ impl ReleaseMasterKeyManager {
         Ok(())
     }
 
-    pub async fn rotate(
-        &self,
-        repository: &ReleaseProfileRepository,
-        project_id: &str,
-        profile_key: &str,
-        legacy_database_password: &str,
-        operator_name: &str,
-        instance_id: &str,
-    ) -> FormalResult<u32> {
-        let _guard = RELEASE_KEY_OPERATION_LOCK.lock().await;
-        let metadata = repository
-            .credential_metadata(profile_key)
-            .await?
-            .ok_or_else(|| FormalError::NotFound(format!("发布配置不存在：{profile_key}")))?;
-        let old_key = self
-            .resolve_key_locked(
-                repository,
-                &KeyResolutionContext {
-                    project_id,
-                    profile_key,
-                    legacy_database_password,
-                    operator_name,
-                    instance_id,
-                },
-                metadata,
-            )
-            .await?;
-        let new_version = old_key
-            .version()
-            .checked_add(1)
-            .ok_or_else(|| FormalError::Conflict("项目主密钥版本已达到上限".into()))?;
-        let new_key = ProjectMasterKey::generate(new_version)?;
-        self.save_key_tracked(project_id, &new_key).await?;
-        let result = repository
-            .rotate_credentials(profile_key, &old_key, &new_key, operator_name, instance_id)
-            .await;
-        if result.is_err() {
-            let _ = self.delete_key_tracked(project_id, new_version).await;
-            return result.map(|_| new_version);
-        }
-        if let Err(error) = self.delete_key_tracked(project_id, old_key.version()).await {
-            tracing::warn!(
-                project_id,
-                old_key_version = old_key.version(),
-                error_code = error.to_dto().code,
-                "delete retired project master key deferred"
-            );
-        }
-        Ok(new_version)
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub async fn export_key_package(
         &self,

@@ -53,10 +53,6 @@ pub trait ReleaseProfileManagementPort: Send + Sync {
         project_id: &str,
         request: ReleaseMasterKeyTransferRequest,
     ) -> AppResult<ReleaseMasterKeyOperationResult>;
-    async fn rotate_release_master_key(
-        &self,
-        project_id: &str,
-    ) -> AppResult<ReleaseMasterKeyOperationResult>;
 }
 
 #[allow(async_fn_in_trait)]

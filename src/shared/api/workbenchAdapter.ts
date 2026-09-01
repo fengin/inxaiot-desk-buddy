@@ -38,7 +38,6 @@ export interface WorkbenchAdapter {
   saveReleaseProfile(projectId: string, draft: ReleaseProfileDraft): Promise<ReleaseProfileView>;
   exportReleaseMasterKey(projectId: string, request: ReleaseMasterKeyTransferRequest): Promise<ReleaseMasterKeyOperationResult>;
   importReleaseMasterKey(projectId: string, request: ReleaseMasterKeyTransferRequest): Promise<ReleaseMasterKeyOperationResult>;
-  rotateReleaseMasterKey(projectId: string): Promise<ReleaseMasterKeyOperationResult>;
   listHostKeys(projectId: string): Promise<HostKeyObservation[]>;
   captureHostKey(projectId: string, request: HostKeyCaptureRequest): Promise<HostKeyObservation>;
   confirmHostKey(projectId: string, request: ConfirmHostKeyRequest): Promise<HostKeyObservation>;

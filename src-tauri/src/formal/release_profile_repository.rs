@@ -357,69 +357,6 @@ impl ReleaseProfileRepository {
         self.get(new_key, profile_key).await
     }
 
-    pub async fn rotate_credentials(
-        &self,
-        profile_key: &str,
-        old_key: &ProjectMasterKey,
-        new_key: &ProjectMasterKey,
-        operator_name: &str,
-        instance_id: &str,
-    ) -> FormalResult<ReleaseProfileRecord> {
-        validate_maintenance(profile_key, operator_name, instance_id)?;
-        if new_key.version() != old_key.version().saturating_add(1) {
-            return Err(FormalError::InvalidConfig(
-                "项目主密钥必须按连续版本轮换".into(),
-            ));
-        }
-        let mut transaction = self.pool.begin().await.map_err(|error| {
-            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "begin credential rotation failed");
-            FormalError::LocalDatabase("开始发布凭据轮换事务")
-        })?;
-        let row = sqlx::query(
-            "SELECT credential_scheme, credential_key_version, credential_salt, \
-             credential_nonce, credential_ciphertext, version \
-             FROM aio_release_profile WHERE profile_key = ? FOR UPDATE",
-        )
-        .bind(profile_key)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(|error| map_error("锁定待轮换发布凭据", error))?
-        .ok_or_else(|| FormalError::NotFound(format!("发布配置不存在：{profile_key}")))?;
-        let old_envelope = envelope_from_row(&row)?;
-        let metadata = CredentialMetadata {
-            scheme: old_envelope.scheme.clone(),
-            key_version: old_envelope.key_version,
-        };
-        if !metadata.is_project_key() || metadata.key_version != old_key.version() {
-            return Err(FormalError::Conflict(
-                "发布凭据密钥版本已变化，请刷新后重试".into(),
-            ));
-        }
-        let credentials = decrypt_release_credentials(old_key, &old_envelope)?;
-        let new_envelope = encrypt_release_credentials(new_key, &credentials)?;
-        let profile_version: u64 = row
-            .try_get("version")
-            .map_err(|_| FormalError::LocalDatabase("解析发布配置版本"))?;
-        update_credential_envelope(&mut transaction, profile_key, &new_envelope, operator_name)
-            .await?;
-        insert_credential_audit(
-            &mut transaction,
-            profile_key,
-            "credential_key_rotate",
-            operator_name,
-            instance_id,
-            profile_version,
-            old_envelope.key_version,
-            new_envelope.key_version,
-        )
-        .await?;
-        transaction.commit().await.map_err(|error| {
-            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "commit credential rotation failed");
-            FormalError::LocalDatabase("提交发布凭据轮换事务")
-        })?;
-        self.get(new_key, profile_key).await
-    }
-
     pub async fn delete_test_profile(&self, profile_key: &str) -> FormalResult<()> {
         let mut transaction = self.pool.begin().await.map_err(|error| {
             tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "begin profile cleanup failed");

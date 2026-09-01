@@ -237,13 +237,6 @@ export class FixtureWorkbenchAdapter implements WorkbenchAdapter {
     const keyVersion = this.keyVersions.get(projectId) ?? 1;
     return { keyVersion, message: `Fixture 项目主密钥v${keyVersion}已导入` };
   }
-  async rotateReleaseMasterKey(projectId: string): Promise<ReleaseMasterKeyOperationResult> {
-    this.requiredProject(projectId);
-    const keyVersion = (this.keyVersions.get(projectId) ?? 1) + 1;
-    this.keyVersions.set(projectId, keyVersion);
-    return { keyVersion, message: `Fixture 项目主密钥已轮换到v${keyVersion}` };
-  }
-
   async listHostKeys(projectId: string) { return structuredClone(this.hostKeys.get(projectId) ?? []); }
   async captureHostKey(projectId: string, request: HostKeyCaptureRequest) {
     const port = request.port ?? 22;

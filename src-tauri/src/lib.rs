@@ -54,9 +54,8 @@ use crate::interface::commands::project_management::{
     capture_host_key, check_project_session, confirm_host_key, create_local_project,
     create_project_login_challenge, delete_local_project, export_release_master_key,
     get_project_session, get_release_profile, import_release_master_key, list_host_keys,
-    list_local_projects, login_project, logout_project, rotate_release_master_key,
-    save_release_profile, switch_project, test_project_connection, update_local_project,
-    validate_release_profile,
+    list_local_projects, login_project, logout_project, save_release_profile, switch_project,
+    test_project_connection, update_local_project, validate_release_profile,
 };
 use crate::interface::commands::release_artifacts::{
     build_deployment_plan, inspect_service_image, render_release_preview, validate_release_package,
@@ -249,7 +248,6 @@ pub fn run() {
             save_release_profile,
             export_release_master_key,
             import_release_master_key,
-            rotate_release_master_key,
             list_host_keys,
             capture_host_key,
             confirm_host_key,

@@ -67,9 +67,6 @@ export class RealWorkbenchAdapter implements WorkbenchAdapter {
   importReleaseMasterKey(projectId: string, request: ReleaseMasterKeyTransferRequest) {
     return invoke<ReleaseMasterKeyOperationResult>("import_release_master_key", { projectId, request });
   }
-  rotateReleaseMasterKey(projectId: string) {
-    return invoke<ReleaseMasterKeyOperationResult>("rotate_release_master_key", { projectId });
-  }
   listHostKeys(projectId: string) {
     return invoke<HostKeyObservation[]>("list_host_keys", { projectId });
   }

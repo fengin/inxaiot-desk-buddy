@@ -189,8 +189,8 @@ async fn encrypted_profile_version_audit_and_exact_cleanup() {
 }
 
 #[tokio::test]
-#[ignore = "migrates, rotates, transfers and exactly removes one isolated release profile"]
-async fn project_master_key_migration_rotation_failure_and_cross_machine_transfer() {
+#[ignore = "migrates, transfers and exactly removes one isolated release profile"]
+async fn project_master_key_migration_and_cross_machine_transfer() {
     let config = config();
     let pools = ProjectMySqlPools::connect(&config)
         .await
@@ -271,57 +271,6 @@ async fn project_master_key_migration_rotation_failure_and_cross_machine_transfe
         .expect("database password is no longer the credential key");
     assert_eq!(after_database_password_change.credentials, credentials);
 
-    let injected_failure = first_manager
-        .rotate(
-            &repository,
-            &first_project_id,
-            &profile_key,
-            &config.password,
-            "key-migration-test",
-            &"x".repeat(1000),
-        )
-        .await;
-    assert!(injected_failure.is_err());
-    assert_eq!(
-        repository
-            .credential_metadata(&profile_key)
-            .await
-            .expect("metadata after rollback")
-            .expect("profile metadata")
-            .key_version,
-        1
-    );
-    assert!(first_manager.load_key(&first_project_id, 2).is_err());
-    assert_eq!(
-        first_manager
-            .load_profile(
-                &repository,
-                &first_project_id,
-                &profile_key,
-                &config.password,
-                "key-migration-test",
-                "instance-after-failure",
-            )
-            .await
-            .expect("old key remains usable")
-            .credentials,
-        credentials
-    );
-
-    let rotated_version = first_manager
-        .rotate(
-            &repository,
-            &first_project_id,
-            &profile_key,
-            &config.password,
-            "key-migration-test",
-            "instance-rotate",
-        )
-        .await
-        .expect("rotate key");
-    assert_eq!(rotated_version, 2);
-    assert!(first_manager.load_key(&first_project_id, 1).is_err());
-
     let binding = ReleaseKeyProjectBinding {
         platform_url: "http://isolated-platform.example:8055".into(),
         db_host: config.host.clone(),
@@ -348,7 +297,7 @@ async fn project_master_key_migration_rotation_failure_and_cross_machine_transfe
     assert!(
         !package_text.contains(&hex::encode(
             first_manager
-                .load_key(&first_project_id, 2)
+                .load_key(&first_project_id, 1)
                 .expect("current key")
                 .material()
         ))

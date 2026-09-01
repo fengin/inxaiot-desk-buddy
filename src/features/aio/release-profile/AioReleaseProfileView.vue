@@ -22,13 +22,12 @@ import {
   KeyRound,
   Pencil,
   RefreshCw,
-  RotateCw,
   Save,
   ShieldCheck,
   Upload,
   Undo2
 } from "lucide-vue-next";
-import { onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 
 import { commandErrorText } from "@/shared/api/errors";
 import { useSystemDialogAdapter } from "@/shared/api/systemDialogAdapter";
@@ -46,6 +45,7 @@ const keyManagementOpen = ref(false);
 const keyPassphrase = ref("");
 const keyPassphraseConfirmation = ref("");
 const hostKeyForm = reactive({ host: "", port: 22 });
+const keyRecoveryRequired = computed(() => release.error.includes("缺少当前项目主密钥"));
 
 async function load() {
   if (!projects.activeProjectId || !projects.isReady) return;
@@ -125,16 +125,6 @@ async function importMasterKey() {
   }
 }
 
-async function rotateMasterKey() {
-  try {
-    const result = await release.rotateMasterKey();
-    clearKeyPassphrases();
-    message.warning(`${result.message}。请立即设置口令并导出新密钥包。`, { duration: 8000 });
-  } catch (cause) {
-    message.error(commandErrorText(cause, "轮换项目主密钥失败"));
-  }
-}
-
 function cancelEdit() {
   release.resetDraft();
   editing.value = false;
@@ -204,7 +194,7 @@ async function confirmHostKey(replaceChanged: boolean) {
       </div>
       <div class="page-actions">
         <n-tag v-if="release.profile" size="small" :bordered="false" type="info">版本 {{ release.profile.version }}</n-tag>
-        <n-button size="small" secondary data-testid="release-key-management-open" :disabled="!projects.isReady" @click="keyManagementOpen = true"><template #icon><KeyRound /></template>密钥备份</n-button>
+        <n-button v-if="release.profile || keyRecoveryRequired" size="small" secondary data-testid="release-key-management-open" :disabled="!projects.isReady" @click="keyManagementOpen = true"><template #icon><KeyRound /></template>{{ keyRecoveryRequired ? "恢复发布凭据" : "项目接管密钥" }}</n-button>
         <n-button size="small" secondary data-testid="host-key-open" :disabled="!projects.isReady" @click="hostKeyOpen = true"><template #icon><ShieldCheck /></template>主机密钥</n-button>
         <n-button v-if="!editing" size="small" type="primary" data-testid="release-edit" :disabled="!projects.isReady" @click="startEdit"><template #icon><Pencil /></template>{{ release.profile ? "编辑配置" : "新建配置" }}</n-button>
         <template v-else>
@@ -303,7 +293,7 @@ async function confirmHostKey(replaceChanged: boolean) {
     <n-modal
       v-model:show="keyManagementOpen"
       preset="card"
-      title="项目主密钥备份与轮换"
+      :title="keyRecoveryRequired ? '恢复项目发布凭据' : '导出项目接管密钥'"
       class="host-key-modal"
       :bordered="false"
       @after-leave="clearKeyPassphrases"
@@ -311,8 +301,8 @@ async function confirmHostKey(replaceChanged: boolean) {
       <p class="modal-description">
         发布凭据由随机项目主密钥加密，不再绑定数据库密码。密钥只保存在本机安全存储；其他电脑必须导入与当前项目匹配的口令保护密钥包。
       </p>
-      <n-alert type="warning" :show-icon="false">
-        密钥包口令无法找回。轮换会立即使其他电脑上的旧密钥失效，轮换后必须重新导出并安全分发。
+      <n-alert :type="keyRecoveryRequired ? 'warning' : 'info'" :show-icon="false">
+        {{ keyRecoveryRequired ? "请从可信工作台获取当前项目密钥包并导入。导入成功前不能读取发布凭据。" : "仅在受控新电脑接管项目时导出。密钥包口令无法找回，请通过安全渠道分别传递文件和口令。" }}
       </n-alert>
       <div class="host-key-list key-transfer-fields">
         <label>
@@ -326,7 +316,7 @@ async function confirmHostKey(replaceChanged: boolean) {
             autocomplete="new-password"
           />
         </label>
-        <label>
+        <label v-if="!keyRecoveryRequired">
           <span>再次输入口令（导出时校验）</span>
           <n-input
             v-model:value="keyPassphraseConfirmation"
@@ -339,20 +329,12 @@ async function confirmHostKey(replaceChanged: boolean) {
         </label>
       </div>
       <div class="host-key-actions">
-        <n-button data-testid="release-key-export" :disabled="!release.profile" :loading="release.keyOperationLoading" @click="exportMasterKey">
+        <n-button v-if="!keyRecoveryRequired" data-testid="release-key-export" :disabled="!release.profile" :loading="release.keyOperationLoading" @click="exportMasterKey">
           <template #icon><Download /></template>导出口令保护密钥包
         </n-button>
-        <n-button data-testid="release-key-import" :loading="release.keyOperationLoading" @click="importMasterKey">
+        <n-button v-if="keyRecoveryRequired" data-testid="release-key-import" :loading="release.keyOperationLoading" @click="importMasterKey">
           <template #icon><Upload /></template>导入并验证密钥包
         </n-button>
-        <n-popconfirm positive-text="确认轮换" negative-text="取消" @positive-click="rotateMasterKey">
-          <template #trigger>
-            <n-button type="warning" data-testid="release-key-rotate" data-action-owner="popconfirm" :disabled="!release.profile" :loading="release.keyOperationLoading">
-              <template #icon><RotateCw /></template>轮换主密钥
-            </n-button>
-          </template>
-          轮换会使其他电脑上的旧密钥立即失效。确定继续？
-        </n-popconfirm>
       </div>
       <template #footer>
         <n-space justify="end"><n-button @click="keyManagementOpen = false">关闭</n-button></n-space>

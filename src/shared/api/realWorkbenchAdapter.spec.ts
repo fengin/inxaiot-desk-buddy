@@ -65,8 +65,6 @@ describe("RealWorkbenchAdapter Tauri Command 契约", () => {
     expect(invokeMock).toHaveBeenLastCalledWith("export_release_master_key", { projectId: "project-1", request: transfer });
     await adapter.importReleaseMasterKey("project-1", transfer);
     expect(invokeMock).toHaveBeenLastCalledWith("import_release_master_key", { projectId: "project-1", request: transfer });
-    await adapter.rotateReleaseMasterKey("project-1");
-    expect(invokeMock).toHaveBeenLastCalledWith("rotate_release_master_key", { projectId: "project-1" });
     await adapter.listHostKeys("project-1");
     expect(invokeMock).toHaveBeenLastCalledWith("list_host_keys", { projectId: "project-1" });
     await adapter.captureHostKey("project-1", { host: "192.168.3.79", port: 22 });

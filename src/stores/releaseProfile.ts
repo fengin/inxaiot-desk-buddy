@@ -210,21 +210,6 @@ export const useReleaseProfileStore = defineStore("release-profile", () => {
     }
   }
 
-  async function rotateMasterKey() {
-    if (!projectId.value) throw new Error("没有活动项目");
-    const expectedProjectId = projectId.value;
-    keyOperationLoading.value = true;
-    error.value = "";
-    try {
-      return await useWorkbenchAdapter().rotateReleaseMasterKey(expectedProjectId);
-    } catch (cause) {
-      error.value = commandErrorText(cause, "轮换项目主密钥失败");
-      throw cause;
-    } finally {
-      keyOperationLoading.value = false;
-    }
-  }
-
   return {
     projectId,
     profile,
@@ -243,9 +228,8 @@ export const useReleaseProfileStore = defineStore("release-profile", () => {
     validate,
     save,
     captureHostKey,
-    confirmHostKey
-    ,exportMasterKey,
-    importMasterKey,
-    rotateMasterKey
+    confirmHostKey,
+    exportMasterKey,
+    importMasterKey
   };
 });

@@ -131,13 +131,6 @@ pub async fn import_release_master_key<P: ReleaseProfileManagementPort>(
     port.import_release_master_key(project_id, request).await
 }
 
-pub async fn rotate_release_master_key<P: ReleaseProfileManagementPort>(
-    port: &P,
-    project_id: &str,
-) -> AppResult<ReleaseMasterKeyOperationResult> {
-    port.rotate_release_master_key(project_id).await
-}
-
 pub async fn list_host_keys<P: HostKeyManagementPort>(
     port: &P,
     project_id: &str,

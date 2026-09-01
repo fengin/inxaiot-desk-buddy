@@ -148,6 +148,38 @@ try {
     if (-not $certificate.HasPrivateKey) {
         throw "签名证书没有可用私钥"
     }
+    if ($certificate.NotBefore -gt (Get-Date) -or $certificate.NotAfter -le (Get-Date)) {
+        throw "签名证书不在有效期内"
+    }
+    $ekuExtension = $certificate.Extensions |
+        Where-Object { $_.Oid.Value -eq "2.5.29.37" } |
+        Select-Object -First 1
+    if ($null -eq $ekuExtension) {
+        throw "签名证书缺少Enhanced Key Usage扩展"
+    }
+    $enhancedKeyUsage = [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new(
+        $ekuExtension.RawData,
+        $ekuExtension.Critical
+    )
+    if (-not ($enhancedKeyUsage.EnhancedKeyUsages.Value -contains "1.3.6.1.5.5.7.3.3")) {
+        throw "签名证书缺少Code Signing EKU"
+    }
+    $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
+    if ($null -eq $rsa -or $rsa.GetType().FullName -ne "System.Security.Cryptography.RSACng" -or
+        $rsa.Key.ExportPolicy -ne [System.Security.Cryptography.CngExportPolicies]::None) {
+        throw "签名私钥必须是不可导出的CNG RSA密钥"
+    }
+    $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
+    $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::Online
+    $chain.ChainPolicy.RevocationFlag = [System.Security.Cryptography.X509Certificates.X509RevocationFlag]::ExcludeRoot
+    if (-not $chain.Build($certificate)) {
+        $statuses = ($chain.ChainStatus | ForEach-Object { $_.Status.ToString() }) -join ","
+        throw "签名证书信任链验证失败：$statuses"
+    }
+    $timestampUrl = $env:INX_SIGN_TIMESTAMP_URL
+    if ([string]::IsNullOrWhiteSpace($timestampUrl)) {
+        $timestampUrl = "http://timestamp.digicert.com"
+    }
 
     $artifactSetName = "inxaiot-desk-buddy-$version-$shortCommit"
     $finalDirectory = Join-Path $artifactRootFull $artifactSetName
@@ -169,19 +201,12 @@ try {
     }
     $releaseConfigPath = Join-Path $projectRoot "src-tauri\tauri.release.conf.json"
     $releaseConfig = [System.IO.File]::ReadAllText($releaseConfigPath) | ConvertFrom-Json
-    $windowsPowerShell = [System.IO.Path]::GetFullPath(
-        (Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe")
-    )
-    if (-not [System.IO.File]::Exists($windowsPowerShell)) {
-        throw "未找到Windows PowerShell签名解释器：$windowsPowerShell"
-    }
-    $releaseConfig.bundle.windows.signCommand.cmd = $windowsPowerShell
-    $signArguments = @($releaseConfig.bundle.windows.signCommand.args)
-    $relativeSignScriptIndex = [Array]::IndexOf($signArguments, "scripts/sign-windows.ps1")
-    if ($relativeSignScriptIndex -lt 0) {
-        throw "Tauri发布配置缺少受控签名脚本占位路径"
-    }
-    $releaseConfig.bundle.windows.signCommand.args[$relativeSignScriptIndex] = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "sign-windows.ps1"))
+    $releaseConfig.bundle.windows.PSObject.Properties.Remove("signCommand")
+    $releaseConfig.bundle.windows.digestAlgorithm = "sha256"
+    $releaseConfig.bundle.windows.timestampUrl = $timestampUrl
+    $releaseConfig.bundle.windows.tsp = $true
+    $releaseConfig.bundle.windows |
+        Add-Member -NotePropertyName certificateThumbprint -NotePropertyValue $thumbprint -Force
     $generatedConfigRoot = Join-Path $projectRoot "src-tauri\target\release-evidence"
     $null = New-Item -ItemType Directory -Path $generatedConfigRoot -Force
     $generatedTauriConfig = Join-Path $generatedConfigRoot ("tauri.release." + [Guid]::NewGuid().ToString("N") + ".json")
@@ -223,10 +248,6 @@ try {
             size = $file.Length
             sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
         }
-    }
-    $timestampUrl = $env:INX_SIGN_TIMESTAMP_URL
-    if ([string]::IsNullOrWhiteSpace($timestampUrl)) {
-        $timestampUrl = "http://timestamp.digicert.com"
     }
     $manifest = [ordered]@{
         schemaVersion = 1

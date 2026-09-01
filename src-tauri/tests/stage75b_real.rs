@@ -143,6 +143,13 @@ fn config() -> TestConfig {
     }
 }
 
+fn read_private_key(config: &TestConfig) -> std::io::Result<String> {
+    let path = std::env::var_os("INX_TEST_SSH_PRIVATE_KEY_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| config.project_root.join("test/id_rsa"));
+    std::fs::read_to_string(path)
+}
+
 async fn admin_pool(config: &TestConfig) -> MySqlPool {
     let options = MySqlConnectOptions::new()
         .host(&config.host)
@@ -235,10 +242,7 @@ fn release_draft(config: &TestConfig) -> ReleaseProfileDraft {
             aio_mqtt_password: "stage75b-aio-password".into(),
             ssh_user: line(&config.description, "一体机ssh用户：").into(),
             ssh_password: None,
-            ssh_private_key: Some(
-                std::fs::read_to_string(config.project_root.join("test/id_rsa"))
-                    .expect("private key"),
-            ),
+            ssh_private_key: Some(read_private_key(config).expect("private key")),
         },
         expected_version: None,
     }
@@ -341,6 +345,99 @@ async fn wait_for_terminal(state: &FormalAppState, task_id: &str) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("task did not reach terminal state: {task_id}");
+}
+
+#[tokio::test]
+#[ignore = "read-only information_schema inspection for random stage75b schemas"]
+async fn inspect_random_stage75b_schema_residue_read_only() {
+    let config = config();
+    let admin = admin_pool(&config).await;
+    let schemas = sqlx::query_scalar::<_, String>(
+        "SELECT schema_name FROM information_schema.schemata \
+         WHERE LEFT(schema_name, LENGTH('inxaiot_desk_buddy_stage75b_')) = \
+               'inxaiot_desk_buddy_stage75b_' \
+         ORDER BY schema_name",
+    )
+    .fetch_all(&admin)
+    .await
+    .expect("read stage75b schema residue");
+    println!("STAGE75B_SCHEMA_RESIDUE_COUNT={}", schemas.len());
+    for schema in schemas {
+        println!("STAGE75B_SCHEMA_RESIDUE={schema}");
+    }
+    admin.close().await;
+}
+
+fn sqlx_error_category(error: &sqlx::Error) -> String {
+    match error {
+        sqlx::Error::Database(database) => format!(
+            "database(code={},constraint={})",
+            database.code().as_deref().unwrap_or("none"),
+            database.constraint().unwrap_or("none")
+        ),
+        sqlx::Error::Io(io) => format!("io(kind={:?})", io.kind()),
+        sqlx::Error::Tls(_) => "tls".into(),
+        sqlx::Error::Configuration(_) => "configuration".into(),
+        sqlx::Error::PoolTimedOut => "pool-timeout".into(),
+        sqlx::Error::PoolClosed => "pool-closed".into(),
+        _ => "other".into(),
+    }
+}
+
+async fn preferred_pool(config: &TestConfig, schema: &str) -> Result<MySqlPool, String> {
+    let options = MySqlConnectOptions::new()
+        .host(&config.host)
+        .port(config.port)
+        .username(&config.username)
+        .password(&config.password)
+        .database(schema)
+        .charset("utf8mb4")
+        .ssl_mode(MySqlSslMode::Preferred);
+    MySqlPoolOptions::new()
+        .min_connections(0)
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(10))
+        .connect_with(options)
+        .await
+        .map_err(|error| sqlx_error_category(&error))
+}
+
+#[tokio::test]
+#[ignore = "creates one random schema and reports private-network Preferred TLS pool compatibility"]
+async fn inspect_preferred_tls_platform_and_random_workbench_pool_compatibility() {
+    let config = config();
+    let admin = admin_pool(&config).await;
+    create_schema(&admin, &config.schema).await;
+    let result: Result<(), String> = async {
+        let platform = preferred_pool(&config, &config.platform_schema)
+            .await
+            .map_err(|category| format!("platform-connect:{category}"))?;
+        sqlx::query("SET SESSION TRANSACTION READ ONLY")
+            .execute(&platform)
+            .await
+            .map_err(|error| format!("platform-read-only:{}", sqlx_error_category(&error)))?;
+        platform.close().await;
+
+        let workbench = preferred_pool(&config, &config.schema)
+            .await
+            .map_err(|category| format!("workbench-connect:{category}"))?;
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&workbench)
+            .await
+            .map_err(|error| format!("workbench-query:{}", sqlx_error_category(&error)))?;
+        workbench.close().await;
+        Ok(())
+    }
+    .await;
+    drop_schema(&admin, &config.schema).await;
+    admin.close().await;
+    match result {
+        Ok(()) => println!("STAGE75B_PREFERRED_TLS_COMPATIBLE=true"),
+        Err(category) => {
+            println!("STAGE75B_PREFERRED_TLS_COMPATIBLE=false");
+            println!("STAGE75B_PREFERRED_TLS_FAILURE={category}");
+        }
+    }
 }
 
 #[tokio::test]
@@ -570,7 +667,7 @@ async fn stage75b_real_preflight_async_progress_cancel_history_and_cleanup() {
             .task(&project_id, &cancel_task_id)
             .await?;
         let cancelled_operation_id = cancelled_view.operation_id.expect("cancel operation id");
-        let private_key = std::fs::read_to_string(config.project_root.join("test/id_rsa"))?;
+        let private_key = read_private_key(&config)?;
         for (node, identity) in confirmed {
             let session = RusshConnector::default()
                 .connect(
@@ -911,8 +1008,7 @@ async fn inspect_stage75c_ui_schema() {
 #[ignore = "read-only SSH inspection of authorized stage75b nodes"]
 async fn inspect_stage75b_node_interfaces() {
     let config = config();
-    let private_key =
-        std::fs::read_to_string(config.project_root.join("test/id_rsa")).expect("private key");
+    let private_key = read_private_key(&config).expect("private key");
     for host in ["192.168.3.79", "192.168.3.121"] {
         let session = RusshConnector::default()
             .connect(
@@ -957,8 +1053,7 @@ async fn inspect_stage75b_staging_absent() {
     let operation_id = std::env::var("INX_STAGE75_OPERATION_ID").expect("INX_STAGE75_OPERATION_ID");
     uuid::Uuid::parse_str(&operation_id).expect("operation UUID");
     let config = config();
-    let private_key =
-        std::fs::read_to_string(config.project_root.join("test/id_rsa")).expect("private key");
+    let private_key = read_private_key(&config).expect("private key");
     for node in real_nodes() {
         let session = RusshConnector::default()
             .connect(
@@ -1006,8 +1101,7 @@ async fn cleanup_exact_stage75b_staging() {
     let operation_id = std::env::var("INX_STAGE75_OPERATION_ID").expect("INX_STAGE75_OPERATION_ID");
     uuid::Uuid::parse_str(&operation_id).expect("operation UUID");
     let config = config();
-    let private_key =
-        std::fs::read_to_string(config.project_root.join("test/id_rsa")).expect("private key");
+    let private_key = read_private_key(&config).expect("private key");
     for node in real_nodes() {
         let session = RusshConnector::default()
             .connect(

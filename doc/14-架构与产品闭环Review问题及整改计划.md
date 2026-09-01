@@ -316,4 +316,9 @@ TaskSubmissionService
 - 最终默认Feature Release基于a0008b6，大小11987968字节，SHA-256为FBE660633418908A1784A002899C042DFE893EBCCB34B8E347C7BF5DBB65A1D3，无WebDriver/Fixture标记。
 - P1-08已关闭：用户明确授权后，Agent 0.1.3仅在三个固定根目录按30/14/3天清理直接子目录；两节点实证递归清理边界、停服复制、相对路径、恢复启动和四容器运行状态，所有唯一测试资产精确删除。
 - P1-20采用现有公司内网Jenkins专用Windows Runner，不向GitHub等第三方上传源码；NSIS、CycloneDX、SHA-256、CMS清单签名、Authenticode和外部不可覆盖产物根脚本已建立。受信签名证书尚未激活：当前无企业CA/既有证书，将自签名证书加入CurrentUser Root/TrustedPublisher需要单独明确授权，未获前不得标记关闭。
+- P0-06已关闭真实门禁：同instanceId第二Operation和不同实例竞争均被拒，释放后fencing递增，唯一租约计数行清理为0。
+- P0-09已关闭：两节点路径穿越和同版本Release均在Compose前拒绝，`current`不变且fixture零残留。
+- P0-11远端故障分支已通过：两节点Compose启动失败与健康失败均按84/86返回并恢复.env、原镜像和running；SSH/SFTP取消与超时分类通过。该项仍被跨服务数据迁移阻断：node121旧rule-engine SQLite缺少当前镜像所需`record_type`，不得以重启代替迁移。
+- 开发MySQL的私网Preferred TLS在Rustls和Windows Native TLS下均无法完成握手；未获精确明文授权前保持fail-closed。stage75b随机Schema均已清理，平台业务库没有写入。
+- 7.5-D正式Tauri数据目录切换/回滚/非空阻断复验通过并清理目录；原生第二进程对话框、系统文件对话框和其余故障场景仍需人工/工具恢复后补验。
 - 阶段7.5-D继续保持“整改中”，阶段8、当前Release对外分发和原工作台退役继续冻结。

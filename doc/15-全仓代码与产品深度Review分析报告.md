@@ -8,7 +8,7 @@
 | Review 范围 | Rust/Tauri、Vue/Pinia、SQLite/MySQL、平台认证、SSH/SFTP、Shell Agent、Release/模板、三类部署、任务/恢复、数据目录、日志/脱敏、测试、依赖与发布 |
 | 代码规模 | 283个正式文件；147个Rust、68个TypeScript、8个Vue、4个SQL；54个测试相关文件 |
 | IPC与测试 | 整改后46个Tauri Command、46个shared/api invoke点；17个前端Spec、38个Rust集成测试文件、36个真实环境ignore测试 |
-| 当前结论 | P0-13与P0-15代码根因、隔离集成及自动门禁已关闭；非RSA双节点、正式桌面故障场景及外部发布门禁仍阻断阶段8 |
+| 当前结论 | P0-06/P0-07/P0-09、P1-08及Ed25519双节点主链已关闭；P0-11故障回滚分支通过但暴露rule-engine旧SQLite迁移缺口，开发MySQL TLS、正式桌面故障和受信发布仍阻断阶段8 |
 
 ## 1. 执行摘要
 
@@ -650,16 +650,16 @@ Vue Page
 | P0-03 | 已关闭 | execute_deployment Command、前端API、Real Adapter方法和应用层同步入口全部删除；契约测试确认仅保留preflight→submit→Handler路径 | 无 |
 | P0-04 | 能力已关闭，真实门禁待补 | payload包含版本化执行快照、Profile版本、节点版本、HostKey、发布物指纹；payload SHA-256校验；发布物复制到任务专属目录后复算指纹 | 需以非RSA密钥重跑预检后修改源文件/Profile/节点/HostKey的真实阻断门禁 |
 | P0-05 | 能力已关闭，用户门禁待补 | 项目活动任务前置守卫+SQLite触发器；Operations/Project/Release/AIO Store请求代次；任务始终按原项目轮询/取消；删除当前项目真实切换下一项目 | 需桌面快速切换与活动任务删除/编辑用户门禁 |
-| P0-06 | 代码已关闭 | 活动未过期租约不再按owner放行；同实例第二操作真实MySQL测试已写入 | 需用隔离标识运行该ignore真实门禁并精确清理 |
+| P0-06 | 已关闭 | 唯一`poc:lease:UUID`实证同instanceId第二Operation和不同实例均冲突；释放后fencing递增，计数行精确清理为0 | 无 |
 | P0-07 | 已关闭 | fencing行锁、目标结果、服务版本、资产、操作和租约释放进入同一MySQL事务；真实随机Schema证明stale fencing拒绝、中途SQL失败全回滚、成功收敛和重复拒写；执行前后information_schema残留均为0 | 无 |
 | P0-08 | 能力已关闭 | 正式Outcome Reconciler已接入；缺失Handler、spawn失败、panic、abort、cancel统一持久化；dispatching状态消除取消边界；广播滞后审计未跟踪任务 | 需桌面任务panic/缺失Handler故障注入门禁 |
-| P0-09 | 代码已关闭，Linux门禁待补 | Rust和Agent双层限制128字节安全版本段；Agent只在受控releases子目录删除；同版本目录不可覆盖 | 需授权Linux节点路径穿越与同版本重复门禁 |
+| P0-09 | 已关闭 | 两节点`../escape-*`以40拒绝、同版本以37拒绝，事件流均未进入Compose；current不变且fixture零残留 | 无 |
 | P0-10 | 代码已关闭，Linux门禁待补 | 渲染Compose写入每节点任务文件、SFTP上传并传递REMOTE_COMPOSE，Agent覆盖Release内Compose后才启动；全部上传文件带SHA-256 | 需两节点修改Compose值后远端实际文件/容器配置变化门禁 |
-| P0-11 | 代码已关闭，Linux故障门禁待补 | Agent 0.1.2增加整包启动/健康回滚、HostInfo恢复、单服env/镜像回滚、严格备份；SSH取消/超时发送TERM/KILL；清理失败不再成功 | 当前Windows无POSIX sh；需非RSA授权节点执行compose失败、health失败、取消和回滚门禁 |
+| P0-11 | 故障分支通过，数据迁移阻断 | Agent 0.1.3两节点Compose启动失败/健康失败分别以84/86返回并发出rollback success，恢复.env哈希、原镜像和running；SSH非零/超时/取消及SFTP预取消通过 | node121旧rule-engine SQLite缺少record_type，跨服务重启前缺少Schema迁移/预检契约；修复和两节点Compose配置传播后才能关闭 |
 | P0-12 | 真实集成已通过，桌面过期门禁待补 | 缺失expires_in强制30分钟；每60秒真实Token只读校验；401/403清理会话，网络异常fail-closed；授权平台真实登录+ /sys/menu/nav 契约通过 | 需桌面Token撤销/到期后页面立即关闭业务入口门禁 |
 | P0-13 | 能力、隔离集成和自动用户门禁已关闭 | 随机版本化项目主密钥、旧密文事务迁移、数据库密码解耦、轮换失败回滚、Windows Credential Manager、项目绑定口令包、缺钥页面恢复入口和精确清理均通过 | 需正式Tauri原生保存/打开对话框执行一次人工用户门禁；不再属于架构或数据可恢复性缺口 |
-| P0-14 | 能力已关闭，桌面崩溃门禁待补 | 同盘staging、逐文件SHA-256、完成标记、原子改名、残留staging清理、损坏主配置回退备份、真实祖先路径/联接阻断、启动维护best-effort测试通过 | 需正式Tauri复制中断/改名后崩溃/损坏sidecar用户门禁 |
-| P0-15 | 代码能力关闭，真实主链通过 | 既有安全能力不变；临时Ed25519在两节点通过认证、HostKey捕获/固定/变化阻断、SFTP哈希传输、Agent和P1-08 Compose停启，验收后公私钥零残留 | Compose失败、取消和回滚仍按P0-11门禁补齐 |
+| P0-14 | 能力关闭，正常桌面门禁通过 | 既有崩溃一致性能力不变；正式Tauri空白identifier完成切换、重启生效、实际路径、回滚、再次重启和非空阻断，目录零残留 | 仍需复制中断/改名后崩溃/损坏sidecar桌面门禁 |
+| P0-15 | SSH主链与故障分支通过，MySQL TLS阻断 | Ed25519两节点认证、HostKey、SFTP、Agent、P1-08、P0-09和P0-11均通过并零密钥残留；RSA拒绝、日志脱敏和依赖契约不变 | 私网Preferred TLS对开发MySQL以Rustls/Native TLS均握手失败；不得用未授权明文降级代替 |
 
 ### 12.3 已随P0关闭的P1问题
 
@@ -691,10 +691,14 @@ Vue Page
 - 真实最终化：随机隔离Schema门禁通过stale fencing、事务触发器失败、成功/重复最终化；门禁前后`FINALIZATION_SCHEMA_RESIDUE_COUNT=0`。
 - 真实SSH/Docker：两节点临时Ed25519通过HostKey、2MiB SFTP、Agent和P1-08 Compose停启/恢复；唯一远端测试资产、公钥和本机密钥目录均精确删除。现有RSA 4096测试私钥仍保持拒绝。
 - 发布基础设施：CycloneDX 1.5实测905组件，Tauri发布配置完成debug/no-bundle构建；未签名NSIS冒烟包成功生成并被断言为`NotSigned`，记录大小/哈希后删除，临时配置零残留。发布脚本以target内临时配置注入签名脚本绝对路径，正式产物根要求管理员预置并拒绝宽泛写ACL。创建自签名证书及加入CurrentUser Root/TrustedPublisher的命令在执行前被安全审查拒绝；复查My/Root/TrustedPublisher计数均0，`D:\inxaiot-release-artifacts`不存在，无持久副作用。
+- 真实租约/Agent：P0-06唯一计数行清理为0；P0-09两节点在Compose前拒绝；P0-11两节点Compose/健康故障回滚和SSH/SFTP取消通过，第二批临时Ed25519及`p009/p011`资产零残留。
+- 正式Tauri：7.5-D数据目录切换、重启、About实际路径、回滚和非空阻断通过，专用数据目录清理完成；Computer Use辅助进程连续初始化失败后停止，未用PowerShell UI Automation绕过。
+- CI稳定性：完整App挂载在全量并发下实际耗时超过15秒，测试超时容量校准为30秒但断言完全不变；复跑18文件39项全部通过，避免发布流水线偶发假红。
+- 新阻断证据：Stage75Adapter的Preferred TLS在开发MySQL返回`platform-connect:io(kind=InvalidData)`，Native TLS同样失败且已回退，所有stage75b随机Schema残留为0；node121 rule-engine日志与只读PRAGMA证明`rule_definition`缺少`record_type`，node79同表具备该列，未修改任一边缘数据库。
 
 ### 12.5 当前准入结论
 
 - 阶段7.5-D仍为“整改中”，阶段8继续暂停。
-- P0-07与P1-08新增真实门禁已关闭，Ed25519双节点主链已通过；代码门禁仍不能替代剩余正式桌面和远端故障/取消/回滚门禁。
-- 当前高优先级唯一发布阻断为P1-20受信签名证书与首个签名安装包。内网Jenkins和产物脚本已经确定，但持久加入自签名信任根需要用户对精确证书Subject、CurrentUser Root/TrustedPublisher范围和撤销方案再次明确授权。
-- 阶段7.5-D仍为“整改中”，阶段8继续暂停；不得把未受信或仅自签但未验证的安装包记为完成。
+- P0-06/P0-07/P0-09与P1-08已关闭，Ed25519双节点主链及P0-11故障回滚分支已通过；代码门禁仍不能替代剩余正式桌面和跨服务数据迁移门禁。
+- 当前三个外部/环境阻断为：node121 rule-engine SQLite受控备份迁移与恢复、开发MySQL受信TLS配置（或用户精确接受测试明文风险）、P1-20受信签名证书与首个安装包。任何一项未关闭都不能进入阶段8。
+- 阶段7.5-D仍为“整改中”，阶段8继续暂停；不得以重启掩盖Schema漂移，也不得把未受信安装包记为完成。

@@ -46,6 +46,21 @@ fn production_logs_do_not_emit_raw_errors_or_untrusted_response_text() {
 }
 
 #[test]
+fn mysql_tls_contract_has_no_plaintext_e2e_override_and_uses_rustls() {
+    let manifest = include_str!("../Cargo.toml");
+    assert!(manifest.contains("runtime-tokio-rustls"));
+    assert!(!manifest.contains("runtime-tokio-native-tls"));
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/infrastructure/stage75_adapter.rs"),
+    )
+    .expect("stage75 adapter source");
+    assert!(!source.contains("INX_DESKTOP_E2E_ALLOW_PLAINTEXT_MYSQL"));
+    assert!(source.contains("DatabaseTlsMode::Required"));
+    assert!(source.contains("DatabaseTlsMode::Preferred"));
+}
+
+#[test]
 fn ssh_dependency_contract_disables_rsa_and_rejects_yanked_chacha20() {
     let manifest = include_str!("../Cargo.toml");
     assert!(manifest.contains(

@@ -31,7 +31,10 @@ const platformYaml = readFileSync(
 );
 const envTemplate = readFileSync(resolve(projectRoot, "test/templates/env.template"), "utf8");
 const composeTemplate = readFileSync(resolve(projectRoot, "test/docker-compose.yml"), "utf8");
-const privateKey = readFileSync(resolve(projectRoot, "test/id_rsa"), "utf8");
+const privateKey = readFileSync(
+  process.env.INX_TEST_SSH_PRIVATE_KEY_PATH ?? resolve(projectRoot, "test/id_rsa"),
+  "utf8"
+);
 
 function line(label) {
   const value = description.split(/\r?\n/).find((item) => item.trim().startsWith(label));

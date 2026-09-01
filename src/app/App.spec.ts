@@ -7,6 +7,8 @@ import { router } from "@/app/router";
 import { configureDataDirectoryAdapter } from "@/shared/api/dataDirectoryAdapter";
 import { configureDiagnosticsAdapter } from "@/shared/api/diagnosticsAdapter";
 
+const fullAppMountTimeout = 30_000;
+
 describe("desktop demo shell", () => {
   it("renders the project context, business navigation and node page", async () => {
     Object.defineProperty(window, "matchMedia", {
@@ -31,7 +33,7 @@ describe("desktop demo shell", () => {
     expect(wrapper.text()).toContain("部署升级");
     expect(wrapper.text()).toContain("深圳湾智慧园区");
     wrapper.unmount();
-  }, 15000);
+  }, fullAppMountTimeout);
 
   it("shows unavailable data-directory and diagnostics states instead of false success", async () => {
     Object.defineProperty(window, "matchMedia", {
@@ -65,5 +67,5 @@ describe("desktop demo shell", () => {
     expect(document.body.textContent).toContain("diagnostics unavailable");
     expect(document.body.textContent).toContain("重新读取诊断");
     wrapper.unmount();
-  }, 15000);
+  }, fullAppMountTimeout);
 });

@@ -43,6 +43,37 @@ function Find-SigningCertificate {
     throw "签名证书不存在：$Thumbprint"
 }
 
+function Repair-CurrentUserSigningCertificate {
+    param(
+        [string]$Thumbprint,
+        [string]$RepairRoot
+    )
+    $publicCertificate = Get-ChildItem "Cert:\CurrentUser\Root" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Thumbprint -eq $Thumbprint } |
+        Select-Object -First 1
+    if ($null -eq $publicCertificate) {
+        throw "签名证书缺失且Root中没有可修复公钥：$Thumbprint"
+    }
+    $null = New-Item -ItemType Directory -Path $RepairRoot -Force
+    $publicPath = Join-Path $RepairRoot ("$Thumbprint.repair.cer")
+    try {
+        Export-Certificate -Cert $publicCertificate -FilePath $publicPath -Force | Out-Null
+        & certutil.exe -user -f -addstore My $publicPath | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "签名公钥重新导入My失败"
+        }
+        & certutil.exe -user -repairstore My $Thumbprint | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "签名证书与原CNG私钥重新关联失败"
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $publicPath) {
+            Remove-Item -LiteralPath $publicPath -Force
+        }
+    }
+}
+
 function Assert-SignedFile {
     param(
         [string]$File,
@@ -144,7 +175,14 @@ try {
     if ($thumbprint -notmatch "^[0-9A-F]{40}$") {
         throw "INX_SIGN_CERT_THUMBPRINT 必须是40位SHA-1证书指纹"
     }
-    $certificate = Find-SigningCertificate -Thumbprint $thumbprint
+    $generatedConfigRoot = Join-Path $projectRoot "src-tauri\target\release-evidence"
+    try {
+        $certificate = Find-SigningCertificate -Thumbprint $thumbprint
+    }
+    catch {
+        Repair-CurrentUserSigningCertificate -Thumbprint $thumbprint -RepairRoot $generatedConfigRoot
+        $certificate = Find-SigningCertificate -Thumbprint $thumbprint
+    }
     if (-not $certificate.HasPrivateKey) {
         throw "签名证书没有可用私钥"
     }
@@ -207,9 +245,11 @@ try {
     $releaseConfig.bundle.windows.tsp = $true
     $releaseConfig.bundle.windows |
         Add-Member -NotePropertyName certificateThumbprint -NotePropertyValue $thumbprint -Force
-    $generatedConfigRoot = Join-Path $projectRoot "src-tauri\target\release-evidence"
     $null = New-Item -ItemType Directory -Path $generatedConfigRoot -Force
-    $generatedTauriConfig = Join-Path $generatedConfigRoot ("tauri.release." + [Guid]::NewGuid().ToString("N") + ".json")
+    $generatedTauriConfig = Join-Path $generatedConfigRoot "tauri.release.generated.json"
+    if (Test-Path -LiteralPath $generatedTauriConfig) {
+        Remove-Item -LiteralPath $generatedTauriConfig -Force
+    }
     [System.IO.File]::WriteAllText($generatedTauriConfig, ($releaseConfig | ConvertTo-Json -Depth 30), [System.Text.UTF8Encoding]::new($false))
     $buildStarted = (Get-Date).ToUniversalTime().AddMinutes(-1)
     Invoke-NativeStep "构建并签名NSIS安装包" {
@@ -301,7 +341,7 @@ finally {
         $generatedConfigFull = [System.IO.Path]::GetFullPath($generatedTauriConfig)
         $allowedConfigRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "src-tauri\target\release-evidence"))
         if ($generatedConfigFull.StartsWith($allowedConfigRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -and
-            (Split-Path -Leaf $generatedConfigFull).StartsWith("tauri.release.")) {
+            (Split-Path -Leaf $generatedConfigFull) -eq "tauri.release.generated.json") {
             Remove-Item -LiteralPath $generatedConfigFull -Force
         }
     }

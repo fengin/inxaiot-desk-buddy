@@ -171,7 +171,7 @@ fn optional_value(
 }
 
 fn invalid_csv(operation: &'static str, error: &csv::Error) -> AppError {
-    tracing::warn!(operation, error = ?crate::core::log_safety::safe_error(&error), "invalid inventory csv");
+    tracing::warn!(operation, error = ?crate::core::log_safety::safe_error(error), "invalid inventory csv");
     AppError::InvalidConfig(format!("{operation}失败：CSV 格式无效"))
 }
 

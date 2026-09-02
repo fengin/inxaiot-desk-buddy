@@ -30,6 +30,13 @@ pnpm dev
 pnpm tauri dev
 ```
 
+## 免安装编译与正式交付
+
+- Windows：`pnpm build:windows`生成`src-tauri/target/release/inxaiot-desk-buddy.exe`，直接运行，不生成安装器；系统需要WebView2运行时。
+- macOS：在Mac上执行`pnpm build:macos`，将输出的完整`.app`复制到“应用程序”目录。Windows不能替代Mac原生构建与运行验证。
+- 正式Windows产物：使用`scripts/release-internal.ps1`从干净提交构建，再用`scripts/verify-internal-release.ps1`校验。完整说明见[发布与回滚](doc/16-Windows可信发布与回滚说明.md)。
+- 发布参数接受已有RSA、Ed25519、ECDSA私钥内容，继续加密存入工作台库；RSA认证使用SHA-2，无需追加新公钥。
+
 ## 质量检查
 
 ```powershell

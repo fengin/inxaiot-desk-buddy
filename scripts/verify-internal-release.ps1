@@ -34,9 +34,19 @@ if ((Test-Path -LiteralPath (Join-Path $root "release-manifest.p7s")) -or
     throw "内部无签名产物集不得混入历史签名文件"
 }
 $manifest = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
-if ($manifest.schemaVersion -ne 2 -or $manifest.integrity.policy -ne "internal-unsigned-sha256" -or
+if ($manifest.schemaVersion -notin @(2, 3) -or $manifest.integrity.policy -ne "internal-unsigned-sha256" -or
     $manifest.integrity.authenticodeRequired -ne $false -or $manifest.git.dirty -ne $false) {
     throw "内部产物清单策略或Git状态无效"
+}
+$requiredRoles = @("portable", "sbom")
+if ($manifest.schemaVersion -eq 2) {
+    # 保留历史NSIS产物的复验能力，不将旧安装包当成新便携版。
+    $requiredRoles += "installer"
+}
+elseif ($manifest.distribution.os -ne "windows" -or
+    $manifest.distribution.architecture -ne "x64" -or
+    $manifest.distribution.package -ne "portable-exe") {
+    throw "免安装产物平台或分发类型无效"
 }
 $commit = ([string]$manifest.git.commit).ToLowerInvariant()
 $tree = ([string]$manifest.git.tree).ToLowerInvariant()
@@ -57,7 +67,7 @@ foreach ($entry in $manifest.files) {
     }
     $manifestNames[$name] = $true
     $role = [string]$entry.role
-    if ($role -notin @("portable", "installer", "sbom")) {
+    if ($role -notin $requiredRoles) {
         throw "清单文件角色非法：$role"
     }
     if (-not $roleCounts.ContainsKey($role)) {
@@ -83,7 +93,7 @@ foreach ($entry in $manifest.files) {
         }
     }
 }
-foreach ($requiredRole in @("portable", "installer", "sbom")) {
+foreach ($requiredRole in $requiredRoles) {
     if (-not $roleCounts.ContainsKey($requiredRole) -or $roleCounts[$requiredRole] -ne 1) {
         throw "清单必须且只能包含一个$requiredRole文件"
     }

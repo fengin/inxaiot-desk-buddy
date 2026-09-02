@@ -239,7 +239,7 @@ async function confirmHostKey(replaceChanged: boolean) {
             <label>SSH 端口<n-input-number v-model:value="release.draft.values.sshPort" data-testid="release-ssh-port" size="small" :disabled="!editing" :show-button="false" /></label>
             <label>连接超时（秒）<n-input-number v-model:value="release.draft.values.sshTimeoutSeconds" data-testid="release-ssh-timeout" size="small" :disabled="!editing" :show-button="false" /></label>
             <label>SSH 密码<n-input v-model:value="release.draft.credentials.sshPassword" type="password" show-password-on="click" size="small" :disabled="!editing" /></label>
-            <label class="span-2">SSH 私钥（可选）<n-input v-model:value="release.draft.credentials.sshPrivateKey" data-testid="release-ssh-private-key" type="textarea" size="small" :disabled="!editing" placeholder="粘贴项目共享私钥内容" :autosize="{ minRows: 2, maxRows: 4 }" /></label>
+            <label class="span-2">SSH 私钥（可选，保存时加密）<n-input v-model:value="release.draft.credentials.sshPrivateKey" data-testid="release-ssh-private-key" type="textarea" size="small" :disabled="!editing" placeholder="粘贴无口令的 RSA、Ed25519 或 ECDSA 私钥内容" :autosize="{ minRows: 2, maxRows: 4 }" /></label>
           </div></div>
           <div class="form-section"><h3>远端目录</h3><div class="form-grid">
             <label>数据根目录<n-input v-model:value="release.draft.values.aioDataRoot" data-testid="release-data-root" size="small" :disabled="!editing" /></label>

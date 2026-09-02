@@ -111,9 +111,8 @@ try {
     Invoke-NativeStep "生成CycloneDX SBOM" {
         & (Join-Path $PSScriptRoot "generate-sbom.ps1") -OutputPath (Join-Path $staging "sbom.cdx.json") -Commit $commit
     }
-    $buildStarted = (Get-Date).ToUniversalTime().AddMinutes(-1)
-    Invoke-NativeStep "构建内部NSIS安装包" {
-        pnpm tauri build --bundles nsis --config src-tauri/tauri.release.conf.json
+    Invoke-NativeStep "构建内部免安装Release程序" {
+        pnpm tauri build --no-bundle --config src-tauri/tauri.release.conf.json
     }
     $buildDependencyMetadata = Join-Path $projectRoot "src-tauri\target\release\deps\inxaiot_desk_buddy_lib.d"
     if (-not [System.IO.File]::Exists($buildDependencyMetadata)) {
@@ -132,23 +131,20 @@ try {
         throw "发布构建期间源码、Git提交或Tree发生变化"
     }
     $portableSource = Join-Path $projectRoot "src-tauri\target\release\inxaiot-desk-buddy.exe"
-    $installerSource = Get-ChildItem (Join-Path $projectRoot "src-tauri\target\release\bundle\nsis") -Filter "*.exe" -File |
-        Where-Object { $_.LastWriteTimeUtc -ge $buildStarted } |
-        Sort-Object LastWriteTimeUtc -Descending |
-        Select-Object -First 1
-    if (-not (Test-Path -LiteralPath $portableSource) -or $null -eq $installerSource) {
-        throw "Tauri没有生成预期的裸程序或NSIS安装包"
+    if (-not (Test-Path -LiteralPath $portableSource)) {
+        throw "Tauri没有生成预期的免安装程序"
     }
     Assert-UnsignedFile -File $portableSource
-    Assert-UnsignedFile -File $installerSource.FullName
+    $peBytes = [System.IO.File]::ReadAllBytes($portableSource)
+    $peOffset = [BitConverter]::ToInt32($peBytes, 0x3c)
+    if ([BitConverter]::ToUInt16($peBytes, $peOffset + 4) -ne 0x8664) {
+        throw "Windows内部发布要求x64程序"
+    }
 
     $portableTarget = Join-Path $staging "inxaiot-desk-buddy-$version-x64.exe"
-    $installerTarget = Join-Path $staging "inxaiot-desk-buddy-$version-x64-setup.exe"
     Copy-Item -LiteralPath $portableSource -Destination $portableTarget
-    Copy-Item -LiteralPath $installerSource.FullName -Destination $installerTarget
     $roles = [ordered]@{
         (Split-Path -Leaf $portableTarget) = "portable"
-        (Split-Path -Leaf $installerTarget) = "installer"
         "sbom.cdx.json" = "sbom"
     }
     $files = @()
@@ -162,10 +158,17 @@ try {
         }
     }
     $manifest = [ordered]@{
-        schemaVersion = 2
+        schemaVersion = 3
         product = "INX 实施工作台"
         identifier = "com.inxaiot.desk-buddy"
         version = $version
+        distribution = [ordered]@{
+            os = "windows"
+            architecture = "x64"
+            package = "portable-exe"
+            runtime = "Microsoft Edge WebView2 Evergreen Runtime"
+            applicationData = "per-user-standard-app-data"
+        }
         git = [ordered]@{ commit = $commit; tree = $tree; branch = $branch; dirty = $false }
         build = [ordered]@{
             timeUtc = (Get-Date).ToUniversalTime().ToString("o")
@@ -179,7 +182,7 @@ try {
             trustBoundary = "restricted-ntfs-acl-and-source-repository"
         }
         rollback = [ordered]@{
-            strategy = "verify-hash-and-run-prior-immutable-installer"
+            strategy = "backup-app-data-verify-hash-and-run-prior-immutable-portable"
             allowDowngrade = $true
             artifactRoot = $artifactRootFull
         }

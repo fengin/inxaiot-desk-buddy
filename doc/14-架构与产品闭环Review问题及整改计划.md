@@ -1,5 +1,7 @@
 # 架构与产品闭环 Review 问题及整改计划
 
+> 2026-09-02最新确认：Windows交付免安装Release EXE，macOS交付`.app`；RSA私钥必须兼容。下文历史“不得复用RSA/必须NSIS”的结论已被取代。RSA改用AWS-LC自定义Signer，保留SHA-2、HostKey校验与加密存储，仍禁用russh自身RSA私钥实现。阶段8以新干净提交的正式免安装EXE验收，不新增Ed25519公钥。实现与验证状态见doc/05、doc/16。
+
 | 属性 | 内容 |
 | --- | --- |
 | 文档日期 | 2026-08-31 |

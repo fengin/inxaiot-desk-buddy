@@ -8,6 +8,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "vue-tsc --noEmit && vite build",
+    "build:windows": "tauri build --no-bundle --config src-tauri/tauri.release.conf.json",
+    "build:macos": "node scripts/build-macos.mjs",
     "preview": "vite preview --host 127.0.0.1 --port 1420",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "vue-tsc --noEmit",

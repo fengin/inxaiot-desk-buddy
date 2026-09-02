@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": ["target/macos-assets/icon.png", "target/macos-assets/icon.icns"],
+    "publisher": "INXVision"
+  }
+}

@@ -2765,6 +2765,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "argon2 0.5.3",
+ "aws-lc-rs",
  "base64 0.22.1",
  "csv",
  "hex",

@@ -18,6 +18,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 aes-gcm = "0.11.1"
 argon2 = "0.5.3"
+aws-lc-rs = "1.18.0"
 base64 = "0.22"
 csv = "1.3"
 hex = "0.4"

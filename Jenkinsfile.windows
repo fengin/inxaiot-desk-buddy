@@ -9,7 +9,7 @@ pipeline {
 
     parameters {
         booleanParam(name: 'RUN_REAL_GATES', defaultValue: false, description: '在受控开发MySQL和两节点上执行显式ignore真实门禁')
-        booleanParam(name: 'PUBLISH_INTERNAL_RELEASE', defaultValue: false, description: '生成无签名、SHA-256校验且不可覆盖的内部NSIS产物集')
+        booleanParam(name: 'PUBLISH_INTERNAL_RELEASE', defaultValue: false, description: '生成无签名、SHA-256校验且不可覆盖的内部免安装EXE产物集')
     }
 
     environment {

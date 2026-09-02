@@ -63,7 +63,7 @@ fn mysql_tls_is_project_optional_defaults_to_plaintext_and_uses_rustls_when_enab
 }
 
 #[test]
-fn ssh_dependency_contract_disables_rsa_and_rejects_yanked_chacha20() {
+fn ssh_rsa_signing_uses_aws_lc_without_russh_rsa_feature_or_yanked_chacha20() {
     let manifest = include_str!("../Cargo.toml");
     assert!(manifest.contains(
         "russh = { version = \"0.63.1\", default-features = false, features = [\"aws-lc-rs\", \"flate2\"] }"
@@ -75,6 +75,30 @@ fn ssh_dependency_contract_disables_rsa_and_rejects_yanked_chacha20() {
         .expect("chacha20 lock entry");
     assert!(chacha.contains("version = \"0.10.2\""));
     assert!(!lock.contains("version = \"0.10.0-rc.18\""));
+    let signing = include_str!("../src/infrastructure/remote/private_key.rs");
+    assert!(signing.contains("signature::RsaKeyPair"));
+    assert!(signing.contains("signature::RSA_PKCS1_SHA256"));
+    assert!(signing.contains("signature::RSA_PKCS1_SHA512"));
+    assert!(!signing.contains("rsa::pkcs1v15::SigningKey"));
+    assert!(!signing.contains("RSA_PKCS1_SHA1"));
+}
+
+#[test]
+fn distribution_defaults_to_windows_portable_and_macos_app() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let release = std::fs::read_to_string(root.join("scripts/release-internal.ps1")).unwrap();
+    assert!(release.contains("tauri build --no-bundle"));
+    assert!(release.contains("schemaVersion = 3"));
+    assert!(!release.contains("--bundles nsis"));
+    assert!(!release.contains("-setup.exe"));
+    let windows: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.release.conf.json")).unwrap();
+    assert_eq!(windows["bundle"]["active"], false);
+    let macos: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.macos.conf.json")).unwrap();
+    assert_eq!(macos["bundle"]["targets"], serde_json::json!(["app"]));
 }
 
 #[test]

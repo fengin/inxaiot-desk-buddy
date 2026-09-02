@@ -2,7 +2,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use russh::client;
-use russh::keys::decode_secret_key;
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::{HashAlg, PublicKeyOrCertificate};
 use russh::{ChannelMsg, Disconnect, Sig};
@@ -27,6 +26,9 @@ use crate::application::ports::remote_session::{
 };
 use crate::core::error::{AppError, AppResult};
 
+mod private_key;
+use private_key::SigningKey;
+
 const DEFAULT_TRANSPORT_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(150);
 const MAX_REMOTE_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -45,16 +47,7 @@ impl Default for RusshConnector {
 }
 
 pub fn validate_private_key_algorithm(private_key: &str) -> AppResult<()> {
-    let key = decode_secret_key(private_key, None)
-        .map_err(|error| AppError::ssh("解析SSH私钥", error))?;
-    let algorithm = format!("{:?}", key.algorithm());
-    if algorithm.starts_with("Ed25519") || algorithm.starts_with("Ecdsa") {
-        Ok(())
-    } else {
-        Err(AppError::InvalidConfig(format!(
-            "SSH私钥算法{algorithm}不受支持；请迁移为Ed25519或ECDSA，RSA私钥因已知时序风险已禁用"
-        )))
-    }
+    SigningKey::parse(private_key, None).map(|_| ())
 }
 
 impl RusshConnector {
@@ -112,6 +105,20 @@ impl RemoteConnector for RusshConnector {
     ) -> AppResult<Self::Connection> {
         target.validate()?;
         auth.validate()?;
+        // 本地密钥解析/转换在连接前完成，不暴露为网络认证过程中的计时操作。
+        let signing_key = match auth {
+            RemoteAuth::PrivateKey {
+                private_key,
+                passphrase,
+                ..
+            } => Some(SigningKey::parse(
+                private_key.expose(),
+                passphrase
+                    .as_ref()
+                    .map(crate::core::secret::SecretValue::expose),
+            )?),
+            RemoteAuth::Password { .. } => None,
+        };
         let captured = Arc::new(Mutex::new(None));
         let handler = ClientHandler {
             policy: host_key_policy.clone(),
@@ -149,32 +156,35 @@ impl RemoteConnector for RusshConnector {
                 .authenticate_password(username, password.expose())
                 .await
                 .map_err(|error| AppError::ssh("SSH密码认证", error))?,
-            RemoteAuth::PrivateKey {
-                username,
-                private_key,
-                passphrase,
-            } => {
-                let key = decode_secret_key(
-                    private_key.expose(),
-                    passphrase
-                        .as_ref()
-                        .map(crate::core::secret::SecretValue::expose),
-                )
-                .map_err(|error| AppError::ssh("解析SSH私钥", error))?;
-                let algorithm = format!("{:?}", key.algorithm());
-                if !algorithm.starts_with("Ed25519") && !algorithm.starts_with("Ecdsa") {
-                    return Err(AppError::InvalidConfig(format!(
-                        "SSH私钥算法{algorithm}不受支持；请迁移为Ed25519或ECDSA"
-                    )));
-                }
-                handle
+            RemoteAuth::PrivateKey { username, .. } => match signing_key {
+                Some(SigningKey::Native(key)) => handle
                     .authenticate_publickey(
                         username,
-                        PrivateKeyWithHashAlg::new(Arc::new(key), None),
+                        PrivateKeyWithHashAlg::new(Arc::new(*key), None),
                     )
                     .await
-                    .map_err(|error| AppError::ssh("SSH私钥认证", error))?
-            }
+                    .map_err(|error| AppError::ssh("SSH私钥认证", error))?,
+                Some(SigningKey::Rsa(mut signer)) => {
+                    let hash = match handle.best_supported_rsa_hash().await
+                        .map_err(|error| AppError::ssh("协商RSA签名算法", error))? {
+                        Some(Some(hash)) => hash,
+                        None => HashAlg::Sha256,
+                        Some(None) => return Err(AppError::InvalidConfig(
+                            "SSH服务器不支持RSA SHA-2签名；请启用rsa-sha2-256/512，密钥本身无需更换".into()
+                        )),
+                    };
+                    handle
+                        .authenticate_publickey_with(
+                            username,
+                            signer.public_key.clone(),
+                            Some(hash),
+                            signer.as_mut(),
+                        )
+                        .await
+                        .map_err(|error| AppError::ssh("SSH RSA私钥认证", error))?
+                }
+                None => return Err(AppError::InvalidConfig("未提供SSH私钥".into())),
+            },
         };
         if !authenticated.success() {
             return Err(AppError::Ssh {

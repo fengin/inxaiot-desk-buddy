@@ -27,6 +27,9 @@ use crate::formal::release_master_key::ReleaseMasterKeyManager;
 use crate::formal::release_profile_repository::{ReleaseProfileRecord, ReleaseProfileRepository};
 use crate::formal::resource_lease_repository::ResourceLeaseRepository;
 use crate::infrastructure::aio_assets_service::project_operator;
+use crate::infrastructure::deployment_preflight_probes::{
+    local_endpoint_checks, remote_endpoint_check, remote_environment_checks,
+};
 use crate::infrastructure::local_sqlite::host_key_repository::{HostKeyRecord, HostKeyRepository};
 use crate::infrastructure::project_context::{map_formal_error, project_database};
 use crate::infrastructure::remote::RusshConnector;
@@ -68,59 +71,17 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
         let artifact_fingerprint = inspected.fingerprint;
         let runtime = inspected.runtime;
 
-        let session_ready = match project_operator(self.state, project_id).await {
-            Ok(operator) => {
-                checks.push(passed(
-                    "project_session",
-                    "平台会话",
-                    None,
-                    format!("已登录：{operator}"),
-                ));
-                true
-            }
-            Err(error) => {
-                checks.push(failed(
-                    "project_session",
-                    "平台会话",
-                    None,
-                    error.to_string(),
-                    remediation("login_project", "重新登录", None, None),
-                ));
-                false
-            }
-        };
-
-        let pools = match project_database(self.state, project_id).await {
-            Ok(pools) => {
-                checks.push(passed(
-                    "project_database",
-                    "项目数据库与Schema",
-                    None,
-                    "平台库只读连接与工作台Schema已就绪".into(),
-                ));
-                pools
-            }
-            Err(error) => {
-                checks.push(failed(
-                    "project_database",
-                    "项目数据库与Schema",
-                    None,
-                    error.to_string(),
-                    remediation("open_project_settings", "检查项目连接", None, None),
-                ));
-                return Ok(report(checks, normalized, None, checked_at));
-            }
-        };
-        if !session_ready {
-            checks.push(failed(
-                "release_profile",
-                "发布参数",
-                None,
-                "平台会话未就绪，发布凭据读取已阻止".into(),
-                remediation("login_project", "重新登录", None, None),
-            ));
-            return Ok(report(checks, normalized, None, checked_at));
-        }
+        // 项目连接/结构和登录在项目入口处理；这里只保留业务调用的内部前置保护，
+        // 不再生成与一体机部署无关的成功检查卡片。
+        project_operator(self.state, project_id)
+            .await
+            .map_err(|_| {
+                AppError::Authentication("项目登录已失效，请返回项目入口重新登录".into())
+            })?;
+        let pools = project_database(self.state, project_id).await.map_err(|error| {
+            tracing::warn!(error = %crate::core::log_safety::safe_error(&error), "deployment project unavailable");
+            AppError::Conflict("项目连接不可用，请返回项目入口检查数据库连接和结构".into())
+        })?;
         let profile = match ReleaseMasterKeyManager::with_local_registry(
             self.state.secret_store.clone(),
             self.state.local_store.pool().clone(),
@@ -157,6 +118,7 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
                 return Ok(report(checks, normalized, None, checked_at));
             }
         };
+        checks.push(local_endpoint_checks(&profile.values).await);
         let nodes = match WorkbenchAioRepository::new(pools.workbench.clone())
             .list_snapshots()
             .await
@@ -220,8 +182,8 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
                     "资源租约",
                     Some(mac),
                     format!(
-                        "目标正由实例{}执行操作{}",
-                        lease.owner_instance_id, lease.operation_id
+                        "这台一体机正在执行其他任务，请等待完成后重试（操作{}）",
+                        lease.operation_id
                     ),
                     remediation("open_history", "查看占用操作", None, Some(mac)),
                 )),
@@ -244,6 +206,7 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
                 &profile,
                 &connector,
                 &runtime,
+                normalized.mode,
             )
             .await
             {
@@ -283,6 +246,7 @@ async fn append_remote_runtime_checks(
     profile: &ReleaseProfileRecord,
     connector: &ObservedConnector<RusshConnector>,
     runtime: &ReleaseRuntime,
+    mode: DeploymentMode,
 ) -> Option<HostKeyRecord> {
     let auth = match remote_auth(profile) {
         Ok(auth) => auth,
@@ -308,12 +272,7 @@ async fn append_remote_runtime_checks(
                 "ssh_auth",
                 "SSH认证",
                 Some(mac),
-                format!(
-                    "{}@{}:{}认证通过，主机指纹已自动采集",
-                    auth.username(),
-                    target.host,
-                    target.port
-                ),
+                format!("{}:{}连接和登录验证通过", target.host, target.port),
             ));
             connected
         }
@@ -333,21 +292,15 @@ async fn append_remote_runtime_checks(
             return None;
         }
     };
-    checks.push(if observation.changed() {
-        warning(
+    if observation.changed() {
+        checks.push(warning(
             "host_key_changed",
             "主机指纹变化",
             Some(mac),
             observation.message(),
-        )
-    } else {
-        passed(
-            "host_key_observed",
-            "主机指纹",
-            Some(mac),
-            observation.message(),
-        )
-    });
+        ));
+    }
+    checks.push(remote_endpoint_check(&connection, &profile.values, mac).await);
     let cancellation = CancellationToken::new();
     enum Expectation<'a> {
         Exact(&'a str),
@@ -363,7 +316,7 @@ async fn append_remote_runtime_checks(
         ),
         (
             "runtime_arch",
-            "CPU架构",
+            "运行环境兼容性",
             "uname",
             vec!["-m".into()],
             Expectation::Exact(runtime.arch.as_str()),
@@ -372,7 +325,11 @@ async fn append_remote_runtime_checks(
             "docker",
             "Docker",
             "docker",
-            vec!["--version".into()],
+            vec![
+                "version".into(),
+                "--format".into(),
+                "{{.Server.Version}}".into(),
+            ],
             Expectation::Minimum(runtime.docker.as_str()),
         ),
         (
@@ -391,20 +348,43 @@ async fn append_remote_runtime_checks(
             total_timeout: Duration::from_secs(30),
             inactivity_timeout: Duration::from_secs(15),
         };
-        match connection
+        let mut result = connection
             .run(&request, &cancellation, &NoopRemoteOutputSink)
-            .await
-        {
+            .await;
+        if code == "docker_compose" && !matches!(&result, Ok(value) if value.exit_status == 0) {
+            let fallback = ExecRequest {
+                program: "docker-compose".into(),
+                args: vec!["version".into()],
+                ..request
+            };
+            result = connection
+                .run(&fallback, &cancellation, &NoopRemoteOutputSink)
+                .await;
+        }
+        match result {
             Ok(result) if result.exit_status == 0 => {
                 let output = result.stdout.lines().next().unwrap_or("").trim();
                 let (satisfied, message) = match expectation {
                     Expectation::Exact(expected) => (
                         output.eq_ignore_ascii_case(expected),
-                        format!("要求{expected}，远端已返回受支持值"),
+                        if output.eq_ignore_ascii_case(expected) {
+                            format!("运行环境符合发布物要求（{expected}）")
+                        } else {
+                            format!(
+                                "一体机运行环境与发布物不匹配，要求{expected}；请检查发布物或一体机环境"
+                            )
+                        },
                     ),
                     Expectation::Minimum(requirement) => {
                         match runtime_version_satisfies(output, requirement) {
-                            Ok(satisfied) => (satisfied, format!("远端版本满足{requirement}约束")),
+                            Ok(satisfied) => (
+                                satisfied,
+                                if satisfied {
+                                    format!("远端版本满足{requirement}约束")
+                                } else {
+                                    format!("远端版本不满足{requirement}要求，请更新运行环境")
+                                },
+                            ),
                             Err(_) => (false, format!("远端版本无法按{requirement}约束解析")),
                         }
                     }
@@ -437,6 +417,7 @@ async fn append_remote_runtime_checks(
             )),
         }
     }
+    checks.extend(remote_environment_checks(&connection, &profile.values, mac, mode).await);
     if let Err(error) = connection.disconnect().await {
         checks.push(warning(
             "ssh_disconnect",
@@ -582,7 +563,7 @@ fn report(
     DeploymentPreflightReport::from_checks(checks, normalized, profile_version, None, checked_at)
 }
 
-fn passed(
+pub(super) fn passed(
     code: &str,
     label: &str,
     target_mac: Option<&str>,
@@ -599,7 +580,7 @@ fn passed(
     }
 }
 
-fn failed(
+pub(super) fn failed(
     code: &str,
     label: &str,
     target_mac: Option<&str>,
@@ -634,7 +615,7 @@ fn warning(
     }
 }
 
-fn remediation(
+pub(super) fn remediation(
     action: &str,
     label: &str,
     route: Option<&str>,

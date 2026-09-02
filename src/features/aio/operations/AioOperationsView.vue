@@ -20,7 +20,6 @@ import {
   Check,
   CheckCircle2,
   ChevronRight,
-  CircleAlert,
   Clock3,
   FileArchive,
   History,
@@ -35,6 +34,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import { useOperationsAdapter } from "@/shared/api/operationsAdapter";
+import { commandErrorText } from "@/shared/api/errors";
+import DeploymentPreflightGroups from "./DeploymentPreflightGroups.vue";
 import { useSystemDialogAdapter } from "@/shared/api/systemDialogAdapter";
 import type { OperationMode } from "@/shared/model/demo";
 import type {
@@ -120,12 +121,6 @@ const artifactLabel = computed(() => {
   return releaseValidation.value?.manifest
     ? "Release " + releaseValidation.value.manifest.version
     : "未选择Release";
-});
-const artifactCheckSummary = computed(() => {
-  if (mode.value === "service_upgrade") {
-    return (imageInspection.value?.archive.repoTags.length ?? 0) + " 个RepoTag";
-  }
-  return (releaseValidation.value?.images.length ?? 0) + " 个镜像声明一致";
 });
 const resultTargets = computed<DeploymentTaskTargetView[]>(() => {
   if (currentTask.value?.targets.length) return currentTask.value.targets;
@@ -275,6 +270,10 @@ async function runCheck() {
     message.warning("请先选择项目");
     return;
   }
+  if (!projects.isReady) {
+    message.warning("请先在项目入口完成连接和登录");
+    return;
+  }
   if (!selectedMacs.value.length) {
     message.warning("请至少选择一台一体机");
     return;
@@ -298,13 +297,13 @@ async function runCheck() {
     if (projectId !== projects.activeProjectId) return;
     step.value = 1;
     if (report.ready) {
-      message.success("所有真实执行条件检查通过");
+      message.success("部署检查通过");
     } else {
       const blockers = report.checks.filter((check) => check.blocking && check.status === "failed");
-      message.warning("预检发现" + blockers.length + "项阻断，请按整改入口处理");
+      message.warning("检查发现" + blockers.length + "处问题，请处理后重试");
     }
   } catch (error) {
-    message.error(error instanceof Error ? error.message : "发布文件校验失败");
+    message.error(commandErrorText(error, "部署检查失败"));
   } finally {
     checking.value = false;
   }
@@ -546,24 +545,9 @@ function historyArtifact(record: OperationHistoryItem) {
         </section>
 
         <section v-else-if="step === 1" class="operation-stage check-stage" data-testid="operation-preflight-report">
-          <header class="stage-heading"><div><span class="feature-icon operation"><ShieldCheck :size="20" /></span><span><strong>执行条件检查</strong><small>检查项目、制品、资产、租约和远端环境；主机指纹由技术层自动观测</small></span></div><n-tag :type="!workflow.preflight?.ready ? 'error' : preflightHasWarnings ? 'warning' : 'success'" :bordered="false">{{ !workflow.preflight?.ready ? '存在阻断' : preflightHasWarnings ? '可继续（有提示）' : '全部通过' }}</n-tag></header>
-          <div class="check-grid">
-            <div v-for="check in workflow.preflight?.checks ?? []" :key="check.code + ':' + (check.targetMac ?? '')" class="check-item" :class="check.status === 'passed' ? 'success' : check.status === 'warning' ? 'warning' : 'error'">
-              <CheckCircle2 v-if="check.status === 'passed'" :size="18" /><CircleAlert v-else :size="18" />
-              <span><strong>{{ check.label }}<em v-if="check.targetMac"> · {{ check.targetMac }}</em></strong><small>{{ check.message }}</small></span>
-              <n-button v-if="check.remediation" size="tiny" quaternary @click="handleRemediation(check)">{{ check.remediation.label }}</n-button>
-              <b v-else>{{ check.status === 'passed' ? '通过' : check.status === 'warning' ? '提示' : '阻断' }}</b>
-            </div>
-            <template v-if="!workflow.preflight">
-            <div class="check-item" :class="release.profile ? 'success' : 'error'"><CheckCircle2 :size="18" /><span><strong>项目发布参数</strong><small>{{ release.profile ? `版本 ${release.profile.version} · 已从项目库读取` : '当前项目尚未创建发布参数' }}</small></span><b>{{ release.profile ? '通过' : '阻断' }}</b></div>
-            <div class="check-item warning"><CircleAlert :size="18" /><span><strong>资源租约</strong><small>提交任务时从工作台数据库原子获取，冲突会明确阻断</small></span><b>待执行</b></div>
-            <div class="check-item warning"><CircleAlert :size="18" /><span><strong>SSH连接</strong><small>执行真实用户认证并自动采集主机指纹，指纹变化只提示、不阻断</small></span><b>待执行</b></div>
-            <div class="check-item warning"><CircleAlert :size="18" /><span><strong>Docker与Compose</strong><small>提交任务后由远端Agent返回实际结果</small></span><b>待执行</b></div>
-            <div class="check-item success"><CheckCircle2 :size="18" /><span><strong>本地发布文件</strong><small>{{ artifactLabel }} · {{ artifactCheckSummary }}</small></span><b>通过</b></div>
-            <div class="check-item" :class="projects.isReady ? 'success' : 'error'"><CheckCircle2 :size="18" /><span><strong>项目上下文</strong><small>{{ projects.activeProject?.statusMessage ?? '当前项目未就绪' }}</small></span><b>{{ projects.isReady ? '通过' : '阻断' }}</b></div>
-            </template>
-          </div>
-          <div class="render-preview"><span><FileArchive :size="20" /></span><div><strong>归一化执行计划</strong><small>{{ workflow.preflight?.normalizedPlan.artifactName }} {{ workflow.preflight?.normalizedPlan.artifactVersion }} · 发布参数版本 {{ workflow.preflight?.profileVersion ?? '—' }}</small></div></div>
+          <header class="stage-heading"><div><span class="feature-icon operation"><ShieldCheck :size="20" /></span><span><strong>部署检查</strong><small>先检查公共发布配置，再逐台检查连接和运行环境</small></span></div><n-tag :type="!workflow.preflight?.ready ? 'error' : preflightHasWarnings ? 'warning' : 'success'" :bordered="false">{{ !workflow.preflight?.ready ? '有问题待处理' : preflightHasWarnings ? '可继续（有提示）' : '全部通过' }}</n-tag></header>
+          <DeploymentPreflightGroups :report="workflow.preflight" :nodes="eligibleNodes" @remediate="handleRemediation" />
+          <div class="render-preview"><span><FileArchive :size="20" /></span><div><strong>本次发布</strong><small>{{ workflow.preflight?.normalizedPlan.artifactName }} {{ workflow.preflight?.normalizedPlan.artifactVersion }} · {{ workflow.preflight?.normalizedPlan.targetMacs.length ?? 0 }} 台一体机 · 并发 {{ workflow.preflight?.normalizedPlan.concurrency ?? concurrency }} 台</small></div></div>
           <footer class="stage-footer"><n-button size="small" @click="step = 0">返回调整</n-button><n-button size="small" class="operation-button" data-testid="operation-submit" :loading="executing" :disabled="!workflow.preflight?.ready" @click="startOperation"><template #icon><Play /></template>提交部署任务</n-button></footer>
         </section>
 

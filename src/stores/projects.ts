@@ -142,6 +142,11 @@ export const useProjectStore = defineStore("projects", () => {
     try {
       const project = await useWorkbenchAdapter().switchProject(projectId);
       const schema = await useWorkbenchAdapter().getWorkbenchSchemaStatus(projectId);
+      project.schemaState = schema.state;
+      if (schema.state !== "ready") {
+        project.connectionState = "schema_required";
+        project.statusMessage = schema.message;
+      }
       if (request === switchRequest && activeProjectId.value === projectId) {
         replaceProject(project);
         schemaStatus.value = schema;
@@ -201,7 +206,10 @@ export const useProjectStore = defineStore("projects", () => {
         const project = projects.value.find((item) => item.id === projectId);
         if (project) {
           project.session = next.state === "missing" ? undefined : next;
-          if (next.state === "expired") {
+          if (project.databaseState === "connected" && project.schemaState !== "ready") {
+            project.connectionState = "schema_required";
+            project.statusMessage = "项目数据库结构尚未就绪，请在项目入口完成初始化或升级";
+          } else if (next.state === "expired") {
             project.connectionState = "session_expired";
             project.statusMessage = "平台会话已失效，请重新登录";
           } else if (next.state === "missing" && project.databaseState === "connected") {

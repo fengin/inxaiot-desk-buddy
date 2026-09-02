@@ -39,13 +39,17 @@ export class FixtureOperationsAdapter implements OperationsAdapter {
     return {
       ready: true,
       checks: [
-        {
-          code: "fixture_remote_runtime",
-          label: "浏览器Fixture远端门禁",
+        ...["artifact", "release_profile", "release_endpoints"].map((code) => ({
+          code,
+          label: "Fixture公共检查",
           status: "passed" as const,
           blocking: false,
-          message: "Fixture Adapter独立模拟通过，不代表Tauri真实环境"
-        }
+          message: "Fixture模拟通过，不代表真实环境"
+        })),
+        ...plan.targetMacs.flatMap((targetMac) => ["ssh_auth", "platform_endpoints", "runtime_os", "runtime_arch", "docker", "docker_compose", "remote_storage", "remote_ports"].map((code) => ({
+          code, targetMac, label: "Fixture节点检查", status: "passed" as const, blocking: false,
+          message: "Fixture模拟通过，不代表真实环境"
+        })))
       ],
       normalizedPlan: structuredClone(plan),
       profileVersion: 1,

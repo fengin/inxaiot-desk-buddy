@@ -496,6 +496,8 @@ impl ProjectManagementPort for Stage75Adapter<'_> {
         project_id: &str,
         request: PlatformLoginRequest,
     ) -> AppResult<ProjectSessionView> {
+        // 数据库及Schema问题在登录项目时提示，不延后到部署检查页。
+        self.ready_pools(project_id).await?;
         self.register_secrets([request.password.clone()]);
         let project = self
             .projects()

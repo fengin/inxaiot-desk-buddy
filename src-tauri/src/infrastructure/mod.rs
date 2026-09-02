@@ -5,6 +5,7 @@ pub mod data_directory;
 pub mod database;
 pub mod deployment_control;
 pub mod deployment_finalization;
+mod deployment_preflight_probes;
 pub mod deployment_progress;
 pub mod deployment_remote;
 pub mod deployment_service;

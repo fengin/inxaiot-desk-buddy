@@ -52,6 +52,23 @@ describe("project store", () => {
     expect(store.projects.some((project) => project.id === created.id)).toBe(false);
   });
 
+  it("在项目入口提示Schema未就绪，登录状态刷新不能重新开放业务入口", async () => {
+    const adapter = new FixtureWorkbenchAdapter();
+    configureWorkbenchAdapter(adapter);
+    const store = useProjectStore();
+    await store.initialize();
+    const projectId = store.activeProjectId;
+    const schema = await adapter.getWorkbenchSchemaStatus(projectId);
+    vi.spyOn(adapter, "getWorkbenchSchemaStatus").mockResolvedValue({ ...schema, state: "upgrade_required", message: "请先升级工作台数据库" });
+    await store.switchProject(projectId);
+    expect(store.activeProject?.connectionState).toBe("schema_required");
+    expect(store.activeProject?.statusMessage).toContain("升级工作台数据库");
+    expect(store.businessMenuEnabled).toBe(false);
+    await store.checkSession(projectId);
+    expect(store.activeProject?.connectionState).toBe("schema_required");
+    expect(store.businessMenuEnabled).toBe(false);
+  });
+
   it("keeps a late switch response from replacing the active project", async () => {
     const adapter = new FixtureWorkbenchAdapter();
     configureWorkbenchAdapter(adapter);

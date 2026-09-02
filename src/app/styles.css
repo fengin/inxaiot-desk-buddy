@@ -1920,6 +1920,35 @@ a {
   gap: 8px;
 }
 
+.preflight-groups {
+  display: grid;
+  gap: 12px;
+}
+
+.preflight-group {
+  padding: 12px;
+  border: 1px solid var(--inx-color-border);
+  border-radius: 8px;
+}
+
+.preflight-group > header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 9px;
+}
+
+.preflight-group h3 { margin: 0; font-size: 13px; }
+.preflight-group .check-item small { font-size: 12px; line-height: 1.5; }
+.preflight-group > header > span { color: var(--inx-color-text-secondary); font-size: 12px; }
+.preflight-issue { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.check-item.error > svg, .check-item.error > b { color: var(--inx-color-danger); }
+.check-item.pending { color: var(--inx-color-text-tertiary); }
+
+@media (max-width: 900px) {
+  .preflight-group .check-grid { grid-template-columns: 1fr; }
+}
+
 .check-item {
   display: grid;
   min-height: 64px;

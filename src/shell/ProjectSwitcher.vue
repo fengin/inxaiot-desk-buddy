@@ -343,21 +343,20 @@ async function upgradeSchema() {
       <div><strong>{{ projects.projects.find((item) => item.id === loginProjectId)?.name }}</strong><small>使用项目平台后台管理的同一套账号密码</small></div>
     </div>
     <n-form label-placement="left" label-width="82" size="small">
-      <n-form-item label="账号"><n-input v-model:value="loginForm.username" data-testid="login-username" autocomplete="username" /></n-form-item>
-      <n-form-item label="密码"><n-input v-model:value="loginForm.password" data-testid="login-password" type="password" show-password-on="click" autocomplete="current-password" /></n-form-item>
+      <n-form-item label="账号"><n-input v-model:value="loginForm.username" data-testid="login-username" placeholder="请输入平台账号" autocomplete="username" /></n-form-item>
+      <n-form-item label="密码"><n-input v-model:value="loginForm.password" data-testid="login-password" placeholder="请输入平台密码" type="password" show-password-on="click" autocomplete="current-password" /></n-form-item>
       <n-form-item label="验证码">
         <div class="captcha-row">
-          <n-input v-model:value="loginForm.imageCode" data-testid="login-image-code" />
+          <n-input v-model:value="loginForm.imageCode" data-testid="login-image-code" placeholder="请输入验证码" />
           <button class="captcha-image" type="button" title="刷新验证码" @click="refreshChallenge">
             <img v-if="projects.loginChallenge?.captchaImageDataUrl" :src="projects.loginChallenge.captchaImageDataUrl" alt="平台验证码" />
             <RefreshCw v-else :size="17" />
           </button>
         </div>
       </n-form-item>
-      <n-form-item label="会话标识"><n-input v-model:value="loginForm.sessionUuid" data-testid="login-session-uuid" placeholder="验证码会话 UUID" /></n-form-item>
     </n-form>
     <n-alert v-if="!projects.loginChallenge?.captchaImageDataUrl" type="warning" :show-icon="false">
-      平台未返回验证码图片；开发环境可按现场平台配置填写验证码与会话标识。
+      暂未获取到验证码图片，请点击验证码区域刷新；若仍未显示，请检查平台服务后重试。
     </n-alert>
     <template #footer>
       <n-space justify="end"><n-button size="small" @click="loginOpen = false">取消</n-button><n-button size="small" type="primary" data-testid="login-submit" :loading="loginLoading" @click="submitLogin">登录并进入</n-button></n-space>
@@ -370,8 +369,8 @@ async function upgradeSchema() {
       <n-form-item label="项目名称"><n-input v-model:value="projectForm.name" data-testid="project-name" placeholder="例如：深圳湾智慧园区" /></n-form-item>
       <n-form-item label="平台访问地址"><n-input v-model:value="projectForm.platformUrl" data-testid="project-platform-url" placeholder="http://192.168.3.6:8055" /></n-form-item>
       <n-form-item label="数据库主机"><n-input v-model:value="projectForm.dbHost" data-testid="project-db-host" placeholder="192.168.3.6" /></n-form-item>
-      <n-form-item label="数据库端口"><n-input-number v-model:value="projectForm.dbPort" data-testid="project-db-port" :show-button="false" :min="1" :max="65535" /></n-form-item>
-      <n-form-item label="数据库账号"><n-input v-model:value="projectForm.dbUser" data-testid="project-db-user" /></n-form-item>
+      <n-form-item label="数据库端口"><n-input-number v-model:value="projectForm.dbPort" data-testid="project-db-port" placeholder="请输入端口" :show-button="false" :min="1" :max="65535" /></n-form-item>
+      <n-form-item label="数据库账号"><n-input v-model:value="projectForm.dbUser" data-testid="project-db-user" placeholder="请输入数据库账号" /></n-form-item>
       <n-form-item label="数据库密码"><n-input v-model:value="projectForm.dbPassword" data-testid="project-db-password" type="password" show-password-on="click" :placeholder="editingProjectId ? '留空表示保持原密码' : '请输入数据库密码'" /></n-form-item>
       <n-form-item label="连接加密">
         <n-checkbox v-model:checked="projectForm.dbTlsEnabled" data-testid="project-db-tls">启用 MySQL TLS（默认关闭）</n-checkbox>

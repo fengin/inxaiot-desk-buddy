@@ -387,7 +387,7 @@ try {
   await setInput("login-username", login.principal);
   await setInput("login-password", login.credentials);
   await setInput("login-image-code", login.imageCode);
-  await setInput("login-session-uuid", login.sessionUUID);
+  // 会话标识由工作台获取验证码时自动维护，不再经界面覆盖。
   await clickTest("login-submit");
   await waitBody(`平台已登录 · ${login.principal}`, 30_000);
 

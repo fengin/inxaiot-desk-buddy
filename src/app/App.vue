@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { darkTheme, NConfigProvider, NDialogProvider, NMessageProvider } from "naive-ui";
+import { darkTheme, dateZhCN, NConfigProvider, NDialogProvider, NMessageProvider, zhCN } from "naive-ui";
 import { computed, onBeforeUnmount, ref, watchEffect } from "vue";
 
 import DesktopShell from "@/shell/DesktopShell.vue";
@@ -27,7 +27,7 @@ watchEffect(() => {
 </script>
 
 <template>
-  <n-config-provider :theme="resolvedDark ? darkTheme : null" :theme-overrides="themeOverrides">
+  <n-config-provider :locale="zhCN" :date-locale="dateZhCN" :theme="resolvedDark ? darkTheme : null" :theme-overrides="themeOverrides">
     <n-dialog-provider>
       <n-message-provider placement="top-right">
         <desktop-shell />
@@ -35,4 +35,3 @@ watchEffect(() => {
     </n-dialog-provider>
   </n-config-provider>
 </template>
-

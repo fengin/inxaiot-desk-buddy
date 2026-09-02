@@ -102,6 +102,19 @@ fn distribution_defaults_to_windows_portable_and_macos_app() {
 }
 
 #[test]
+fn production_ssh_automatically_observes_keys_without_manual_confirmation_gates() {
+    let preflight = include_str!("../src/infrastructure/stage75b_preflight_adapter.rs");
+    let execution = include_str!("../src/infrastructure/deployment_service.rs");
+    assert!(preflight.contains("ObservedConnector::new"));
+    assert!(preflight.contains("host_key_changed"));
+    assert!(!preflight.contains("confirm_host_key"));
+    assert!(!preflight.contains("HostKeyPolicy::Require"));
+    assert!(execution.contains("ObservedConnector::new"));
+    assert!(execution.contains("SSH_HOST_KEY_CHANGED"));
+    assert!(!execution.contains("HostKeyPolicy::Require"));
+}
+
+#[test]
 fn application_layer_has_no_concrete_infrastructure_or_sql_dependencies() {
     let application_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src")

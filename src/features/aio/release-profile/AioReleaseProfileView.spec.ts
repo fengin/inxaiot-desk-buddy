@@ -54,6 +54,8 @@ describe("发布参数项目主密钥恢复入口", () => {
     });
     await flushPromises();
 
+    expect(wrapper.find('[data-testid="host-key-open"]').exists()).toBe(false);
+    expect(document.querySelector('[data-testid="host-key-capture"]')).toBeNull();
     const openButton = wrapper.get('[data-testid="release-key-management-open"]');
     expect(openButton.attributes("disabled")).toBeUndefined();
     await openButton.trigger("click");

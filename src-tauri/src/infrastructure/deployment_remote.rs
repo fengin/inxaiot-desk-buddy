@@ -150,7 +150,7 @@ where
                 1,
                 TaskEventLevel::Info,
                 "SSH_CONNECTED",
-                Some("SSH认证与HostKey固定校验通过".into()),
+                Some("SSH认证通过，连接已建立".into()),
             )?;
             session
         }

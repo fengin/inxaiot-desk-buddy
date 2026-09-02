@@ -6,7 +6,6 @@ import {
   NInput,
   NInputNumber,
   NModal,
-  NPopconfirm,
   NSpace,
   NTabPane,
   NTabs,
@@ -23,11 +22,10 @@ import {
   Pencil,
   RefreshCw,
   Save,
-  ShieldCheck,
   Upload,
   Undo2
 } from "lucide-vue-next";
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 
 import { commandErrorText } from "@/shared/api/errors";
 import { useSystemDialogAdapter } from "@/shared/api/systemDialogAdapter";
@@ -40,11 +38,9 @@ const message = useMessage();
 const dialogs = useSystemDialogAdapter();
 const editing = ref(false);
 const activeTemplate = ref("env");
-const hostKeyOpen = ref(false);
 const keyManagementOpen = ref(false);
 const keyPassphrase = ref("");
 const keyPassphraseConfirmation = ref("");
-const hostKeyForm = reactive({ host: "", port: 22 });
 const keyRecoveryRequired = computed(() => release.error.includes("缺少当前项目主密钥"));
 
 async function load() {
@@ -159,25 +155,6 @@ async function reloadAfterConflict() {
   message.success("已加载最新发布参数");
 }
 
-async function captureHostKey() {
-  try {
-    const observation = await release.captureHostKey(hostKeyForm.host, hostKeyForm.port);
-    if (observation.state === "confirmed") message.success("主机密钥与已确认记录一致");
-    else if (observation.state === "changed") message.error("主机密钥发生变化，连接已阻断");
-    else message.warning("首次连接，请核对并确认主机指纹");
-  } catch (cause) {
-    message.error(commandErrorText(cause, "捕获主机密钥失败"));
-  }
-}
-
-async function confirmHostKey(replaceChanged: boolean) {
-  try {
-    await release.confirmHostKey(replaceChanged);
-    message.success(replaceChanged ? "已重新确认变化后的主机密钥" : "主机密钥已确认");
-  } catch (cause) {
-    message.error(commandErrorText(cause, "确认主机密钥失败"));
-  }
-}
 </script>
 
 <template>
@@ -195,7 +172,6 @@ async function confirmHostKey(replaceChanged: boolean) {
       <div class="page-actions">
         <n-tag v-if="release.profile" size="small" :bordered="false" type="info">版本 {{ release.profile.version }}</n-tag>
         <n-button v-if="release.profile || keyRecoveryRequired" size="small" secondary data-testid="release-key-management-open" :disabled="!projects.isReady" @click="keyManagementOpen = true"><template #icon><KeyRound /></template>{{ keyRecoveryRequired ? "恢复发布凭据" : "项目接管密钥" }}</n-button>
-        <n-button size="small" secondary data-testid="host-key-open" :disabled="!projects.isReady" @click="hostKeyOpen = true"><template #icon><ShieldCheck /></template>主机密钥</n-button>
         <n-button v-if="!editing" size="small" type="primary" data-testid="release-edit" :disabled="!projects.isReady" @click="startEdit"><template #icon><Pencil /></template>{{ release.profile ? "编辑配置" : "新建配置" }}</n-button>
         <template v-else>
           <n-button size="small" @click="cancelEdit"><template #icon><Undo2 /></template>取消</n-button>
@@ -260,35 +236,6 @@ async function confirmHostKey(replaceChanged: boolean) {
         </footer>
       </section>
     </div>
-
-    <n-modal v-model:show="hostKeyOpen" preset="card" title="SSH 主机密钥" class="host-key-modal" :bordered="false">
-      <p class="modal-description">先捕获目标主机当前指纹。首次连接必须确认；已确认指纹发生变化时默认阻断，只能显式重新确认。</p>
-      <div class="host-key-capture-row">
-        <n-input v-model:value="hostKeyForm.host" data-testid="host-key-host" placeholder="一体机 IP 或主机名" />
-        <n-input-number v-model:value="hostKeyForm.port" :show-button="false" :min="1" :max="65535" />
-        <n-button type="primary" secondary data-testid="host-key-capture" :loading="release.hostKeyLoading" @click="captureHostKey">捕获指纹</n-button>
-      </div>
-      <n-alert v-if="release.hostKeyObservation" :type="release.hostKeyObservation.state === 'confirmed' ? 'success' : release.hostKeyObservation.state === 'changed' ? 'error' : 'warning'" :show-icon="false">
-        <strong>{{ release.hostKeyObservation.state === "confirmed" ? "指纹一致" : release.hostKeyObservation.state === "changed" ? "指纹发生变化，连接已阻断" : "首次连接，等待确认" }}</strong>
-        <div class="fingerprint-value">当前：{{ release.hostKeyObservation.algorithm }} · {{ release.hostKeyObservation.fingerprint }}</div>
-        <div v-if="release.hostKeyObservation.expectedFingerprint" class="fingerprint-value">已确认：{{ release.hostKeyObservation.expectedFingerprint }}</div>
-      </n-alert>
-      <div v-if="release.hostKeyObservation && release.hostKeyObservation.state !== 'confirmed'" class="host-key-actions">
-        <n-button v-if="release.hostKeyObservation.state === 'unconfirmed'" type="primary" data-testid="host-key-confirm" @click="confirmHostKey(false)">确认首次指纹</n-button>
-        <n-popconfirm v-else positive-text="重新确认" negative-text="保持阻断" @positive-click="confirmHostKey(true)">
-          <template #trigger><n-button type="error" data-action-owner="popconfirm">重新确认变化后的指纹</n-button></template>
-          请先通过现场可信渠道核对当前指纹。重新确认后旧指纹将被替换，确定继续？
-        </n-popconfirm>
-      </div>
-      <div class="host-key-list">
-        <strong>已确认主机</strong>
-        <n-empty v-if="!release.hostKeys.length" description="暂无已确认主机密钥" size="small" />
-        <div v-for="key in release.hostKeys" :key="`${key.host}:${key.port}`" class="host-key-list-item">
-          <span>{{ key.host }}:{{ key.port }}</span><code>{{ key.fingerprint }}</code><n-tag size="small" type="success" :bordered="false">已确认</n-tag>
-        </div>
-      </div>
-      <template #footer><n-space justify="end"><n-button @click="hostKeyOpen = false">关闭</n-button></n-space></template>
-    </n-modal>
 
     <n-modal
       v-model:show="keyManagementOpen"

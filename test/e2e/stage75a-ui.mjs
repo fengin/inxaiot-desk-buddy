@@ -422,15 +422,7 @@ try {
   await clickTest("release-save");
   await waitBody("版本 2", 30_000);
 
-  await clickTest("host-key-open");
-  for (const host of ["192.168.3.79", "192.168.3.121"]) {
-    await setInput("host-key-host", host);
-    await clickTest("host-key-capture");
-    await waitBody("首次连接，等待确认", 30_000);
-    await clickTest("host-key-confirm");
-    await waitBody(`${host}:22`, 30_000);
-  }
-  await clickButtonText("关闭");
+  // 指纹在真实预检/执行连接时自动观测，不再存在人工采集或确认页面。
   if (stage75b) await runStage75bGate();
   await clickTest("project-switcher");
   await clickButtonText("编辑当前项目");

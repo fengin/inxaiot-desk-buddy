@@ -63,6 +63,7 @@ const aio = useAioNodesStore();
 const release = useReleaseProfileStore();
 const activity = useActivityStore();
 const workflow = useDeploymentWorkflowStore();
+const preflightHasWarnings = computed(() => workflow.preflight?.checks.some((check) => check.status === "warning") ?? false);
 const mode = ref<OperationMode>("full_upgrade");
 const step = ref(0);
 const selectedMacs = ref<string[]>([]);
@@ -545,7 +546,7 @@ function historyArtifact(record: OperationHistoryItem) {
         </section>
 
         <section v-else-if="step === 1" class="operation-stage check-stage" data-testid="operation-preflight-report">
-          <header class="stage-heading"><div><span class="feature-icon operation"><ShieldCheck :size="20" /></span><span><strong>执行条件检查</strong><small>项目、制品、资产、租约、HostKey和远端门禁统一返回真实状态</small></span></div><n-tag :type="workflow.preflight?.ready ? 'success' : 'error'" :bordered="false">{{ workflow.preflight?.ready ? '全部通过' : '存在阻断' }}</n-tag></header>
+          <header class="stage-heading"><div><span class="feature-icon operation"><ShieldCheck :size="20" /></span><span><strong>执行条件检查</strong><small>检查项目、制品、资产、租约和远端环境；主机指纹由技术层自动观测</small></span></div><n-tag :type="!workflow.preflight?.ready ? 'error' : preflightHasWarnings ? 'warning' : 'success'" :bordered="false">{{ !workflow.preflight?.ready ? '存在阻断' : preflightHasWarnings ? '可继续（有提示）' : '全部通过' }}</n-tag></header>
           <div class="check-grid">
             <div v-for="check in workflow.preflight?.checks ?? []" :key="check.code + ':' + (check.targetMac ?? '')" class="check-item" :class="check.status === 'passed' ? 'success' : check.status === 'warning' ? 'warning' : 'error'">
               <CheckCircle2 v-if="check.status === 'passed'" :size="18" /><CircleAlert v-else :size="18" />
@@ -556,7 +557,7 @@ function historyArtifact(record: OperationHistoryItem) {
             <template v-if="!workflow.preflight">
             <div class="check-item" :class="release.profile ? 'success' : 'error'"><CheckCircle2 :size="18" /><span><strong>项目发布参数</strong><small>{{ release.profile ? `版本 ${release.profile.version} · 已从项目库读取` : '当前项目尚未创建发布参数' }}</small></span><b>{{ release.profile ? '通过' : '阻断' }}</b></div>
             <div class="check-item warning"><CircleAlert :size="18" /><span><strong>资源租约</strong><small>提交任务时从工作台数据库原子获取，冲突会明确阻断</small></span><b>待执行</b></div>
-            <div class="check-item warning"><CircleAlert :size="18" /><span><strong>SSH与HostKey</strong><small>提交任务后使用已确认指纹执行真实认证，不预设成功</small></span><b>待执行</b></div>
+            <div class="check-item warning"><CircleAlert :size="18" /><span><strong>SSH连接</strong><small>执行真实用户认证并自动采集主机指纹，指纹变化只提示、不阻断</small></span><b>待执行</b></div>
             <div class="check-item warning"><CircleAlert :size="18" /><span><strong>Docker与Compose</strong><small>提交任务后由远端Agent返回实际结果</small></span><b>待执行</b></div>
             <div class="check-item success"><CheckCircle2 :size="18" /><span><strong>本地发布文件</strong><small>{{ artifactLabel }} · {{ artifactCheckSummary }}</small></span><b>通过</b></div>
             <div class="check-item" :class="projects.isReady ? 'success' : 'error'"><CheckCircle2 :size="18" /><span><strong>项目上下文</strong><small>{{ projects.activeProject?.statusMessage ?? '当前项目未就绪' }}</small></span><b>{{ projects.isReady ? '通过' : '阻断' }}</b></div>

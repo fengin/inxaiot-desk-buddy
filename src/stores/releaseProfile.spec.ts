@@ -1,5 +1,5 @@
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FixtureWorkbenchAdapter } from "@/dev-fixtures/workbenchFixtureAdapter";
 import { configureWorkbenchAdapter } from "@/shared/api/workbenchAdapter";
@@ -21,14 +21,14 @@ describe("release profile store", () => {
     expect(store.profile!.version).toBe(before + 1);
   });
 
-  it("captures and confirms a first-use HostKey", async () => {
+  it("loads release configuration without a manual host-key prerequisite", async () => {
+    const adapter = new FixtureWorkbenchAdapter();
+    const hostKeys = vi.spyOn(adapter, "listHostKeys").mockRejectedValue(new Error("not a UI dependency"));
+    configureWorkbenchAdapter(adapter);
     const store = useReleaseProfileStore();
     await store.load("project-shenzhen-bay");
-    const captured = await store.captureHostKey("192.168.3.79", 22);
-    expect(captured.state).toBe("unconfirmed");
-    const confirmed = await store.confirmHostKey(false);
-    expect(confirmed.state).toBe("confirmed");
-    expect(store.hostKeys).toHaveLength(1);
+    expect(store.profile).toBeDefined();
+    expect(hostKeys).not.toHaveBeenCalled();
   });
 
   it("exports and imports a versioned project master key through the adapter", async () => {

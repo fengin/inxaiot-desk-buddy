@@ -3,7 +3,6 @@ import { ref } from "vue";
 
 import { commandErrorCode, commandErrorText } from "@/shared/api/errors";
 import { useWorkbenchAdapter } from "@/shared/api/workbenchAdapter";
-import type { HostKeyObservation } from "@/shared/model/project";
 import {
   emptyReleaseProfileDraft,
   type ReleaseProfileDraft,
@@ -16,11 +15,8 @@ export const useReleaseProfileStore = defineStore("release-profile", () => {
   const profile = ref<ReleaseProfileView>();
   const draft = ref<ReleaseProfileDraft>(emptyReleaseProfileDraft());
   const validation = ref<ReleaseProfileValidation>();
-  const hostKeys = ref<HostKeyObservation[]>([]);
-  const hostKeyObservation = ref<HostKeyObservation>();
   const loading = ref(false);
   const saving = ref(false);
-  const hostKeyLoading = ref(false);
   const keyOperationLoading = ref(false);
   const error = ref("");
   const conflict = ref(false);
@@ -52,19 +48,13 @@ export const useReleaseProfileStore = defineStore("release-profile", () => {
     profile.value = undefined;
     draft.value = emptyReleaseProfileDraft();
     validation.value = undefined;
-    hostKeys.value = [];
-    hostKeyObservation.value = undefined;
     loading.value = true;
     error.value = "";
     conflict.value = false;
     try {
-      const [loadedProfile, loadedHostKeys] = await Promise.all([
-        useWorkbenchAdapter().getReleaseProfile(nextProjectId),
-        useWorkbenchAdapter().listHostKeys(nextProjectId)
-      ]);
+      const loadedProfile = await useWorkbenchAdapter().getReleaseProfile(nextProjectId);
       if (request === loadRequest && projectId.value === nextProjectId) {
         profile.value = loadedProfile ?? undefined;
-        hostKeys.value = loadedHostKeys;
         resetDraft();
       }
       return loadedProfile ?? undefined;
@@ -126,58 +116,6 @@ export const useReleaseProfileStore = defineStore("release-profile", () => {
     }
   }
 
-  async function captureHostKey(host: string, port?: number) {
-    if (!projectId.value) throw new Error("没有活动项目");
-    const expectedProjectId = projectId.value;
-    const request = ++mutationRequest;
-    hostKeyLoading.value = true;
-    error.value = "";
-    try {
-      const observation = await useWorkbenchAdapter().captureHostKey(expectedProjectId, { host, port });
-      if (request === mutationRequest && projectId.value === expectedProjectId) {
-        hostKeyObservation.value = observation;
-      }
-      return observation;
-    } catch (cause) {
-      if (request === mutationRequest) {
-        error.value = commandErrorText(cause, "捕获主机密钥失败");
-      }
-      throw cause;
-    } finally {
-      if (request === mutationRequest) hostKeyLoading.value = false;
-    }
-  }
-
-  async function confirmHostKey(replaceChanged: boolean) {
-    if (!projectId.value || !hostKeyObservation.value) throw new Error("没有待确认主机密钥");
-    const expectedProjectId = projectId.value;
-    const expectedObservation = { ...hostKeyObservation.value };
-    const request = ++mutationRequest;
-    hostKeyLoading.value = true;
-    try {
-      const confirmed = await useWorkbenchAdapter().confirmHostKey(expectedProjectId, {
-        host: expectedObservation.host,
-        port: expectedObservation.port,
-        algorithm: expectedObservation.algorithm,
-        fingerprint: expectedObservation.fingerprint,
-        replaceChanged
-      });
-      const nextHostKeys = await useWorkbenchAdapter().listHostKeys(expectedProjectId);
-      if (request === mutationRequest && projectId.value === expectedProjectId) {
-        hostKeyObservation.value = confirmed;
-        hostKeys.value = nextHostKeys;
-      }
-      return confirmed;
-    } catch (cause) {
-      if (request === mutationRequest) {
-        error.value = commandErrorText(cause, "确认主机密钥失败");
-      }
-      throw cause;
-    } finally {
-      if (request === mutationRequest) hostKeyLoading.value = false;
-    }
-  }
-
   async function exportMasterKey(filePath: string, passphrase: string) {
     if (!projectId.value) throw new Error("没有活动项目");
     const expectedProjectId = projectId.value;
@@ -215,11 +153,8 @@ export const useReleaseProfileStore = defineStore("release-profile", () => {
     profile,
     draft,
     validation,
-    hostKeys,
-    hostKeyObservation,
     loading,
     saving,
-    hostKeyLoading,
     keyOperationLoading,
     error,
     conflict,
@@ -227,8 +162,6 @@ export const useReleaseProfileStore = defineStore("release-profile", () => {
     resetDraft,
     validate,
     save,
-    captureHostKey,
-    confirmHostKey,
     exportMasterKey,
     importMasterKey
   };

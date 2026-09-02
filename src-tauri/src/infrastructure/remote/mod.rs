@@ -28,6 +28,7 @@ use crate::core::error::{AppError, AppResult};
 
 mod private_key;
 use private_key::SigningKey;
+pub mod observed;
 
 const DEFAULT_TRANSPORT_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(150);

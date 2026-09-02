@@ -9,9 +9,7 @@ use crate::application::ports::deployment_workflow::DeploymentPreflightPort;
 use crate::application::ports::remote_command::{
     ExecRequest, NoopRemoteOutputSink, RemoteCommandExecutor,
 };
-use crate::application::ports::remote_session::{
-    HostKeyIdentity, HostKeyPolicy, RemoteAuth, RemoteConnection, RemoteConnector, RemoteTarget,
-};
+use crate::application::ports::remote_session::{RemoteAuth, RemoteConnection, RemoteTarget};
 use crate::core::error::{AppError, AppResult};
 use crate::core::secret::SecretValue;
 use crate::domain::aio::deployment::{DeploymentMode, DeploymentPlan, DeploymentPlanInput};
@@ -29,9 +27,10 @@ use crate::formal::release_master_key::ReleaseMasterKeyManager;
 use crate::formal::release_profile_repository::{ReleaseProfileRecord, ReleaseProfileRepository};
 use crate::formal::resource_lease_repository::ResourceLeaseRepository;
 use crate::infrastructure::aio_assets_service::project_operator;
-use crate::infrastructure::local_sqlite::host_key_repository::HostKeyRepository;
+use crate::infrastructure::local_sqlite::host_key_repository::{HostKeyRecord, HostKeyRepository};
 use crate::infrastructure::project_context::{map_formal_error, project_database};
 use crate::infrastructure::remote::RusshConnector;
+use crate::infrastructure::remote::observed::ObservedConnector;
 use crate::infrastructure::workbench_aio::WorkbenchAioRepository;
 
 pub struct Stage75BPreflightAdapter<'a> {
@@ -183,7 +182,11 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
             }
         };
         let leases = ResourceLeaseRepository::new(pools.workbench.clone());
-        let host_keys = HostKeyRepository::new(self.state.local_store.pool().clone());
+        let connector = ObservedConnector::new(
+            RusshConnector::default(),
+            HostKeyRepository::new(self.state.local_store.pool().clone()),
+            project_id,
+        );
         let mut target_snapshots = Vec::with_capacity(normalized.target_macs.len());
         for mac in &normalized.target_macs {
             let Some(node) = nodes.get(mac) else {
@@ -234,44 +237,25 @@ impl DeploymentPreflightPort for Stage75BPreflightAdapter<'_> {
                 port: profile.values.ssh_port,
                 connect_timeout: Duration::from_secs(u64::from(profile.values.ssh_timeout_seconds)),
             };
-            let host_key = match host_keys.get(project_id, &target).await? {
-                Some(host_key) => {
-                    checks.push(passed(
-                        "host_key",
-                        "HostKey",
-                        Some(mac),
-                        format!("已确认{}", host_key.identity.fingerprint),
-                    ));
-                    host_key
-                }
-                None => {
-                    checks.push(failed(
-                        "host_key",
-                        "HostKey",
-                        Some(mac),
-                        format!("{}:{}尚未确认主机指纹", target.host, target.port),
-                        remediation("confirm_host_key", "确认HostKey", None, Some(mac)),
-                    ));
-                    continue;
-                }
-            };
-            target_snapshots.push(DeploymentTargetSnapshot {
-                node: node.clone(),
-                ssh_host: target.host.clone(),
-                ssh_port: target.port,
-                host_key_algorithm: host_key.identity.algorithm.clone(),
-                host_key_fingerprint: host_key.identity.fingerprint.clone(),
-                host_key_accepted_at: host_key.accepted_at,
-            });
-            append_remote_runtime_checks(
+            if let Some(host_key) = append_remote_runtime_checks(
                 &mut checks,
                 mac,
                 &target,
                 &profile,
-                host_key.identity,
+                &connector,
                 &runtime,
             )
-            .await;
+            .await
+            {
+                target_snapshots.push(DeploymentTargetSnapshot {
+                    node: node.clone(),
+                    ssh_host: target.host.clone(),
+                    ssh_port: target.port,
+                    host_key_algorithm: host_key.identity.algorithm,
+                    host_key_fingerprint: host_key.identity.fingerprint,
+                    host_key_accepted_at: host_key.accepted_at,
+                });
+            }
         }
         let execution_snapshot = DeploymentExecutionSnapshot {
             schema_version: DEPLOYMENT_SNAPSHOT_SCHEMA_VERSION,
@@ -297,9 +281,9 @@ async fn append_remote_runtime_checks(
     mac: &str,
     target: &RemoteTarget,
     profile: &ReleaseProfileRecord,
-    host_key: HostKeyIdentity,
+    connector: &ObservedConnector<RusshConnector>,
     runtime: &ReleaseRuntime,
-) {
+) -> Option<HostKeyRecord> {
     let auth = match remote_auth(profile) {
         Ok(auth) => auth,
         Err(error) => {
@@ -315,26 +299,23 @@ async fn append_remote_runtime_checks(
                     Some(mac),
                 ),
             ));
-            return;
+            return None;
         }
     };
-    let connection = match RusshConnector::default()
-        .connect(target, &auth, HostKeyPolicy::Require(host_key))
-        .await
-    {
-        Ok(connection) => {
+    let (connection, observation) = match connector.connect_observed(target, &auth).await {
+        Ok(connected) => {
             checks.push(passed(
                 "ssh_auth",
                 "SSH认证",
                 Some(mac),
                 format!(
-                    "{}@{}:{}认证与固定指纹校验通过",
+                    "{}@{}:{}认证通过，主机指纹已自动采集",
                     auth.username(),
                     target.host,
                     target.port
                 ),
             ));
-            connection
+            connected
         }
         Err(error) => {
             checks.push(failed(
@@ -343,15 +324,30 @@ async fn append_remote_runtime_checks(
                 Some(mac),
                 error.to_string(),
                 remediation(
-                    "confirm_host_key",
-                    "检查凭据或重新确认HostKey",
-                    None,
+                    "open_release_profile",
+                    "检查SSH连接和凭据",
+                    Some("/aio/release"),
                     Some(mac),
                 ),
             ));
-            return;
+            return None;
         }
     };
+    checks.push(if observation.changed() {
+        warning(
+            "host_key_changed",
+            "主机指纹变化",
+            Some(mac),
+            observation.message(),
+        )
+    } else {
+        passed(
+            "host_key_observed",
+            "主机指纹",
+            Some(mac),
+            observation.message(),
+        )
+    });
     let cancellation = CancellationToken::new();
     enum Expectation<'a> {
         Exact(&'a str),
@@ -449,6 +445,7 @@ async fn append_remote_runtime_checks(
             error.to_string(),
         ));
     }
+    Some(observation.record)
 }
 
 fn remote_auth(profile: &ReleaseProfileRecord) -> AppResult<RemoteAuth> {
@@ -659,8 +656,21 @@ fn timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::failed;
+    use super::{failed, warning};
     use crate::domain::aio::deployment_workflow::{PreflightRemediation, PreflightStatus};
+
+    #[test]
+    fn a_changed_host_key_is_only_a_non_blocking_warning() {
+        let check = warning(
+            "host_key_changed",
+            "主机指纹变化",
+            Some("001122334455"),
+            "已自动记录并继续".into(),
+        );
+        assert_eq!(check.status, PreflightStatus::Warning);
+        assert!(!check.blocking);
+        assert!(check.remediation.is_none());
+    }
 
     #[test]
     fn unexecuted_remote_gate_is_blocking() {

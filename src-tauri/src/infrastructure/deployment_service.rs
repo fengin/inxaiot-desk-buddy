@@ -15,9 +15,7 @@ use crate::application::execution_coordinator::{ExecutionCoordinator, ExecutionL
 use crate::application::ports::deployment_progress::{
     DeploymentProgressEvent, DeploymentProgressSink,
 };
-use crate::application::ports::remote_session::{
-    HostKeyIdentity, HostKeyPolicy, RemoteAuth, RemoteTarget,
-};
+use crate::application::ports::remote_session::{HostKeyPolicy, RemoteAuth, RemoteTarget};
 use crate::core::error::{AppError, AppResult};
 use crate::core::secret::SecretValue;
 use crate::domain::aio::deployment::{DeploymentMode, DeploymentPlan, DeploymentPlanInput};
@@ -50,10 +48,12 @@ use crate::infrastructure::deployment_remote::{
     execute_remote_deployment_observed_with_checkpoint,
 };
 use crate::infrastructure::device_api::{AioRegistrationPayload, DeviceApiClient};
+use crate::infrastructure::local_sqlite::host_key_repository::HostKeyRepository;
 use crate::infrastructure::project_context::{map_formal_error, project_database};
 use crate::infrastructure::release_archive::create_release_tar;
 use crate::infrastructure::release_template::render_release_templates;
 use crate::infrastructure::remote::RusshConnector;
+use crate::infrastructure::remote::observed::ObservedConnector;
 
 const GLOBAL_REMOTE_NODE_CONCURRENCY: usize = 5;
 
@@ -228,10 +228,6 @@ async fn launch_deployment_inner(
             PreparedNode {
                 target,
                 auth,
-                policy: HostKeyPolicy::Require(HostKeyIdentity {
-                    algorithm: target_snapshot.host_key_algorithm.clone(),
-                    fingerprint: target_snapshot.host_key_fingerprint.clone(),
-                }),
                 files: RemoteDeploymentFiles {
                     local_agent: agent_path.clone(),
                     local_artifact: shared_artifact.clone(),
@@ -425,7 +421,6 @@ async fn validate_fencing(
 struct PreparedNode {
     target: RemoteTarget,
     auth: RemoteAuth,
-    policy: HostKeyPolicy,
     files: RemoteDeploymentFiles,
     config: RemoteDeploymentConfig,
     registration: AioRegistrationPayload,
@@ -497,6 +492,11 @@ impl ExecutionLifecyclePort for AioExecutionLifecycle<'_> {
             handle,
             cancellation,
             progress_sink,
+            ObservedConnector::new(
+                RusshConnector::default(),
+                HostKeyRepository::new(self.state.local_store.pool().clone()),
+                self.local_project_id,
+            ),
         )
         .await;
         let progress = progress_guard.stop().await;
@@ -567,6 +567,7 @@ async fn execute_prepared_targets(
     handle: &crate::infrastructure::deployment_control::DeploymentControlHandle,
     cancellation: tokio_util::sync::CancellationToken,
     progress_sink: Arc<TaskProgressReporter>,
+    connector: ObservedConnector<RusshConnector>,
 ) -> AppResult<DeploymentExecutionSummary> {
     let lease_by_mac = Arc::new(
         handle
@@ -577,7 +578,6 @@ async fn execute_prepared_targets(
             .collect::<HashMap<_, _>>(),
     );
     let prepared = Arc::new(prepared);
-    let connector = Arc::new(RusshConnector::default());
     let global_slots = global_remote_node_slots();
     let plan_for_worker = plan.clone();
     execute_deployment_targets(plan, cancellation.clone(), {
@@ -608,11 +608,23 @@ async fn execute_prepared_targets(
                         .cloned()
                         .ok_or_else(|| AppError::Conflict(format!("缺少节点租约：{mac}")))?;
                     validate_fencing(&workbench_pool, &lease).await?;
+                    let change_progress = progress_sink.clone();
+                    let change_mac = mac.clone();
+                    let connector = connector.with_change_handler(Arc::new(move |observation| {
+                        change_progress.emit(DeploymentProgressEvent {
+                            mac: change_mac.clone(),
+                            stage: "ssh_connect".into(), step_code: None, step_state: None,
+                            target_state: TargetState::Running, progress_current: 0, progress_total: 100,
+                            level: TaskEventLevel::Warn,
+                            message_code: "SSH_HOST_KEY_CHANGED".into(),
+                            message: Some(observation.message()),
+                        })
+                    }));
                     execute_remote_deployment_observed_with_checkpoint(
-                        connector.as_ref(),
+                        &connector,
                         &node.target,
                         &node.auth,
-                        node.policy.clone(),
+                        HostKeyPolicy::Capture,
                         &plan,
                         &node.files,
                         &node.config,

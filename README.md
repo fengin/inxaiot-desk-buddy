@@ -36,6 +36,7 @@ pnpm tauri dev
 - macOS：在Mac上执行`pnpm build:macos`，将输出的完整`.app`复制到“应用程序”目录。Windows不能替代Mac原生构建与运行验证。
 - 正式Windows产物：使用`scripts/release-internal.ps1`从干净提交构建，再用`scripts/verify-internal-release.ps1`校验。完整说明见[发布与回滚](doc/16-Windows可信发布与回滚说明.md)。
 - 发布参数接受已有RSA、Ed25519、ECDSA私钥内容，继续加密存入工作台库；RSA认证使用SHA-2，无需追加新公钥。
+- SSH主机指纹在预检和执行时自动记录，变化只告警并继续，不需要逐台采集或确认；账号认证失败等其他错误仍正常阻断。
 
 ## 质量检查
 

@@ -10,6 +10,30 @@ import { useDeploymentWorkflowStore } from "@/stores/deploymentWorkflow";
 describe("deployment workflow store", () => {
   beforeEach(() => setActivePinia(createPinia()));
 
+  it("keeps changed-host-key warnings visible without blocking submission", async () => {
+    const adapter = new FixtureOperationsAdapter();
+    const original = adapter.preflight.bind(adapter);
+    vi.spyOn(adapter, "preflight").mockImplementation(async (projectId, plan) => {
+      const report = await original(projectId, plan);
+      return {
+        ...report,
+        checks: [...report.checks, {
+          code: "host_key_changed", label: "主机指纹变化", status: "warning" as const,
+          blocking: false, targetMac: "001122334455", message: "指纹变化，已记录并继续连接"
+        }]
+      };
+    });
+    configureOperationsAdapter(adapter);
+    const store = useDeploymentWorkflowStore();
+    const report = await store.runPreflight("fixture-project", {
+      mode: "full_upgrade", targetMacs: ["001122334455"], artifactPath: "C:/fixture/release",
+      artifactName: "Release fixture", artifactVersion: "fixture", batchSize: 1, concurrency: 1
+    });
+    expect(store.preflight?.checks.some((check) => check.code === "host_key_changed" && !check.blocking)).toBe(true);
+    expect(report.ready).toBe(true);
+    expect((await store.submit("fixture-project", report.normalizedPlan)).taskId).toContain("fixture-task-");
+  });
+
   it("loads fixture task and history only through adapter contracts", async () => {
     configureOperationsAdapter(new FixtureOperationsAdapter());
     const store = useDeploymentWorkflowStore();

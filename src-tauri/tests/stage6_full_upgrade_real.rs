@@ -161,7 +161,7 @@ async fn full_upgrade_backs_up_installs_checks_and_cleans_exact_staging() {
         let rendered_compose = node_dir.join("docker-compose.yml");
         std::fs::write(&env, rendered.env).expect("node env");
         std::fs::write(&host_info, rendered.host_info_json).expect("host info");
-        std::fs::write(&rendered_compose, rendered.compose_preview).expect("node compose");
+        std::fs::write(&rendered_compose, rendered.compose_runtime).expect("node compose");
         let expected_compose_sha256 = sha256_file(&rendered_compose).expect("compose sha256");
         let session = connect_pinned(&config, host).await;
         let mac = &plan.target_macs[index];

@@ -15,6 +15,7 @@ const recoveredTaskId = "fixture-recovered-deployment";
 
 class RecoveryActivityAdapter extends FixtureActivityAdapter {
   completed = false;
+  finalState: "succeeded" | "failed" = "succeeded";
   override async listTasks(projectId: string) {
     return [{
       id: recoveredTaskId,
@@ -22,7 +23,7 @@ class RecoveryActivityAdapter extends FixtureActivityAdapter {
       domainType: "aio",
       operationType: "full_upgrade",
       name: "恢复中的整包升级",
-      state: this.completed ? "succeeded" as const : "running" as const,
+      state: this.completed ? this.finalState : "running" as const,
       stage: "上传Release",
       progress: this.completed ? 100 : 35,
       targetCount: 1,
@@ -35,6 +36,7 @@ class RecoveryActivityAdapter extends FixtureActivityAdapter {
 
 class RecoveryOperationsAdapter extends FixtureOperationsAdapter {
   completed = false;
+  finalState: "succeeded" | "failed" = "succeeded";
   override async getTask(projectId: string, taskId: string) {
     if (taskId !== recoveredTaskId) return super.getTask(projectId, taskId);
     return {
@@ -42,19 +44,19 @@ class RecoveryOperationsAdapter extends FixtureOperationsAdapter {
       projectId,
       operationType: "full_upgrade",
       name: "恢复中的整包升级",
-      state: this.completed ? "succeeded" : "running",
+      state: this.completed ? this.finalState : "running",
       stage: this.completed ? "completed" : "upload",
       progress: this.completed ? 100 : 35,
       targetCount: 1,
       completedCount: this.completed ? 1 : 0,
-      successCount: this.completed ? 1 : 0,
-      failureCount: 0,
+      successCount: this.completed && this.finalState === "succeeded" ? 1 : 0,
+      failureCount: this.completed && this.finalState === "failed" ? 1 : 0,
       cancelledCount: 0,
       cancellable: !this.completed,
       updatedAt: new Date().toISOString(),
       targets: [{
         mac: "000C293BB931",
-        state: this.completed ? "succeeded" : "running",
+        state: this.completed ? this.finalState : "running",
         stage: this.completed ? "completed" : "upload",
         progress: this.completed ? 100 : 35
       }],
@@ -64,7 +66,7 @@ class RecoveryOperationsAdapter extends FixtureOperationsAdapter {
 }
 
 describe("部署页面活动任务恢复", () => {
-  it("restores a running AIO task when the page is reopened", async () => {
+  it.each(["succeeded", "failed"] as const)("restores a running AIO task and presents its %s result accurately", async (finalState) => {
     Object.defineProperty(window, "matchMedia", {
       configurable: true,
       value: vi.fn().mockImplementation(() => ({
@@ -75,6 +77,8 @@ describe("部署页面活动任务恢复", () => {
     });
     const activityAdapter = new RecoveryActivityAdapter();
     const operationsAdapter = new RecoveryOperationsAdapter();
+    activityAdapter.finalState = finalState;
+    operationsAdapter.finalState = finalState;
     configureActivityAdapter(activityAdapter);
     configureOperationsAdapter(operationsAdapter);
     const { default: App } = await import("@/app/App.vue");
@@ -108,7 +112,15 @@ describe("部署页面活动任务恢复", () => {
     await flushPromises();
     expect(activity.activeTaskCount).toBe(0);
     expect(wrapper.get('.result-list strong').text()).toBe("AIO-1F-弱电间");
-    expect(wrapper.get('.result-list').text()).toContain("已完成");
+    if (finalState === "succeeded") {
+      expect(wrapper.get('.result-list').text()).toContain("已完成");
+      expect(wrapper.find('.result-hero.result-not-success').exists()).toBe(false);
+    } else {
+      expect(wrapper.get('.result-list').text()).toContain("失败");
+      expect(wrapper.get('.result-list').text()).not.toContain("已完成");
+      expect(wrapper.find('.result-hero.result-not-success').exists()).toBe(true);
+      expect(wrapper.find('.result-list .lucide-circle-alert').exists()).toBe(true);
+    }
     wrapper.unmount();
   }, 30000);
 });

@@ -2121,6 +2121,16 @@ a {
   flex: 1;
 }
 
+.result-hero.result-not-success {
+  border-color: var(--inx-color-warning);
+  background: var(--inx-color-warning-soft);
+}
+
+.result-hero.result-not-success .result-icon,
+.result-list > .result-not-success > svg {
+  color: var(--inx-color-warning);
+}
+
 .result-hero > div:nth-child(2) > strong {
   font-size: 17px;
 }

@@ -2,7 +2,7 @@
 set -eu
 
 ACTION="${1:-}"
-AGENT_VERSION="0.1.3"
+AGENT_VERSION="0.1.4"
 AGENT_PROTOCOL_VERSION="1"
 DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/data/deploy/inxvision-edge}"
 DATA_ROOT="${DATA_ROOT:-/opt/data}"
@@ -551,12 +551,72 @@ verify_service_state() {
   fi
 }
 
+# 只兼容转换目标服务的普通块映射镜像行；不重写整份YAML，也不猜测别名/流式结构。
+# 输入先写入独立候选文件，解析不唯一或镜像来源不符时在重建容器前失败。
+prepare_service_compose() {
+  awk -v wanted="$SERVICE_NAME" -v key="$3" -v previous="$4" '
+    function unquote(value, first, last) {
+      first = substr(value, 1, 1)
+      last = substr(value, length(value), 1)
+      if ((first == "\"" || first == sprintf("%c", 39)) && first == last) {
+        return substr(value, 2, length(value) - 2)
+      }
+      return value
+    }
+    {
+      original = $0
+      text = $0
+      sub(/\r$/, "", text)
+      if (text ~ /^[ \t]*($|#)/) { print original; next }
+      if (text ~ /^ *\t/) { invalid = 1; print original; next }
+      indent = match(text, /[^ ]/) - 1
+      content = substr(text, indent + 1)
+      if (indent == 0) {
+        in_services = (content ~ /^services:[ ]*(#.*)?$/)
+        if (in_services) { sections++; service_indent = 0 }
+        target = 0
+      } else if (in_services) {
+        if (!service_indent) service_indent = indent
+        if (indent == service_indent) {
+          name = content
+          sub(/:.*/, "", name)
+          target = (unquote(name) == wanted)
+          property_indent = 0
+          if (target) {
+            targets++
+            if (content !~ /^[^:]+:[ ]*(#.*)?$/) invalid = 1
+          }
+        } else if (target && indent > service_indent) {
+          if (!property_indent) property_indent = indent
+          if (indent == property_indent && content ~ /^image:[ ]*/) {
+            images++
+            value = content
+            sub(/^image:[ ]*/, "", value)
+            comment = ""
+            if (match(value, /[ ]+#/)) {
+              comment = substr(value, RSTART)
+              value = substr(value, 1, RSTART - 1)
+            }
+            sub(/[ ]+$/, "", value)
+            value = unquote(value)
+            if (value != previous && value != ("$" key) && value !~ ("^[$][{]" key "(:?[-?][^}]*)?[}]$")) invalid = 1
+            original = substr(text, 1, indent) "image: ${" key "}" comment
+          }
+        }
+      }
+      print original
+    }
+    END { if (invalid || sections != 1 || targets != 1 || images != 1) exit 1 }
+  ' "$1" > "$2"
+}
+
 rollback_service_upgrade() {
   service_dir="$1"
   backup_env="$2"
   previous_image="$3"
   event "rollback" "running" "restoring previous service configuration"
   cp "$backup_env" "$service_dir/.env" || return 1
+  cp "${backup_env%/*}/docker-compose.yml" "$service_dir/docker-compose.yml" || return 1
   (cd "$service_dir" && compose -f docker-compose.yml up -d --no-deps --force-recreate "$SERVICE_NAME") || return 1
   verify_service_state "$service_dir" "$previous_image" || return 1
   event "rollback" "success" "previous service image restored"
@@ -581,13 +641,22 @@ service_upgrade() {
   if [ -f "$current_dir/manifest.json" ]; then
     cp -a "$current_dir/manifest.json" "$backup_dir/" || fail "service_upgrade" "failed to backup manifest" 78
   fi
+  candidate_compose="$upgrade_dir/docker-compose.after.yml"
+  prepare_service_compose "$current_dir/docker-compose.yml" "$candidate_compose" "$image_key" "$current_image" ||
+    fail "service_upgrade" "无法安全定位目标服务镜像；当前Compose需使用唯一的服务块和image声明，未重建容器" 82
   cp -a "$REMOTE_IMAGE" "$upgrade_dir/$(basename "$REMOTE_IMAGE")" || fail "service_upgrade" "failed to snapshot image" 79
 
   event "load_image" "running" "$SERVICE_IMAGE"
   docker load -i "$REMOTE_IMAGE"
   docker image inspect "$SERVICE_IMAGE" >/dev/null 2>&1 || fail "load_image" "loaded image does not contain ${SERVICE_IMAGE}" 73
 
-  replace_env_value "$current_dir/.env" "$image_key" "$SERVICE_IMAGE"
+  if ! replace_env_value "$current_dir/.env" "$image_key" "$SERVICE_IMAGE" ||
+    ! cp "$candidate_compose" "$current_dir/docker-compose.yml"; then
+    cp "$backup_dir/.env.before" "$current_dir/.env" &&
+      cp "$backup_dir/docker-compose.yml" "$current_dir/docker-compose.yml" ||
+      fail "rollback" "failed to restore configuration before service start" 83
+    fail "service_upgrade" "failed to update service configuration; original configuration restored" 84
+  fi
   cp -a "$current_dir/.env" "$upgrade_dir/.env.after" 2>/dev/null || true
   {
     printf '{\n'

@@ -3,9 +3,9 @@ use sha2::{Digest, Sha256};
 use crate::core::error::{AppError, AppResult};
 
 pub const AGENT_SOURCE: &str = include_str!("../../resources/agent/edge-node-agent.sh");
-pub const AGENT_VERSION: &str = "0.1.3";
+pub const AGENT_VERSION: &str = "0.1.4";
 pub const AGENT_PROTOCOL_VERSION: &str = "1";
-pub const AGENT_SHA256: &str = "64fa5197c28f8a3fba5d7949634782d3aab7fd75259d464e83e39c46380ff8f8";
+pub const AGENT_SHA256: &str = "f75b533e53622204a91062e06eca3cb27d65fee8866fba416eff6160bff9265f";
 pub const AGENT_COMPATIBILITY: &[&str] = &[
     "Linux x86_64",
     "Docker Engine 20.10+",
@@ -42,7 +42,7 @@ mod tests {
     #[test]
     fn embedded_agent_has_version_hash_protocol_and_compatibility() {
         verify_embedded_agent().expect("embedded agent");
-        assert_eq!(AGENT_VERSION, "0.1.3");
+        assert_eq!(AGENT_VERSION, "0.1.4");
         assert_eq!(AGENT_PROTOCOL_VERSION, "1");
         assert_eq!(AGENT_SHA256.len(), 64);
         assert!(!AGENT_COMPATIBILITY.is_empty());

@@ -199,7 +199,7 @@ async fn launch_deployment_inner(
                     .map_err(|error| AppError::io("写入节点env", &error))?;
                 std::fs::write(&host, rendered.host_info_json)
                     .map_err(|error| AppError::io("写入节点host-info", &error))?;
-                std::fs::write(&compose, rendered.compose_preview)
+                std::fs::write(&compose, rendered.compose_runtime)
                     .map_err(|error| AppError::io("写入节点Compose", &error))?;
                 (Some(env), Some(host), Some(compose))
             } else {

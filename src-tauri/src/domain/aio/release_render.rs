@@ -42,4 +42,7 @@ pub struct RenderedReleaseFiles {
     pub env: String,
     pub host_info_json: String,
     pub compose_preview: String,
+    /// 部署文件保留四个可单服升级的镜像引用；不暴露额外前端字段。
+    #[serde(skip)]
+    pub compose_runtime: String,
 }

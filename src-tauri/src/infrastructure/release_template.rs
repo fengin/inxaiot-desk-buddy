@@ -19,11 +19,14 @@ pub fn render_release_templates(
     let host_info_json = render_placeholders(host_info_template, &values, true)?;
     serde_json::from_str::<serde_json::Value>(&host_info_json)
         .map_err(|_| AppError::InvalidConfig("渲染后的host-info不是有效JSON".into()))?;
-    let compose_preview = render_compose(compose_template, &parse_env(&env))?;
+    let environment = parse_env(&env);
+    let compose_preview = render_compose(compose_template, &environment, false)?;
+    let compose_runtime = render_compose(compose_template, &environment, true)?;
     Ok(RenderedReleaseFiles {
         env,
         host_info_json,
         compose_preview,
+        compose_runtime,
     })
 }
 
@@ -110,7 +113,11 @@ fn parse_env(content: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn render_compose(template: &str, env: &BTreeMap<String, String>) -> AppResult<String> {
+fn render_compose(
+    template: &str,
+    env: &BTreeMap<String, String>,
+    preserve_service_images: bool,
+) -> AppResult<String> {
     let pattern = Regex::new(r"\$\{([^}]+)\}").expect("static compose regex");
     let mut missing = BTreeSet::new();
     let rendered = pattern.replace_all(template, |captures: &regex::Captures<'_>| {
@@ -119,6 +126,17 @@ fn render_compose(template: &str, env: &BTreeMap<String, String>) -> AppResult<S
         if let Some(value) = env.get(name)
             && (!default_on_empty || !value.is_empty())
         {
+            if preserve_service_images
+                && matches!(
+                    name,
+                    "DEVICE_EDGE_IMAGE"
+                        | "DEVICE_EDGE_WEB_IMAGE"
+                        | "RULE_ENGINE_IMAGE"
+                        | "EMQX_IMAGE"
+                )
+            {
+                return format!("${{{name}}}");
+            }
             return value.clone();
         }
         if let Some(fallback) = fallback {
@@ -267,5 +285,33 @@ mod tests {
             render_release_templates("NODE_NAME={{node.name}}\n", "{}", "services: {}", &injected)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn runtime_compose_preserves_mutable_images_but_preview_resolves_them() {
+        let output = render_release_templates(
+            "DEVICE_EDGE_IMAGE={{images.device-edge}}\nDEVICE_EDGE_WEB_IMAGE=web:1\nRULE_ENGINE_IMAGE=rule:1\nEMQX_IMAGE=emqx:1\nCONFIG_MARKER={{node.name}}\n",
+            "{}",
+            "services:\n  device-edge:\n    image: ${DEVICE_EDGE_IMAGE:?required}\n    labels:\n      config-marker: ${CONFIG_MARKER}\n  device-edge-web:\n    image: ${DEVICE_EDGE_WEB_IMAGE:-web:0}\n  rule-engine:\n    image: ${RULE_ENGINE_IMAGE}\n  emqx:\n    image: ${EMQX_IMAGE}\n",
+            &context(),
+        )
+        .expect("render runtime and preview");
+        assert!(!output.compose_preview.contains("${"));
+        assert!(output.compose_preview.contains("image: device-edge:1"));
+        for key in [
+            "DEVICE_EDGE_IMAGE",
+            "DEVICE_EDGE_WEB_IMAGE",
+            "RULE_ENGINE_IMAGE",
+            "EMQX_IMAGE",
+        ] {
+            assert!(
+                output
+                    .compose_runtime
+                    .contains(&format!("image: ${{{key}}}"))
+            );
+        }
+        assert!(output.compose_runtime.contains("config-marker: AIO-1"));
+        let serialized = serde_json::to_value(&output).expect("preview DTO");
+        assert!(serialized.get("composeRuntime").is_none());
     }
 }

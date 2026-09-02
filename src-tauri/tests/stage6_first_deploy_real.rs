@@ -82,7 +82,7 @@ async fn first_deploy_reinstall_is_healthy_registration_is_idempotent_and_stagin
         let compose = node_dir.join("docker-compose.yml");
         std::fs::write(&env, rendered.env).expect("env");
         std::fs::write(&host_info, rendered.host_info_json).expect("host info");
-        std::fs::write(&compose, rendered.compose_preview).expect("compose");
+        std::fs::write(&compose, rendered.compose_runtime).expect("compose");
         let session = connect_pinned(&remote, host).await;
         let staging = format!(
             "/opt/data/.inxaiot-desk-buddy/{}/{}",

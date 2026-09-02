@@ -19,6 +19,7 @@ import {
   ArrowLeft,
   Check,
   CheckCircle2,
+  CircleAlert,
   ChevronRight,
   Clock3,
   FileArchive,
@@ -261,6 +262,11 @@ function stageLabel(stage?: string) {
     cancelling: "正在取消", cancelled: "已取消", failed: "执行失败", interrupted: "执行中断"
   };
   return labels[stage] ?? stage;
+}
+
+function targetResultText(target: DeploymentTaskTargetView) {
+  if (target.message) return target.message;
+  return target.state === "succeeded" ? stageLabel(target.stage) : historyResultLabel(target.state);
 }
 
 function toggleNode(mac: string, checked: boolean) {
@@ -585,9 +591,9 @@ function historyArtifact(record: OperationHistoryItem) {
         </section>
 
         <section v-else class="operation-stage result-stage" data-testid="operation-result">
-          <div class="result-hero"><span class="result-icon" :class="resultState === 'succeeded' ? 'success' : 'warning'"><CheckCircle2 :size="32" /></span><div><strong>{{ modeLabel }}已形成最终结果</strong><p>成功 {{ resultSuccessCount }} 台，失败 {{ resultFailureCount }} 台，取消 {{ resultCancelledCount }} 台；以下统计只来自真实Task或执行摘要。</p></div><n-tag :type="stateTone(resultState)" :bordered="false">{{ historyResultLabel(resultState) }}</n-tag></div>
+          <div class="result-hero" :class="{ 'result-not-success': resultState !== 'succeeded' }"><span class="result-icon" :class="resultState === 'succeeded' ? 'success' : 'warning'"><CheckCircle2 v-if="resultState === 'succeeded'" :size="32" /><CircleAlert v-else :size="32" /></span><div><strong>{{ modeLabel }}已形成最终结果</strong><p>成功 {{ resultSuccessCount }} 台，失败 {{ resultFailureCount }} 台，取消 {{ resultCancelledCount }} 台；以下统计只来自真实Task或执行摘要。</p></div><n-tag :type="stateTone(resultState)" :bordered="false">{{ historyResultLabel(resultState) }}</n-tag></div>
           <div class="result-metrics"><span><small>目标数量</small><strong>{{ resultTargetCount }}</strong></span><span><small>成功</small><strong class="success-text">{{ resultSuccessCount }}</strong></span><span><small>失败/异常</small><strong>{{ resultFailureCount }}</strong></span><span><small>发布版本</small><strong>{{ artifactLabel }}</strong></span></div>
-          <div v-if="resultTargets.length" class="result-list"><div v-for="target in resultTargets" :key="target.mac"><CheckCircle2 :size="17" /><span><strong>{{ nodeName(target.mac) }}</strong><small>{{ target.mac }}</small></span><span>{{ target.message ?? stageLabel(target.stage) }}</span><n-tag size="small" :type="stateTone(target.state)" :bordered="false">{{ historyResultLabel(target.state) }}</n-tag></div></div>
+          <div v-if="resultTargets.length" class="result-list"><div v-for="target in resultTargets" :key="target.mac" :class="{ 'result-not-success': target.state !== 'succeeded' }"><CheckCircle2 v-if="target.state === 'succeeded'" :size="17" /><CircleAlert v-else :size="17" /><span><strong>{{ nodeName(target.mac) }}</strong><small>{{ target.mac }}</small></span><span>{{ targetResultText(target) }}</span><n-tag size="small" :type="stateTone(target.state)" :bordered="false">{{ historyResultLabel(target.state) }}</n-tag></div></div>
           <div v-else class="empty-state">没有可验证的节点最终结果，未按成功处理。</div>
           <p v-if="resultState === 'finalizing_failed'" class="modal-description">项目侧原子最终化或本地投影尚未安全收敛，任务制品已保留；重启工作台会在确认共享操作终态后自动重试本地投影。</p>
           <footer class="stage-footer"><n-button size="small" secondary @click="openHistory">查看操作记录</n-button><n-button v-if="['failed', 'cancelled', 'interrupted', 'check_failed'].includes(resultState)" size="small" secondary @click="retryOperation"><template #icon><RotateCcw /></template>按当前参数重新检查</n-button><n-button size="small" type="primary" :disabled="resultState === 'finalizing_failed'" @click="resetFlow"><template #icon><RotateCcw /></template>创建下一次任务</n-button></footer>

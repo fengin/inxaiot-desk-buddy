@@ -58,6 +58,7 @@ fn project_input_requires_safe_urls_and_database_names() {
         db_host: "database.test".into(),
         db_port: 3306,
         db_user: "workbench".into(),
+        db_tls_enabled: false,
         db_password: Some("password".into()),
         business_db: "inxvision_iot_dev".into(),
         workbench_db: "inxaiot_desk_buddy".into(),

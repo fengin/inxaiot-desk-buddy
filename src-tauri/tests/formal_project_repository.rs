@@ -20,6 +20,7 @@ fn input(name: &str, database_password: &str) -> CreateLocalProject {
         db_host: "database.test".into(),
         db_port: 3306,
         db_user: "workbench".into(),
+        db_tls_enabled: false,
         db_password: database_password.into(),
         business_db: "inxvision_iot_dev".into(),
         workbench_db: "inxaiot_desk_buddy".into(),
@@ -33,6 +34,7 @@ fn update(name: &str, platform_url: &str, database_password: Option<&str>) -> Up
         db_host: "database-updated.test".into(),
         db_port: 3307,
         db_user: "workbench-updated".into(),
+        db_tls_enabled: true,
         db_password: database_password.map(str::to_string),
         business_db: "inxvision_iot_dev".into(),
         workbench_db: "inxaiot_desk_buddy".into(),
@@ -118,6 +120,8 @@ async fn projects_and_sessions_are_isolated_and_secrets_stay_out_of_sqlite() {
         .await
         .expect("create project b");
     assert_ne!(first.id, second.id);
+    assert!(!first.db_tls_enabled);
+    assert!(!second.db_tls_enabled);
     assert_eq!(repository.list().await.expect("list projects").len(), 2);
 
     let first_secrets = repository
@@ -202,13 +206,14 @@ async fn project_update_keeps_or_rotates_secret_and_invalidates_changed_platform
         .await
         .expect("save session");
 
-    repository
+    let updated = repository
         .update(
             &project.id,
             update("Project A2", "http://platform.test:8055", None),
         )
         .await
         .expect("update without password");
+    assert!(updated.db_tls_enabled);
     assert_eq!(
         repository
             .connection_secrets(&project.id)

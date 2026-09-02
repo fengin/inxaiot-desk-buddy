@@ -24,7 +24,7 @@ use crate::domain::common::project::{
     ConfirmHostKeyRequest, DatabaseConnectionState, HostKeyCaptureRequest, HostKeyObservation,
     HostKeyState, PlatformLoginChallenge, PlatformLoginRequest, ProjectConnectionState,
     ProjectConnectionTestRequest, ProjectConnectionTestResult, ProjectInput, ProjectOverview,
-    ProjectRecord, ProjectSessionState, ProjectSessionView, is_private_network_host,
+    ProjectRecord, ProjectSessionState, ProjectSessionView,
 };
 use crate::formal::app_state::FormalAppState;
 use crate::formal::credential_crypto::ReleaseCredentials;
@@ -197,6 +197,7 @@ impl<'a> Stage75Adapter<'a> {
                         db_host: connection.project.db_host,
                         db_port: connection.project.db_port,
                         db_user: connection.project.db_user,
+                        db_tls_enabled: connection.project.db_tls_enabled,
                         db_password: Some(connection.db_password),
                         business_db: connection.project.business_db,
                         workbench_db: connection.project.workbench_db,
@@ -319,6 +320,7 @@ impl ProjectManagementPort for Stage75Adapter<'_> {
                 db_host: input.db_host,
                 db_port: input.db_port,
                 db_user: input.db_user,
+                db_tls_enabled: input.db_tls_enabled,
                 db_password: input.db_password.unwrap_or_default(),
                 business_db: input.business_db,
                 workbench_db: input.workbench_db,
@@ -346,6 +348,7 @@ impl ProjectManagementPort for Stage75Adapter<'_> {
                     db_host: input.db_host,
                     db_port: input.db_port,
                     db_user: input.db_user,
+                    db_tls_enabled: input.db_tls_enabled,
                     db_password: input.db_password,
                     business_db: input.business_db,
                     workbench_db: input.workbench_db,
@@ -914,6 +917,7 @@ fn map_project(project: LocalProjectRecord) -> ProjectRecord {
         db_host: project.db_host,
         db_port: project.db_port,
         db_user: project.db_user,
+        db_tls_enabled: project.db_tls_enabled,
         business_db: project.business_db,
         workbench_db: project.workbench_db,
         last_opened_at: project.last_opened_at,
@@ -963,10 +967,10 @@ fn mysql_config(
         platform_schema: input.business_db.trim().into(),
         workbench_schema: input.workbench_db.trim().into(),
         connect_timeout: Duration::from_secs(10),
-        tls_mode: if is_private_network_host(&input.db_host) {
-            DatabaseTlsMode::Preferred
-        } else {
+        tls_mode: if input.db_tls_enabled {
             DatabaseTlsMode::Required
+        } else {
+            DatabaseTlsMode::Disabled
         },
     })
 }

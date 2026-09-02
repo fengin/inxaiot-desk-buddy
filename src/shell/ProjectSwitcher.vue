@@ -2,6 +2,7 @@
 import {
   NAlert,
   NButton,
+  NCheckbox,
   NForm,
   NFormItem,
   NInput,
@@ -50,6 +51,7 @@ const projectForm = reactive<ProjectInput>({
   dbHost: "",
   dbPort: 3306,
   dbUser: "",
+  dbTlsEnabled: false,
   dbPassword: "",
   businessDb: "",
   workbenchDb: defaultWorkbenchDatabase
@@ -162,6 +164,7 @@ function resetProjectForm() {
     dbHost: "",
     dbPort: 3306,
     dbUser: "",
+    dbTlsEnabled: false,
     dbPassword: "",
     businessDb: "",
     workbenchDb: defaultWorkbenchDatabase
@@ -187,6 +190,7 @@ function openEditProject() {
     dbHost: project.dbHost,
     dbPort: project.dbPort,
     dbUser: project.dbUser,
+    dbTlsEnabled: project.dbTlsEnabled,
     dbPassword: "",
     businessDb: project.businessDb,
     workbenchDb: project.workbenchDb
@@ -369,10 +373,13 @@ async function upgradeSchema() {
       <n-form-item label="数据库端口"><n-input-number v-model:value="projectForm.dbPort" data-testid="project-db-port" :show-button="false" :min="1" :max="65535" /></n-form-item>
       <n-form-item label="数据库账号"><n-input v-model:value="projectForm.dbUser" data-testid="project-db-user" /></n-form-item>
       <n-form-item label="数据库密码"><n-input v-model:value="projectForm.dbPassword" data-testid="project-db-password" type="password" show-password-on="click" :placeholder="editingProjectId ? '留空表示保持原密码' : '请输入数据库密码'" /></n-form-item>
+      <n-form-item label="连接加密">
+        <n-checkbox v-model:checked="projectForm.dbTlsEnabled" data-testid="project-db-tls">启用 MySQL TLS（默认关闭）</n-checkbox>
+      </n-form-item>
       <n-form-item label="平台业务库"><n-input v-model:value="projectForm.businessDb" data-testid="project-business-db" placeholder="inxvision_iot_dev" /></n-form-item>
       <n-form-item label="工作台库"><n-input v-model:value="projectForm.workbenchDb" data-testid="project-workbench-db" readonly /></n-form-item>
     </n-form>
-    <div class="connection-preview"><Server :size="16" /><span>连接测试只读探测平台库；不会初始化结构或修改平台业务数据</span></div>
+    <div class="connection-preview"><Server :size="16" /><span>连接测试只读探测平台库；TLS关闭时连接未加密，建议仅用于可信内网</span></div>
     <n-alert v-if="projects.lastConnectionTest" :type="projects.lastConnectionTest.successful ? 'success' : 'error'" :show-icon="false">
       {{ projects.lastConnectionTest.message }} · MySQL {{ projects.lastConnectionTest.mysqlVersion }} · {{ projects.lastConnectionTest.connectionEncrypted ? '连接已加密' : '连接未加密' }}
     </n-alert>

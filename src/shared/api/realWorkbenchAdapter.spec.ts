@@ -13,6 +13,7 @@ const project: ProjectInput = {
   dbHost: "192.168.3.6",
   dbPort: 3306,
   dbUser: "tester",
+  dbTlsEnabled: false,
   dbPassword: "secret",
   businessDb: "inxvision_iot_dev",
   workbenchDb: "inxaiot_desk_buddy"

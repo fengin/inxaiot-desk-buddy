@@ -18,6 +18,7 @@ pub struct CreateLocalProject {
     pub db_host: String,
     pub db_port: u16,
     pub db_user: String,
+    pub db_tls_enabled: bool,
     pub db_password: String,
     pub business_db: String,
     pub workbench_db: String,
@@ -31,6 +32,7 @@ pub struct UpdateLocalProject {
     pub db_host: String,
     pub db_port: u16,
     pub db_user: String,
+    pub db_tls_enabled: bool,
     pub db_password: Option<String>,
     pub business_db: String,
     pub workbench_db: String,
@@ -78,6 +80,7 @@ pub struct LocalProjectRecord {
     pub db_host: String,
     pub db_port: u16,
     pub db_user: String,
+    pub db_tls_enabled: bool,
     pub business_db: String,
     pub workbench_db: String,
     pub last_opened_at: Option<String>,
@@ -281,9 +284,9 @@ impl LocalProjectRepository {
         let now = timestamp();
         let result = sqlx::query(
             "INSERT INTO local_project \
-             (id, name, platform_url, db_host, db_port, db_user, business_db, workbench_db, \
+             (id, name, platform_url, db_host, db_port, db_user, db_tls_enabled, business_db, workbench_db, \
               db_password_secret_ref, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(input.name.trim())
@@ -291,6 +294,7 @@ impl LocalProjectRepository {
         .bind(input.db_host.trim())
         .bind(i64::from(input.db_port))
         .bind(input.db_user.trim())
+        .bind(input.db_tls_enabled)
         .bind(input.business_db.trim())
         .bind(input.workbench_db.trim())
         .bind(&secret_ref)
@@ -313,7 +317,7 @@ impl LocalProjectRepository {
 
     pub async fn list(&self) -> FormalResult<Vec<LocalProjectRecord>> {
         let rows = sqlx::query(
-            "SELECT id, name, platform_url, db_host, db_port, db_user, business_db, workbench_db, last_opened_at \
+            "SELECT id, name, platform_url, db_host, db_port, db_user, db_tls_enabled, business_db, workbench_db, last_opened_at \
              FROM local_project ORDER BY COALESCE(last_opened_at, updated_at) DESC, name ASC",
         )
         .fetch_all(&self.pool)
@@ -376,7 +380,7 @@ impl LocalProjectRepository {
         };
         let result = sqlx::query(
             "UPDATE local_project SET name = ?, platform_url = ?, db_host = ?, db_port = ?, \
-             db_user = ?, business_db = ?, workbench_db = ?, db_password_secret_ref = ?, \
+             db_user = ?, db_tls_enabled = ?, business_db = ?, workbench_db = ?, db_password_secret_ref = ?, \
              updated_at = ? WHERE id = ?",
         )
         .bind(input.name.trim())
@@ -384,6 +388,7 @@ impl LocalProjectRepository {
         .bind(input.db_host.trim())
         .bind(i64::from(input.db_port))
         .bind(input.db_user.trim())
+        .bind(input.db_tls_enabled)
         .bind(input.business_db.trim())
         .bind(input.workbench_db.trim())
         .bind(secret_ref)
@@ -482,7 +487,7 @@ impl LocalProjectRepository {
 
     pub async fn get(&self, project_id: &str) -> FormalResult<LocalProjectRecord> {
         let row = sqlx::query(
-            "SELECT id, name, platform_url, db_host, db_port, db_user, business_db, workbench_db, last_opened_at \
+            "SELECT id, name, platform_url, db_host, db_port, db_user, db_tls_enabled, business_db, workbench_db, last_opened_at \
              FROM local_project WHERE id = ?",
         )
         .bind(project_id)
@@ -501,7 +506,7 @@ impl LocalProjectRepository {
         project_id: &str,
     ) -> FormalResult<ProjectConnectionSecrets> {
         let row = sqlx::query(
-            "SELECT id, name, platform_url, db_host, db_port, db_user, business_db, workbench_db, \
+            "SELECT id, name, platform_url, db_host, db_port, db_user, db_tls_enabled, business_db, workbench_db, \
              last_opened_at, db_password_secret_ref FROM local_project WHERE id = ?",
         )
         .bind(project_id)
@@ -755,6 +760,14 @@ fn map_project(row: sqlx::sqlite::SqliteRow) -> FormalResult<LocalProjectRecord>
         db_user: row
             .try_get("db_user")
             .map_err(|_| FormalError::LocalDatabase("解析数据库用户"))?,
+        db_tls_enabled: match row
+            .try_get::<i64, _>("db_tls_enabled")
+            .map_err(|_| FormalError::LocalDatabase("解析数据库TLS配置"))?
+        {
+            0 => false,
+            1 => true,
+            _ => return Err(FormalError::LocalDatabase("数据库TLS配置值无效")),
+        },
         business_db: row
             .try_get("business_db")
             .map_err(|_| FormalError::LocalDatabase("解析平台业务库"))?,
@@ -773,6 +786,7 @@ fn project_matches_update(project: &LocalProjectRecord, input: &UpdateLocalProje
         && project.db_host == input.db_host.trim()
         && project.db_port == input.db_port
         && project.db_user == input.db_user.trim()
+        && project.db_tls_enabled == input.db_tls_enabled
         && project.business_db == input.business_db.trim()
         && project.workbench_db == input.workbench_db.trim()
 }

@@ -5,6 +5,7 @@ import type {
   HostKeyCaptureRequest,
   HostKeyObservation,
   PlatformLoginRequest,
+  ProjectConnectionTestRequest,
   ProjectInput,
   ProjectOverview,
   ProjectSession,
@@ -41,6 +42,7 @@ function fixtureProject(index: number): ProjectOverview {
     dbHost: source.databaseHost.split(":")[0] ?? source.databaseHost,
     dbPort: Number(source.databaseHost.split(":")[1] ?? 3306),
     dbUser: "inxvision",
+    dbTlsEnabled: false,
     businessDb: source.databaseName,
     workbenchDb: "inxaiot_desk_buddy",
     connectionState: state,
@@ -108,11 +110,12 @@ export class FixtureWorkbenchAdapter implements WorkbenchAdapter {
       dbHost: input.dbHost,
       dbPort: input.dbPort,
       dbUser: input.dbUser,
+      dbTlsEnabled: input.dbTlsEnabled,
       businessDb: input.businessDb,
       workbenchDb: input.workbenchDb,
       connectionState: "disconnected",
       databaseState: "disconnected",
-      connectionEncrypted: false,
+      connectionEncrypted: input.dbTlsEnabled,
       statusMessage: "项目入口已创建"
     };
     this.projects.unshift(project);
@@ -127,11 +130,13 @@ export class FixtureWorkbenchAdapter implements WorkbenchAdapter {
       dbHost: input.dbHost,
       dbPort: input.dbPort,
       dbUser: input.dbUser,
+      dbTlsEnabled: input.dbTlsEnabled,
       businessDb: input.businessDb,
       workbenchDb: input.workbenchDb,
       connectionState: "disconnected",
       databaseState: "disconnected",
       session: undefined,
+      connectionEncrypted: input.dbTlsEnabled,
       statusMessage: "项目入口已更新，请重新连接"
     });
     return structuredClone(project);
@@ -143,7 +148,7 @@ export class FixtureWorkbenchAdapter implements WorkbenchAdapter {
     this.hostKeys.delete(projectId);
   }
 
-  async testProjectConnection() {
+  async testProjectConnection(request: ProjectConnectionTestRequest) {
     return {
       successful: true,
       platformDatabaseConnected: true,
@@ -152,7 +157,7 @@ export class FixtureWorkbenchAdapter implements WorkbenchAdapter {
       workbenchSchemaState: "ready",
       workbenchSchemaMessage: "Fixture Schema 已就绪",
       mysqlVersion: "8.0-fixture",
-      connectionEncrypted: false,
+      connectionEncrypted: request.project.dbTlsEnabled,
       message: "Fixture 双数据库连接测试通过"
     };
   }
@@ -160,6 +165,7 @@ export class FixtureWorkbenchAdapter implements WorkbenchAdapter {
   async switchProject(projectId: string) {
     const project = this.requiredProject(projectId);
     project.databaseState = "connected";
+    project.connectionEncrypted = project.dbTlsEnabled;
     project.schemaState = "ready";
     project.connectionState = project.session?.state === "active" ? "ready" : "login_required";
     project.statusMessage = project.connectionState === "ready" ? "Fixture 项目已就绪" : "请登录 Fixture 平台";

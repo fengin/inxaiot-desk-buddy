@@ -616,6 +616,7 @@ mod tests {
                 db_host: "database.test".into(),
                 db_port: 3306,
                 db_user: "workbench".into(),
+                db_tls_enabled: false,
                 db_password: "database-password".into(),
                 business_db: "inxvision_iot_dev".into(),
                 workbench_db: "inxaiot_desk_buddy".into(),

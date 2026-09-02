@@ -18,6 +18,7 @@ export interface ProjectInput {
   dbHost: string;
   dbPort: number;
   dbUser: string;
+  dbTlsEnabled: boolean;
   dbPassword?: string;
   businessDb: string;
   workbenchDb: string;
@@ -38,6 +39,7 @@ export interface ProjectOverview {
   dbHost: string;
   dbPort: number;
   dbUser: string;
+  dbTlsEnabled: boolean;
   businessDb: string;
   workbenchDb: string;
   lastOpenedAt?: string;

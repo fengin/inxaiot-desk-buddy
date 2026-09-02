@@ -187,6 +187,7 @@ fn project_input(config: &TestConfig, name: &str) -> ProjectInput {
         db_host: config.host.clone(),
         db_port: config.port,
         db_user: config.username.clone(),
+        db_tls_enabled: false,
         db_password: Some(config.password.clone()),
         business_db: config.platform_schema.clone(),
         workbench_db: config.schema.clone(),
@@ -366,78 +367,6 @@ async fn inspect_random_stage75b_schema_residue_read_only() {
         println!("STAGE75B_SCHEMA_RESIDUE={schema}");
     }
     admin.close().await;
-}
-
-fn sqlx_error_category(error: &sqlx::Error) -> String {
-    match error {
-        sqlx::Error::Database(database) => format!(
-            "database(code={},constraint={})",
-            database.code().as_deref().unwrap_or("none"),
-            database.constraint().unwrap_or("none")
-        ),
-        sqlx::Error::Io(io) => format!("io(kind={:?})", io.kind()),
-        sqlx::Error::Tls(_) => "tls".into(),
-        sqlx::Error::Configuration(_) => "configuration".into(),
-        sqlx::Error::PoolTimedOut => "pool-timeout".into(),
-        sqlx::Error::PoolClosed => "pool-closed".into(),
-        _ => "other".into(),
-    }
-}
-
-async fn preferred_pool(config: &TestConfig, schema: &str) -> Result<MySqlPool, String> {
-    let options = MySqlConnectOptions::new()
-        .host(&config.host)
-        .port(config.port)
-        .username(&config.username)
-        .password(&config.password)
-        .database(schema)
-        .charset("utf8mb4")
-        .ssl_mode(MySqlSslMode::Preferred);
-    MySqlPoolOptions::new()
-        .min_connections(0)
-        .max_connections(1)
-        .acquire_timeout(Duration::from_secs(10))
-        .connect_with(options)
-        .await
-        .map_err(|error| sqlx_error_category(&error))
-}
-
-#[tokio::test]
-#[ignore = "creates one random schema and reports private-network Preferred TLS pool compatibility"]
-async fn inspect_preferred_tls_platform_and_random_workbench_pool_compatibility() {
-    let config = config();
-    let admin = admin_pool(&config).await;
-    create_schema(&admin, &config.schema).await;
-    let result: Result<(), String> = async {
-        let platform = preferred_pool(&config, &config.platform_schema)
-            .await
-            .map_err(|category| format!("platform-connect:{category}"))?;
-        sqlx::query("SET SESSION TRANSACTION READ ONLY")
-            .execute(&platform)
-            .await
-            .map_err(|error| format!("platform-read-only:{}", sqlx_error_category(&error)))?;
-        platform.close().await;
-
-        let workbench = preferred_pool(&config, &config.schema)
-            .await
-            .map_err(|category| format!("workbench-connect:{category}"))?;
-        sqlx::query_scalar::<_, i32>("SELECT 1")
-            .fetch_one(&workbench)
-            .await
-            .map_err(|error| format!("workbench-query:{}", sqlx_error_category(&error)))?;
-        workbench.close().await;
-        Ok(())
-    }
-    .await;
-    drop_schema(&admin, &config.schema).await;
-    admin.close().await;
-    match result {
-        Ok(()) => println!("STAGE75B_PREFERRED_TLS_COMPATIBLE=true"),
-        Err(category) => {
-            println!("STAGE75B_PREFERRED_TLS_COMPATIBLE=false");
-            println!("STAGE75B_PREFERRED_TLS_FAILURE={category}");
-        }
-    }
 }
 
 #[tokio::test]

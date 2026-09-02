@@ -13,6 +13,8 @@ pub struct ProjectInput {
     pub db_port: u16,
     pub db_user: String,
     #[serde(default)]
+    pub db_tls_enabled: bool,
+    #[serde(default)]
     pub db_password: Option<String>,
     pub business_db: String,
     #[serde(default = "default_workbench_database")]
@@ -121,6 +123,7 @@ pub struct ProjectRecord {
     pub db_host: String,
     pub db_port: u16,
     pub db_user: String,
+    pub db_tls_enabled: bool,
     pub business_db: String,
     pub workbench_db: String,
     pub last_opened_at: Option<String>,

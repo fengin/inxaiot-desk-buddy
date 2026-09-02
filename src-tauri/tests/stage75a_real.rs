@@ -136,6 +136,7 @@ fn project_input(config: &TestConfig) -> ProjectInput {
         db_host: config.host.clone(),
         db_port: config.port,
         db_user: config.username.clone(),
+        db_tls_enabled: false,
         db_password: Some(config.password.clone()),
         business_db: config.platform_schema.clone(),
         workbench_db: config.schema.clone(),

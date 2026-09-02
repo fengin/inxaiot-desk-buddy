@@ -24,7 +24,6 @@ const REQUIRED_AIO_COLUMNS: &[&str] = &[
 #[serde(rename_all = "snake_case")]
 pub enum DatabaseTlsMode {
     Disabled,
-    Preferred,
     Required,
 }
 
@@ -32,7 +31,6 @@ impl From<DatabaseTlsMode> for MySqlSslMode {
     fn from(value: DatabaseTlsMode) -> Self {
         match value {
             DatabaseTlsMode::Disabled => Self::Disabled,
-            DatabaseTlsMode::Preferred => Self::Preferred,
             DatabaseTlsMode::Required => Self::Required,
         }
     }

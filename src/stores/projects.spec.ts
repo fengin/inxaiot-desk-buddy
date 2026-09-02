@@ -12,6 +12,7 @@ const input: ProjectInput = {
   dbHost: "192.168.3.6",
   dbPort: 3306,
   dbUser: "fixture",
+  dbTlsEnabled: false,
   dbPassword: "fixture-secret",
   businessDb: "inxvision_iot_dev",
   workbenchDb: "inxaiot_desk_buddy"

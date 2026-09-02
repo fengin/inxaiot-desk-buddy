@@ -8,10 +8,13 @@ import { FixtureActivityAdapter } from "@/dev-fixtures/activityFixtureAdapter";
 import { FixtureOperationsAdapter } from "@/dev-fixtures/operationsFixtureAdapter";
 import { configureActivityAdapter } from "@/shared/api/activityAdapter";
 import { configureOperationsAdapter } from "@/shared/api/operationsAdapter";
+import { useActivityStore } from "@/stores/activity";
+import { useDeploymentWorkflowStore } from "@/stores/deploymentWorkflow";
 
 const recoveredTaskId = "fixture-recovered-deployment";
 
 class RecoveryActivityAdapter extends FixtureActivityAdapter {
+  completed = false;
   override async listTasks(projectId: string) {
     return [{
       id: recoveredTaskId,
@@ -19,18 +22,19 @@ class RecoveryActivityAdapter extends FixtureActivityAdapter {
       domainType: "aio",
       operationType: "full_upgrade",
       name: "恢复中的整包升级",
-      state: "running" as const,
+      state: this.completed ? "succeeded" as const : "running" as const,
       stage: "上传Release",
-      progress: 35,
+      progress: this.completed ? 100 : 35,
       targetCount: 1,
-      completedCount: 0,
+      completedCount: this.completed ? 1 : 0,
       updatedAt: new Date().toISOString(),
-      cancellable: true
+      cancellable: !this.completed
     }];
   }
 }
 
 class RecoveryOperationsAdapter extends FixtureOperationsAdapter {
+  completed = false;
   override async getTask(projectId: string, taskId: string) {
     if (taskId !== recoveredTaskId) return super.getTask(projectId, taskId);
     return {
@@ -38,22 +42,21 @@ class RecoveryOperationsAdapter extends FixtureOperationsAdapter {
       projectId,
       operationType: "full_upgrade",
       name: "恢复中的整包升级",
-      state: "running",
-      stage: "上传Release",
-      progress: 35,
+      state: this.completed ? "succeeded" : "running",
+      stage: this.completed ? "completed" : "upload",
+      progress: this.completed ? 100 : 35,
       targetCount: 1,
-      completedCount: 0,
-      successCount: 0,
+      completedCount: this.completed ? 1 : 0,
+      successCount: this.completed ? 1 : 0,
       failureCount: 0,
       cancelledCount: 0,
-      cancellable: true,
+      cancellable: !this.completed,
       updatedAt: new Date().toISOString(),
       targets: [{
-        mac: "00:0C:29:3B:B9:39",
-        macNormalized: "000C293BB939",
-        state: "running",
-        stage: "上传Release",
-        progress: 35
+        mac: "000C293BB931",
+        state: this.completed ? "succeeded" : "running",
+        stage: this.completed ? "completed" : "upload",
+        progress: this.completed ? 100 : 35
       }],
       steps: []
     };
@@ -70,20 +73,42 @@ describe("部署页面活动任务恢复", () => {
         removeEventListener: vi.fn()
       }))
     });
-    configureActivityAdapter(new RecoveryActivityAdapter());
-    configureOperationsAdapter(new RecoveryOperationsAdapter());
+    const activityAdapter = new RecoveryActivityAdapter();
+    const operationsAdapter = new RecoveryOperationsAdapter();
+    configureActivityAdapter(activityAdapter);
+    configureOperationsAdapter(operationsAdapter);
     const { default: App } = await import("@/app/App.vue");
     await router.push("/aio/operations");
     await router.isReady();
+    const pinia = createPinia();
     const wrapper = mount(App, {
       attachTo: document.body,
-      global: { plugins: [createPinia(), router, i18n] }
+      global: { plugins: [pinia, router, i18n], stubs: { teleport: true } }
     });
     await flushPromises();
 
     expect(wrapper.text()).toContain("正在整包升级");
     expect(wrapper.get('[data-testid="operation-task-id"]').text()).toBe(recoveredTaskId);
-    expect(wrapper.text()).toContain("上传Release");
+    expect(wrapper.get('.execution-nodes strong').text()).toBe("AIO-1F-弱电间");
+    expect(wrapper.get('.execution-nodes').text()).toContain("上传发布文件");
+    expect(wrapper.get('.execution-nodes').text()).not.toContain("upload");
+    const historyButton = wrapper.findAll('button').find((button) => button.text() === '查看历史记录');
+    expect(historyButton).toBeDefined();
+    await historyButton!.trigger('click');
+    await flushPromises();
+    expect(wrapper.findAll('.history-list button').length).toBeGreaterThan(0);
+    expect(wrapper.text()).not.toContain('当前项目没有共享部署操作记录。');
+
+    const activity = useActivityStore(pinia);
+    const workflow = useDeploymentWorkflowStore(pinia);
+    expect(activity.activeTaskCount).toBe(1);
+    activityAdapter.completed = true;
+    operationsAdapter.completed = true;
+    await workflow.loadTask(workflow.currentTaskProjectId!, recoveredTaskId);
+    await flushPromises();
+    expect(activity.activeTaskCount).toBe(0);
+    expect(wrapper.get('.result-list strong').text()).toBe("AIO-1F-弱电间");
+    expect(wrapper.get('.result-list').text()).toContain("已完成");
     wrapper.unmount();
   }, 30000);
 });

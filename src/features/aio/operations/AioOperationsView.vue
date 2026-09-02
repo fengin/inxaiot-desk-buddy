@@ -147,7 +147,11 @@ const resultState = computed(() => {
 watch(
   () => currentTask.value?.state,
   (state) => {
-    if (["succeeded", "partially_succeeded", "failed", "cancelled", "interrupted", "check_failed", "finalizing_failed"].includes(state ?? "")) step.value = 3;
+    if (["succeeded", "partially_succeeded", "failed", "cancelled", "interrupted", "check_failed", "finalizing_failed"].includes(state ?? "")) {
+      step.value = 3;
+      const projectId = operationProjectId.value;
+      if (projectId && projects.activeProjectId === projectId) void activity.refreshTasks(projectId);
+    }
   }
 );
 watch(
@@ -238,9 +242,25 @@ async function restoreActiveDeployment(projectId: string) {
 }
 
 function nodeName(mac: string) {
-  return eligibleNodes.value.find((node) => node.mac === mac)?.name
-    ?? aio.nodes.find((node) => node.mac === mac)?.name
+  const normalized = mac.replace(/[:\s-]/g, "").toUpperCase();
+  return eligibleNodes.value.find((node) => node.macNormalized === normalized)?.name
+    ?? aio.nodes.find((node) => node.macNormalized === normalized)?.name
     ?? mac;
+}
+
+function stageLabel(stage?: string) {
+  if (!stage) return "正在准备";
+  const labels: Record<string, string> = {
+    queued: "排队中", checking: "检查中", ready: "待执行",
+    ssh_connect: "连接一体机", ssh_connected: "连接完成",
+    prepare_remote: "准备上传目录", prepare_local: "准备发布文件",
+    upload: "上传发布文件", precheck: "检查运行环境", backup: "备份现有数据",
+    install: "安装发布包", health: "检查服务状态", register: "确认平台注册",
+    service_check: "检查目标服务", service_upgrade: "升级目标服务", service_health: "检查目标服务状态",
+    remote_complete: "远端执行完成", finalizing: "保存执行结果", completed: "已完成",
+    cancelling: "正在取消", cancelled: "已取消", failed: "执行失败", interrupted: "执行中断"
+  };
+  return labels[stage] ?? stage;
 }
 
 function toggleNode(mac: string, checked: boolean) {
@@ -554,12 +574,12 @@ function historyArtifact(record: OperationHistoryItem) {
         <section v-else-if="step === 2" class="operation-stage execute-stage" data-testid="operation-execution">
           <div class="execution-overview">
             <div class="execution-overview__heading">
-              <div class="execution-overview__identity"><span class="feature-icon operation pulse"><UploadCloud :size="20" /></span><span><strong>正在{{ modeLabel }}</strong><small>{{ currentTask?.stage ?? '等待真实Task建立' }} · 完整过程保存在当前实例</small><small data-testid="operation-task-id">{{ resultTaskId }}</small></span></div>
+              <div class="execution-overview__identity"><span class="feature-icon operation pulse"><UploadCloud :size="20" /></span><span><strong>正在{{ modeLabel }}</strong><small>{{ stageLabel(currentTask?.stage) }} · 完整过程保存在当前实例</small><small data-testid="operation-task-id">{{ resultTaskId }}</small></span></div>
               <div class="execution-overview__progress"><div><strong>{{ currentTask?.progress ?? 0 }}%</strong><span>{{ currentTask?.completedCount ?? 0 }}/{{ currentTask?.targetCount ?? 0 }} 台形成最终结果</span></div><n-progress type="line" :percentage="currentTask?.progress ?? 0" :show-indicator="false" :height="6" /></div>
               <n-tag :type="stateTone(currentTask?.state ?? 'running')" :bordered="false">{{ historyResultLabel(currentTask?.state ?? 'running') }}</n-tag>
             </div>
           </div>
-          <div v-if="currentTask?.targets.length" class="execution-nodes"><div v-for="(target, index) in currentTask.targets" :key="target.mac" :class="{ active: target.state === 'running', done: target.state === 'succeeded' }"><span><b>{{ index + 1 }}</b><strong>{{ nodeName(target.mac) }}</strong><small>{{ target.mac }}</small></span><span>{{ target.stage }} · {{ target.progress }}%</span><n-tag size="small" :bordered="false" :type="stateTone(target.state)">{{ historyResultLabel(target.state) }}</n-tag></div></div>
+          <div v-if="currentTask?.targets.length" class="execution-nodes"><div v-for="(target, index) in currentTask.targets" :key="target.mac" :class="{ active: target.state === 'running', done: target.state === 'succeeded' }"><span><b>{{ index + 1 }}</b><strong>{{ nodeName(target.mac) }}</strong><small>{{ target.mac }}</small></span><span>{{ stageLabel(target.stage) }} · {{ target.progress }}%</span><n-tag size="small" :bordered="false" :type="stateTone(target.state)">{{ historyResultLabel(target.state) }}</n-tag></div></div>
           <div v-else class="empty-state">任务已提交，正在等待本地Task记录和目标进度。</div>
           <footer class="stage-footer"><span>切换项目不会停止当前任务，可在底部任务与日志面板持续查看。</span><n-button v-if="currentTask?.cancellable" size="small" type="error" secondary data-testid="operation-cancel" @click="cancelCurrentTask">请求取消</n-button><n-button size="small" secondary @click="openCurrentLogs">打开完整日志</n-button></footer>
         </section>
@@ -567,7 +587,7 @@ function historyArtifact(record: OperationHistoryItem) {
         <section v-else class="operation-stage result-stage" data-testid="operation-result">
           <div class="result-hero"><span class="result-icon" :class="resultState === 'succeeded' ? 'success' : 'warning'"><CheckCircle2 :size="32" /></span><div><strong>{{ modeLabel }}已形成最终结果</strong><p>成功 {{ resultSuccessCount }} 台，失败 {{ resultFailureCount }} 台，取消 {{ resultCancelledCount }} 台；以下统计只来自真实Task或执行摘要。</p></div><n-tag :type="stateTone(resultState)" :bordered="false">{{ historyResultLabel(resultState) }}</n-tag></div>
           <div class="result-metrics"><span><small>目标数量</small><strong>{{ resultTargetCount }}</strong></span><span><small>成功</small><strong class="success-text">{{ resultSuccessCount }}</strong></span><span><small>失败/异常</small><strong>{{ resultFailureCount }}</strong></span><span><small>发布版本</small><strong>{{ artifactLabel }}</strong></span></div>
-          <div v-if="resultTargets.length" class="result-list"><div v-for="target in resultTargets" :key="target.mac"><CheckCircle2 :size="17" /><span><strong>{{ nodeName(target.mac) }}</strong><small>{{ target.mac }}</small></span><span>{{ target.message ?? target.stage }}</span><n-tag size="small" :type="stateTone(target.state)" :bordered="false">{{ historyResultLabel(target.state) }}</n-tag></div></div>
+          <div v-if="resultTargets.length" class="result-list"><div v-for="target in resultTargets" :key="target.mac"><CheckCircle2 :size="17" /><span><strong>{{ nodeName(target.mac) }}</strong><small>{{ target.mac }}</small></span><span>{{ target.message ?? stageLabel(target.stage) }}</span><n-tag size="small" :type="stateTone(target.state)" :bordered="false">{{ historyResultLabel(target.state) }}</n-tag></div></div>
           <div v-else class="empty-state">没有可验证的节点最终结果，未按成功处理。</div>
           <p v-if="resultState === 'finalizing_failed'" class="modal-description">项目侧原子最终化或本地投影尚未安全收敛，任务制品已保留；重启工作台会在确认共享操作终态后自动重试本地投影。</p>
           <footer class="stage-footer"><n-button size="small" secondary @click="openHistory">查看操作记录</n-button><n-button v-if="['failed', 'cancelled', 'interrupted', 'check_failed'].includes(resultState)" size="small" secondary @click="retryOperation"><template #icon><RotateCcw /></template>按当前参数重新检查</n-button><n-button size="small" type="primary" :disabled="resultState === 'finalizing_failed'" @click="resetFlow"><template #icon><RotateCcw /></template>创建下一次任务</n-button></footer>
@@ -587,7 +607,7 @@ function historyArtifact(record: OperationHistoryItem) {
           </button>
         </div>
         <n-pagination v-if="workflow.history.total > workflow.history.pageSize" :page="workflow.history.page" :page-size="workflow.history.pageSize" :item-count="workflow.history.total" size="small" @update:page="changeHistoryPage" />
-        <div v-else class="empty-state">{{ workflow.historyLoading ? '正在读取共享操作历史…' : '当前项目没有共享部署操作记录。' }}</div>
+        <div v-if="!history.length" class="empty-state">{{ workflow.historyLoading ? '正在读取共享操作历史…' : '当前项目没有共享部署操作记录。' }}</div>
       </template>
       <div v-else class="history-detail">
         <n-button size="tiny" quaternary @click="backHistory"><template #icon><ArrowLeft /></template>返回历史列表</n-button>

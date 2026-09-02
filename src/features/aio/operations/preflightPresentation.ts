@@ -10,6 +10,7 @@ export interface PreflightItem {
   key: string;
   label: string;
   status: "passed" | "warning" | "failed" | "pending";
+  complete: boolean;
   message: string;
   issues: DeploymentPreflightCheck[];
 }
@@ -31,10 +32,14 @@ function item(key: string, label: string, checks: DeploymentPreflightCheck[], re
   const complete = required.every((code) => checks.some((check) => check.code === code && check.status === "passed"));
   const failed = issues.some((check) => check.blocking && check.status === "failed");
   return {
-    key, label, issues,
+    key, label, issues, complete,
     status: failed ? "failed" : issues.length ? "warning" : complete ? "passed" : "pending",
     message: failed ? "请处理以下问题后重新检查" : !complete ? "尚未完成检查" : summary
   };
+}
+
+export function preflightGroupPassed(group: PreflightGroup): boolean {
+  return group.items.every((item) => item.complete && item.status !== "failed");
 }
 
 export function preflightGroups(report: DeploymentPreflightReport | undefined, nodes: PreflightNodeIdentity[]): PreflightGroup[] {

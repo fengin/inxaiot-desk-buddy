@@ -1914,78 +1914,68 @@ a {
   border-radius: 7px;
 }
 
-.check-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
 .preflight-groups {
-  display: grid;
-  gap: 12px;
+  border-top: 1px solid var(--inx-color-border);
 }
 
 .preflight-group {
-  padding: 12px;
-  border: 1px solid var(--inx-color-border);
-  border-radius: 8px;
+  border-bottom: 1px solid var(--inx-color-border);
 }
 
-.preflight-group > header {
+.preflight-group-heading { margin: 0; }
+
+.preflight-group-toggle {
   display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--inx-color-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.preflight-group-toggle:hover { background: var(--inx-color-surface-subtle); }
+.preflight-group-toggle:focus-visible { outline: 2px solid var(--inx-color-focus); outline-offset: -2px; }
+.preflight-group-status-icon, .preflight-group-chevron { flex-shrink: 0; }
+.preflight-group-identity { display: flex; flex: 1; align-items: baseline; flex-wrap: wrap; gap: 10px; min-width: 0; }
+.preflight-group-title { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.preflight-group-address, .preflight-group-status, .preflight-group-note { font-size: 12px; font-weight: 400; }
+.preflight-group-address { color: var(--inx-color-text-secondary); }
+.preflight-group-note { color: var(--inx-color-warning); }
+.preflight-group-status-icon.success, .preflight-group-status.success { color: var(--inx-color-operation); }
+.preflight-group-status-icon.error, .preflight-group-status.error { color: var(--inx-color-danger); }
+.preflight-group-chevron { color: var(--inx-color-text-tertiary); transition: transform 0.15s; }
+.preflight-group-chevron.expanded { transform: rotate(90deg); }
+.preflight-group-details { padding: 0 12px 8px 40px; }
+.preflight-issue { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+
+.preflight-item-row {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr) 48px;
   align-items: baseline;
   gap: 12px;
-  margin-bottom: 9px;
+  padding: 8px 0;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
-.preflight-group h3 { margin: 0; font-size: 13px; }
-.preflight-group .check-item small { font-size: 12px; line-height: 1.5; }
-.preflight-group > header > span { color: var(--inx-color-text-secondary); font-size: 12px; }
-.preflight-issue { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-.check-item.error > svg, .check-item.error > b { color: var(--inx-color-danger); }
-.check-item.pending { color: var(--inx-color-text-tertiary); }
+.preflight-item-label { color: var(--inx-color-text); font-weight: 400; font-size: 13px; }
+.preflight-item-description { color: var(--inx-color-text-secondary); min-width: 0; overflow-wrap: anywhere; }
+.preflight-item-status { text-align: right; font-weight: 400; }
+.preflight-item-status.passed { color: var(--inx-color-operation); }
+.preflight-item-status.failed { color: var(--inx-color-danger); }
+.preflight-item-status.warning { color: var(--inx-color-warning); }
+.preflight-item-status.pending { color: var(--inx-color-text-tertiary); }
 
 @media (max-width: 900px) {
-  .preflight-group .check-grid { grid-template-columns: 1fr; }
-}
-
-.check-item {
-  display: grid;
-  min-height: 64px;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 9px;
-  padding: 9px 11px;
-  border: 1px solid var(--inx-color-border);
-  border-radius: 7px;
-}
-
-.check-item.success > svg,
-.check-item.success > b {
-  color: var(--inx-color-operation);
-}
-
-.check-item.warning {
-  border-color: color-mix(in srgb, var(--inx-color-warning) 45%, var(--inx-color-border));
-  background: color-mix(in srgb, var(--inx-color-warning-soft) 45%, var(--inx-color-surface));
-}
-
-.check-item.warning > svg,
-.check-item.warning > b {
-  color: var(--inx-color-warning);
-}
-
-.check-item > span {
-  display: grid;
-}
-
-.check-item small {
-  color: var(--inx-color-text-tertiary);
-  font-size: 10px;
-}
-
-.check-item > b {
-  font-size: 10px;
+  .preflight-item-row { grid-template-columns: minmax(0, 1fr) 48px; gap: 4px 12px; }
+  .preflight-item-description { grid-row: 2; grid-column: 1 / -1; }
+  .preflight-item-status { grid-row: 1; grid-column: 2; }
 }
 
 .render-preview {

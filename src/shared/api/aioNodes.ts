@@ -24,6 +24,10 @@ export function getEdgeNodeDetail(localProjectId: string, mac: string) {
   return invoke<AioNodeDetail>("get_edge_node_detail", { localProjectId, mac });
 }
 
+export function checkEdgeNodeServices(localProjectId: string, mac: string) {
+  return invoke<{ taskId: string }>("check_edge_node_services", { localProjectId, mac });
+}
+
 export function previewInventoryImport(localProjectId: string, filePath: string) {
   return invoke<InventoryPreview>("preview_inventory_import", { localProjectId, filePath });
 }

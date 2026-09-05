@@ -5,8 +5,8 @@ use crate::application::ports::deployment_workflow::{
 use crate::core::error::{AppError, AppResult};
 use crate::domain::aio::deployment::DeploymentPlanInput;
 use crate::domain::aio::deployment_workflow::{
-    DeploymentPreflightReport, DeploymentTaskSubmission, DeploymentTaskView,
-    OperationHistoryDetail, OperationHistoryPage, OperationHistoryQuery,
+    DeploymentExecutionSnapshot, DeploymentPreflightReport, DeploymentTaskSubmission,
+    DeploymentTaskView, OperationHistoryDetail, OperationHistoryPage, OperationHistoryQuery,
 };
 
 pub async fn preflight_deployment(
@@ -21,10 +21,13 @@ pub async fn preflight_deployment(
 pub async fn submit_deployment(
     port: &impl DeploymentSubmissionPort,
     project_id: &str,
-    input: &DeploymentPlanInput,
+    preflight_task_id: &str,
+    execution_snapshot: &DeploymentExecutionSnapshot,
 ) -> AppResult<DeploymentTaskSubmission> {
     validate_id("项目ID", project_id)?;
-    port.submit(project_id, input).await
+    validate_id("预检任务ID", preflight_task_id)?;
+    port.submit(project_id, preflight_task_id, execution_snapshot)
+        .await
 }
 
 pub async fn get_deployment_task(

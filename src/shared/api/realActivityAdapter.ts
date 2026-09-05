@@ -1,5 +1,7 @@
 import {
   cancelLocalTask,
+  clearFinishedLocalTasks,
+  clearTaskLogs,
   listLocalTasks,
   listTaskLogs,
   listenTaskEvents
@@ -13,5 +15,7 @@ export class RealActivityAdapter implements ActivityAdapter {
     return listTaskLogs(taskId, levels, keyword, offset, limit, newestFirst);
   }
   cancelTask(taskId: string) { return cancelLocalTask(taskId); }
+  clearFinishedTasks(projectId: string) { return clearFinishedLocalTasks(projectId); }
+  clearTaskLogs(taskId: string) { return clearTaskLogs(taskId); }
   listen(handler: Parameters<ActivityAdapter["listen"]>[0]) { return listenTaskEvents(handler); }
 }

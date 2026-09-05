@@ -1,25 +1,8 @@
 use crate::application::release_artifacts::{
-    ServiceImageInspection, build_deployment_plan as build_plan,
-    inspect_service_image as inspect_image, render_release_preview as render_preview,
-    validate_release_package as validate_release,
+    ServiceImageInspection, inspect_service_image as inspect_image,
 };
-use crate::domain::aio::deployment::{DeploymentPlan, DeploymentPlanInput};
-use crate::domain::aio::release::ReleaseValidation;
-use crate::domain::aio::release_render::{ReleaseRenderContext, RenderedReleaseFiles};
 use crate::infrastructure::release_artifacts_service::ReleaseArtifactsService;
 use crate::interface::error::CommandErrorDto;
-
-#[tauri::command]
-pub async fn validate_release_package(path: String) -> Result<ReleaseValidation, CommandErrorDto> {
-    tauri::async_runtime::spawn_blocking(move || validate_release(&ReleaseArtifactsService, &path))
-        .await
-        .map_err(|_| {
-            CommandErrorDto::from(crate::core::error::AppError::Io {
-                operation: "等待Release校验任务",
-            })
-        })?
-        .map_err(CommandErrorDto::from)
-}
 
 #[tauri::command]
 pub async fn inspect_service_image(
@@ -36,28 +19,4 @@ pub async fn inspect_service_image(
         })
     })?
     .map_err(CommandErrorDto::from)
-}
-
-#[tauri::command]
-pub async fn render_release_preview(
-    release_dir: String,
-    context: ReleaseRenderContext,
-) -> Result<RenderedReleaseFiles, CommandErrorDto> {
-    tauri::async_runtime::spawn_blocking(move || {
-        render_preview(&ReleaseArtifactsService, &release_dir, &context)
-    })
-    .await
-    .map_err(|_| {
-        CommandErrorDto::from(crate::core::error::AppError::Io {
-            operation: "等待模板预览任务",
-        })
-    })?
-    .map_err(CommandErrorDto::from)
-}
-
-#[tauri::command]
-pub async fn build_deployment_plan(
-    input: DeploymentPlanInput,
-) -> Result<DeploymentPlan, CommandErrorDto> {
-    build_plan(&ReleaseArtifactsService, input).map_err(CommandErrorDto::from)
 }

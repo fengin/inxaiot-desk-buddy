@@ -8,8 +8,8 @@ use crate::application::deployment_workflow::{
 use crate::application::project_access::{ProjectAccessRequirement, require_project_access};
 use crate::domain::aio::deployment::DeploymentPlanInput;
 use crate::domain::aio::deployment_workflow::{
-    DeploymentPreflightReport, DeploymentTaskSubmission, DeploymentTaskView,
-    OperationHistoryDetail, OperationHistoryPage, OperationHistoryQuery,
+    DeploymentExecutionSnapshot, DeploymentPreflightReport, DeploymentTaskSubmission,
+    DeploymentTaskView, OperationHistoryDetail, OperationHistoryPage, OperationHistoryQuery,
 };
 use crate::formal::app_state::FormalAppState;
 use crate::infrastructure::stage75_adapter::Stage75Adapter;
@@ -22,6 +22,7 @@ use crate::interface::error::CommandErrorDto;
 pub async fn preflight_deployment(
     state: State<'_, FormalAppState>,
     local_project_id: String,
+    preflight_task_id: String,
     input: DeploymentPlanInput,
 ) -> Result<DeploymentPreflightReport, CommandErrorDto> {
     require_project_access(
@@ -32,7 +33,7 @@ pub async fn preflight_deployment(
     .await
     .map_err(CommandErrorDto::from)?;
     run_preflight(
-        &Stage75BPreflightAdapter::new(&state),
+        &Stage75BPreflightAdapter::tracked(&state, preflight_task_id),
         &local_project_id,
         &input,
     )
@@ -44,7 +45,8 @@ pub async fn preflight_deployment(
 pub async fn submit_deployment(
     state: State<'_, FormalAppState>,
     local_project_id: String,
-    input: DeploymentPlanInput,
+    preflight_task_id: String,
+    execution_snapshot: DeploymentExecutionSnapshot,
 ) -> Result<DeploymentTaskSubmission, CommandErrorDto> {
     require_project_access(
         &Stage75Adapter::new(&state),
@@ -56,7 +58,8 @@ pub async fn submit_deployment(
     submit_task(
         &Stage75BSubmissionAdapter::new(&state),
         &local_project_id,
-        &input,
+        &preflight_task_id,
+        &execution_snapshot,
     )
     .await
     .map_err(CommandErrorDto::from)

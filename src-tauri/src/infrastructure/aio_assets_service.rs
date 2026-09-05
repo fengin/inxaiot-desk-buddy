@@ -1,10 +1,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::OnceLock;
 
+use crate::infrastructure::client_instance::application_instance_id;
 use sqlx::Row;
 use time::OffsetDateTime;
-use uuid::Uuid;
 
 use crate::application::aio_assets::{
     AioAssetsPort, AioNodeDetail, AioNodeListItem, AioNodeListPage, AioNodeStats,
@@ -19,11 +18,13 @@ use crate::domain::aio::inventory::{
     ReconciledImportItem, WorkbenchNodeSnapshot, reconcile_inventory,
 };
 use crate::domain::aio::mac::MacAddress;
+use crate::domain::aio::service_check::NodeServiceCheckSnapshot;
 use crate::formal::app_state::FormalAppState;
 use crate::infrastructure::csv_inventory::parse_inventory_path;
 use crate::infrastructure::local_sqlite::aio_import_repository::AioImportRepository;
 use crate::infrastructure::platform_aio::PlatformAioRepository;
 use crate::infrastructure::project_context::project_database;
+use crate::infrastructure::service_check_repository::ServiceCheckRepository;
 use crate::infrastructure::workbench_aio::{
     ApplyInventoryWrite, InventoryAssetWrite, WorkbenchAioRepository,
 };
@@ -95,13 +96,16 @@ pub async fn list_aio_nodes(
     let pools = project_database(state, local_project_id).await?;
     let workbench_repository = WorkbenchAioRepository::new(pools.workbench.clone());
     let platform_repository = PlatformAioRepository::new(pools.platform.clone());
-    let (workbench, platform, versions, operations) = tokio::try_join!(
+    let check_repository =
+        ServiceCheckRepository::new(state.local_store.pool().clone(), local_project_id);
+    let (workbench, platform, versions, operations, checks) = tokio::try_join!(
         workbench_repository.list_snapshots(),
         platform_repository.list_all(),
         workbench_repository.list_service_versions(),
         workbench_repository.list_last_operations(),
+        check_repository.list(),
     )?;
-    let mut items = build_node_items(&workbench, &platform.nodes, &versions, &operations);
+    let mut items = build_node_items(&workbench, &platform.nodes, &versions, &operations, &checks);
     let stats = calculate_stats(&items);
     let keyword = query.search.unwrap_or_default().trim().to_lowercase();
     let state_filter = query.state.unwrap_or_else(|| "all".into());
@@ -152,24 +156,34 @@ pub async fn get_aio_node_detail(
     let pools = project_database(state, local_project_id).await?;
     let workbench_repository = WorkbenchAioRepository::new(pools.workbench.clone());
     let platform_repository = PlatformAioRepository::new(pools.platform.clone());
-    let (workbench, platform, versions, operations) = tokio::try_join!(
+    let check_repository =
+        ServiceCheckRepository::new(state.local_store.pool().clone(), local_project_id);
+    let (workbench, platform, versions, operations, check) = tokio::try_join!(
         workbench_repository.list_snapshots(),
         platform_repository.list_all(),
         workbench_repository.list_service_versions(),
         workbench_repository.list_last_operations(),
+        check_repository.get(mac.normalized()),
     )?;
-    let node = build_node_items(&workbench, &platform.nodes, &versions, &operations)
+    let service_checks = check
         .into_iter()
-        .find(|item| item.mac_normalized == mac.normalized())
-        .ok_or_else(|| AppError::NotFound(format!("一体机不存在：{}", mac.display())))?;
+        .map(|check| (mac.normalized().to_string(), check))
+        .collect();
+    let node = build_node_items(
+        &workbench,
+        &platform.nodes,
+        &versions,
+        &operations,
+        &service_checks,
+    )
+    .into_iter()
+    .find(|item| item.mac_normalized == mac.normalized())
+    .ok_or_else(|| AppError::NotFound(format!("一体机不存在：{}", mac.display())))?;
     let platform_node = platform
         .nodes
         .into_iter()
         .find(|item| item.mac_normalized == mac.normalized());
-    let node_versions = versions
-        .into_iter()
-        .filter(|item| item.mac_normalized == mac.normalized())
-        .collect::<Vec<_>>();
+    let node_versions = node.versions.clone();
     let last_operation = operations.get(mac.normalized()).cloned();
     let checks = latest_local_checks(state, local_project_id, mac.normalized()).await?;
     Ok(AioNodeDetail {
@@ -180,10 +194,6 @@ pub async fn get_aio_node_detail(
         latest_ssh_check: checks
             .iter()
             .find(|check| check.step_code.to_ascii_lowercase().contains("ssh"))
-            .cloned(),
-        latest_service_check: checks
-            .iter()
-            .find(|check| check.step_code.to_ascii_lowercase().contains("service"))
             .cloned(),
     })
 }
@@ -390,6 +400,7 @@ fn build_node_items(
     platform_nodes: &[PlatformNodeSnapshot],
     versions: &[ServiceVersionRecord],
     operations: &HashMap<String, OperationRecordSummary>,
+    checks: &HashMap<String, NodeServiceCheckSnapshot>,
 ) -> Vec<AioNodeListItem> {
     let workbench = workbench_nodes
         .iter()
@@ -429,7 +440,11 @@ fn build_node_items(
                     .unwrap_or_else(|| "platform_existing".into())
             };
             let service_versions = versions_by_mac.get(mac).cloned().unwrap_or_default();
-            let (service_state, service_label) = service_status(&service_versions);
+            let service_check = checks.get(mac).cloned();
+            let (service_state, service_label) = service_check
+                .as_ref()
+                .map(NodeServiceCheckSnapshot::summary)
+                .unwrap_or_else(|| ("unknown".into(), "暂无检查记录".into()));
             let platform_state = match platform_node.and_then(|node| node.status) {
                 Some(1) => "online",
                 Some(0) => "offline",
@@ -460,8 +475,9 @@ fn build_node_items(
                 service_state,
                 service_label,
                 last_operation: operation
-                    .map(display_operation)
+                    .map(|operation| operation.operation_name.clone())
                     .unwrap_or_else(|| "无工作台历史".into()),
+                last_operation_at: operation.and_then(|operation| operation.ended_at.clone()),
                 platform_id: platform_node
                     .map(|node| node.id.clone())
                     .or_else(|| workbench_node.and_then(|node| node.platform_aio_id.clone())),
@@ -470,7 +486,18 @@ fn build_node_items(
                     .unwrap_or_else(|| "platform".into()),
                 version: workbench_node.map(|node| node.version).unwrap_or(0),
                 conflicts,
-                versions: service_versions.into_iter().cloned().collect(),
+                // 旧 observed 字段曾由期望版本直接填充，不能再作为实测返回。
+                // 真实镜像统一从 service_check.services 读取。
+                versions: service_versions
+                    .into_iter()
+                    .map(|version| ServiceVersionRecord {
+                        observed_image_name: None,
+                        observed_version: None,
+                        observed_at: None,
+                        ..version.clone()
+                    })
+                    .collect(),
+                service_check,
             }
         })
         .collect::<Vec<_>>();
@@ -591,45 +618,6 @@ fn calculate_stats(items: &[AioNodeListItem]) -> AioNodeStats {
     }
 }
 
-fn service_status(versions: &[&ServiceVersionRecord]) -> (String, String) {
-    if versions.is_empty() {
-        return ("unknown".into(), "待检查".into());
-    }
-    let needs_check = versions
-        .iter()
-        .filter(|version| {
-            version.observed_version.is_none()
-                || version
-                    .observed_at
-                    .as_deref()
-                    .is_none_or(|observed_at| !service_observation_is_fresh(observed_at))
-                || matches!(
-                    (&version.expected_version, &version.observed_version),
-                    (Some(expected), Some(observed)) if expected != observed
-                )
-        })
-        .count();
-    if needs_check > 0 {
-        return ("warning".into(), format!("{needs_check}项需检查"));
-    }
-    ("healthy".into(), format!("{}项正常", versions.len()))
-}
-
-fn service_observation_is_fresh(value: &str) -> bool {
-    let rfc3339 = if value.ends_with('Z') || value.contains('+') {
-        value.to_string()
-    } else {
-        format!("{value}Z")
-    };
-    let Ok(observed) =
-        OffsetDateTime::parse(&rfc3339, &time::format_description::well_known::Rfc3339)
-    else {
-        return false;
-    };
-    let age = OffsetDateTime::now_utc() - observed;
-    age >= time::Duration::minutes(-1) && age <= time::Duration::minutes(15)
-}
-
 fn deploy_label(state: &str) -> &'static str {
     match state {
         "managed" => "已管理",
@@ -675,13 +663,6 @@ fn platform_updated_at(node: &PlatformNodeSnapshot) -> String {
                 .ok()
         })
         .unwrap_or_else(|| raw.to_string())
-}
-
-fn display_operation(operation: &OperationRecordSummary) -> String {
-    match &operation.ended_at {
-        Some(time) => format!("{} · {time}", operation.operation_name),
-        None => format!("{} · {}", operation.operation_name, operation.state),
-    }
 }
 
 fn asset_state(
@@ -761,11 +742,6 @@ fn session_is_expired(value: &str) -> bool {
     expires_at.is_some_and(|expires| expires <= OffsetDateTime::now_utc().unix_timestamp())
 }
 
-pub(crate) fn application_instance_id() -> &'static str {
-    static INSTANCE_ID: OnceLock<String> = OnceLock::new();
-    INSTANCE_ID.get_or_init(|| format!("desktop-{}", Uuid::now_v7()))
-}
-
 async fn latest_local_checks(
     state: &FormalAppState,
     local_project_id: &str,
@@ -810,9 +786,10 @@ fn timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{asset_conflicts, platform_updated_at, service_status, session_is_expired};
+    use super::{asset_conflicts, build_node_items, platform_updated_at, session_is_expired};
     use crate::domain::aio::assets::ServiceVersionRecord;
     use crate::domain::aio::inventory::{PlatformNodeSnapshot, WorkbenchNodeSnapshot};
+    use std::collections::HashMap;
 
     fn workbench() -> WorkbenchNodeSnapshot {
         WorkbenchNodeSnapshot {
@@ -856,24 +833,38 @@ mod tests {
     }
 
     #[test]
-    fn list_conflicts_are_explicit_and_service_state_is_derived() {
+    fn list_conflicts_are_explicit() {
         let workbench = workbench();
         let mut platform = platform();
         assert!(asset_conflicts(Some(&workbench), &[&platform]).is_empty());
         platform.ip = "192.0.2.2".into();
         assert_eq!(asset_conflicts(Some(&workbench), &[&platform]).len(), 1);
-        assert_eq!(
-            service_status(&[&ServiceVersionRecord {
-                mac_normalized: workbench.mac_normalized,
+    }
+
+    #[test]
+    fn legacy_observed_versions_cannot_claim_a_real_service_check() {
+        let workbench = workbench();
+        let nodes = build_node_items(
+            std::slice::from_ref(&workbench),
+            &[platform()],
+            &[ServiceVersionRecord {
+                mac_normalized: workbench.mac_normalized.clone(),
                 service_name: "device-edge".into(),
                 expected_image_name: None,
                 expected_version: Some("1".into()),
                 observed_image_name: None,
-                observed_version: Some("2".into()),
-                observed_at: None,
-            }]),
-            ("warning".into(), "1项需检查".into())
+                observed_version: Some("1".into()),
+                observed_at: Some("2099-01-01T00:00:00Z".into()),
+            }],
+            &HashMap::new(),
+            &HashMap::new(),
         );
+        assert_eq!(nodes[0].service_state, "unknown");
+        assert_eq!(nodes[0].service_label, "暂无检查记录");
+        assert!(nodes[0].service_check.is_none());
+        assert!(nodes[0].versions[0].observed_version.is_none());
+        assert!(nodes[0].versions[0].observed_at.is_none());
+        assert_eq!(nodes[0].versions[0].expected_version.as_deref(), Some("1"));
     }
 
     #[test]

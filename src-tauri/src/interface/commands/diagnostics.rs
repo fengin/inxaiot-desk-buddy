@@ -9,6 +9,7 @@ use crate::formal::workbench_store::latest_workbench_schema_version;
 use crate::infrastructure::agent_asset::{
     AGENT_COMPATIBILITY, AGENT_PROTOCOL_VERSION, AGENT_SHA256, AGENT_VERSION,
 };
+use crate::infrastructure::client_instance::application_instance_id;
 use crate::interface::error::CommandErrorDto;
 
 #[tauri::command]
@@ -34,6 +35,7 @@ pub async fn get_system_diagnostics(
             .await
             .map_err(|error| CommandErrorDto::from(crate::core::error::AppError::from(error)))?;
     Ok(build_system_diagnostics(SystemDiagnosticsInput {
+        client_instance_id: application_instance_id().into(),
         application_version: env!("CARGO_PKG_VERSION").into(),
         source_commit: env!("INX_BUILD_GIT_COMMIT").into(),
         local_schema_version,

@@ -172,6 +172,122 @@ async fn activity_dto_aggregates_real_snapshots_logs_and_running_task_cancel() {
     assert_eq!(logs.items[0].source, "A");
     assert_eq!(logs.items[0].level, "WARN");
 
+    task_repository
+        .create(CreateTask {
+            id: "preflight-task".into(),
+            local_project_id: "project-a".into(),
+            remote_operation_record_id: None,
+            domain_type: "aio".into(),
+            operation_type: "deployment_preflight".into(),
+            name: "部署检查 · 整包升级".into(),
+            priority: 0,
+            batch_size: 2,
+            concurrency: 1,
+            payload_ref: None,
+            log_path: state
+                .paths
+                .project_task_log_path("project-a", "preflight-task")
+                .expect("preflight log")
+                .to_string_lossy()
+                .into_owned(),
+            targets: vec![("aio".into(), "A".into()), ("aio".into(), "B".into())],
+        })
+        .await
+        .expect("create preflight task");
+    task_repository
+        .initialize_target_progress("preflight-task", "等待检查", 1)
+        .await
+        .expect("initialize preflight progress");
+    task_repository
+        .transition(
+            "preflight-task",
+            TaskState::Draft,
+            TaskState::Checking,
+            None,
+            None,
+        )
+        .await
+        .expect("start preflight");
+    for (key, target_state, stage) in [
+        ("A", TargetState::Succeeded, "检查完成"),
+        ("B", TargetState::Failed, "检查失败"),
+    ] {
+        task_repository
+            .update_target(
+                "preflight-task",
+                TargetUpdate {
+                    resource_type: "aio".into(),
+                    resource_key: key.into(),
+                    state: target_state,
+                    stage: stage.into(),
+                    progress_current: 1,
+                    progress_total: 1,
+                    fencing_token: None,
+                    message_code: Some("PREFLIGHT_TARGET_RESULT".into()),
+                    message_params_json: None,
+                },
+            )
+            .await
+            .expect("finish preflight target");
+    }
+    task_repository
+        .transition(
+            "preflight-task",
+            TaskState::Checking,
+            TaskState::Failed,
+            Some("PREFLIGHT_BLOCKED"),
+            Some("部署执行条件检查未通过"),
+        )
+        .await
+        .expect("finish preflight");
+    let preflight_event = task_event_pipeline
+        .emit(
+            "preflight-task",
+            TaskEventInput {
+                resource_type: Some("aio".into()),
+                resource_key: Some("B".into()),
+                stage: "检查失败".into(),
+                status: "failed".into(),
+                progress_current: Some(2),
+                progress_total: Some(2),
+                level: TaskEventLevel::Error,
+                message_code: "PREFLIGHT_TARGET_FAILED".into(),
+                message_params: BTreeMap::new(),
+                message: Some("节点B检查失败：SSH连接超时".into()),
+            },
+        )
+        .await
+        .expect("preflight result log");
+    let event_json = serde_json::to_value(preflight_event).expect("serialize preflight event");
+    assert_eq!(event_json["localTaskId"], "preflight-task");
+    assert_eq!(event_json["progressCurrent"], 2);
+    assert_eq!(event_json["progressTotal"], 2);
+    assert_eq!(event_json["stage"], "检查失败");
+    let preflight = query_activity_tasks(&state, "project-a", 20)
+        .await
+        .expect("preflight activity")
+        .into_iter()
+        .find(|task| task.id == "preflight-task")
+        .expect("preflight task dto");
+    assert_eq!(preflight.state, "failed");
+    assert_eq!(preflight.stage, "检查失败");
+    assert_eq!(preflight.progress, Some(100));
+    assert_eq!(preflight.completed_count, 2);
+    assert!(!preflight.cancellable);
+    let preflight_logs = query_task_logs(
+        &state,
+        "preflight-task",
+        &["ERROR".into()],
+        Some("SSH连接超时".into()),
+        0,
+        20,
+        true,
+    )
+    .await
+    .expect("preflight logs");
+    assert_eq!(preflight_logs.items.len(), 1);
+    assert_eq!(preflight_logs.items[0].source, "B");
+
     job_supervisor
         .spawn("task-a", |cancellation| async move {
             cancellation.cancelled().await;

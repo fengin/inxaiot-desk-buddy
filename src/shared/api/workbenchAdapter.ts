@@ -12,8 +12,7 @@ import type {
   WorkbenchSchemaStatus
 } from "@/shared/model/project";
 import type {
-  ReleaseMasterKeyOperationResult,
-  ReleaseMasterKeyTransferRequest,
+  ReleaseAgentScriptReplaceRequest,
   ReleaseProfileDraft,
   ReleaseProfileValidation,
   ReleaseProfileView
@@ -36,8 +35,8 @@ export interface WorkbenchAdapter {
   getReleaseProfile(projectId: string): Promise<ReleaseProfileView | null>;
   validateReleaseProfile(draft: ReleaseProfileDraft): Promise<ReleaseProfileValidation>;
   saveReleaseProfile(projectId: string, draft: ReleaseProfileDraft): Promise<ReleaseProfileView>;
-  exportReleaseMasterKey(projectId: string, request: ReleaseMasterKeyTransferRequest): Promise<ReleaseMasterKeyOperationResult>;
-  importReleaseMasterKey(projectId: string, request: ReleaseMasterKeyTransferRequest): Promise<ReleaseMasterKeyOperationResult>;
+  replaceReleaseAgentScript(projectId: string, request: ReleaseAgentScriptReplaceRequest): Promise<ReleaseProfileView>;
+  openReleaseAgentScript(projectId: string): Promise<void>;
   listHostKeys(projectId: string): Promise<HostKeyObservation[]>;
   captureHostKey(projectId: string, request: HostKeyCaptureRequest): Promise<HostKeyObservation>;
   confirmHostKey(projectId: string, request: ConfirmHostKeyRequest): Promise<HostKeyObservation>;

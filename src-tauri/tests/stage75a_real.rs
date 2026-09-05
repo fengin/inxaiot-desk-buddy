@@ -160,6 +160,12 @@ fn release_draft(config: &TestConfig, expected_version: Option<u64>) -> ReleaseP
                 config.project_root.join("test/docker-compose.yml"),
             )
             .expect("compose template"),
+            host_info_template: std::fs::read_to_string(
+                config
+                    .project_root
+                    .join("test/templates/host-info.json.template"),
+            )
+            .expect("host-info template"),
             platform_host: api_host.into(),
             platform_api_port: api_port.parse().expect("api port"),
             platform_mqtt_host: mqtt_host.into(),
@@ -167,7 +173,7 @@ fn release_draft(config: &TestConfig, expected_version: Option<u64>) -> ReleaseP
             ssh_port: 22,
             ssh_timeout_seconds: 15,
             aio_data_root: "/opt/data".into(),
-            aio_deploy_root: "/opt/data/deploy/inxvision-edge".into(),
+            aio_deploy_root: "/opt/data/deploy".into(),
         },
         credentials: ReleaseProfileCredentials {
             platform_auth_key: line(&config.description, "平台API auth Key：").into(),

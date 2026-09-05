@@ -1,5 +1,6 @@
 pub mod agent_asset;
 pub mod aio_assets_service;
+pub mod client_instance;
 pub mod csv_inventory;
 pub mod data_directory;
 pub mod database;
@@ -18,8 +19,11 @@ pub mod process_lock;
 pub mod project_context;
 pub mod release_archive;
 pub mod release_artifacts_service;
+mod release_remote_auth;
 pub mod release_template;
 pub mod remote;
+pub mod service_check_repository;
+pub mod service_inspection;
 pub mod stage75_adapter;
 pub mod stage75b_preflight_adapter;
 pub mod stage75b_query_adapter;

@@ -7,7 +7,6 @@ export interface SystemDialogAdapter {
   readonly real: boolean;
   selectDirectory(title: string): Promise<string | null>;
   selectFile(title: string, filters: FileDialogFilter[]): Promise<string | null>;
-  saveFile(title: string, filters: FileDialogFilter[], defaultPath?: string): Promise<string | null>;
 }
 
 let adapter: SystemDialogAdapter | undefined;

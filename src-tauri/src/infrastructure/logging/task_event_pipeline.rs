@@ -69,6 +69,14 @@ impl TaskEventPipeline {
         self.redactor.redact_text(value)
     }
 
+    pub async fn emit_transient(
+        &self,
+        task_id: &str,
+        input: TaskEventInput,
+    ) -> AppResult<TaskEvent> {
+        self.emit_inner(task_id, input, false).await
+    }
+
     fn task_lock(&self, task_id: &str) -> AppResult<Arc<AsyncMutex<()>>> {
         let mut locks = self
             .task_locks
@@ -79,10 +87,13 @@ impl TaskEventPipeline {
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone())
     }
-}
 
-impl TaskEventSink for TaskEventPipeline {
-    async fn emit(&self, task_id: &str, input: TaskEventInput) -> AppResult<TaskEvent> {
+    async fn emit_inner(
+        &self,
+        task_id: &str,
+        input: TaskEventInput,
+        persist_to_log: bool,
+    ) -> AppResult<TaskEvent> {
         input.validate()?;
         let task_lock = self.task_lock(task_id)?;
         let _guard = task_lock.lock().await;
@@ -108,10 +119,18 @@ impl TaskEventSink for TaskEventPipeline {
             timestamp: OffsetDateTime::now_utc().unix_timestamp_nanos().to_string(),
         };
         self.redactor.redact_event(&mut event);
-        self.log_store
-            .append(Path::new(&task.log_path), &event)
-            .await?;
+        if persist_to_log {
+            self.log_store
+                .append(Path::new(&task.log_path), &event)
+                .await?;
+        }
         self.event_bus.publish(event.clone());
         Ok(event)
+    }
+}
+
+impl TaskEventSink for TaskEventPipeline {
+    async fn emit(&self, task_id: &str, input: TaskEventInput) -> AppResult<TaskEvent> {
+        self.emit_inner(task_id, input, true).await
     }
 }

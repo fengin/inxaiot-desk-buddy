@@ -11,7 +11,6 @@ pub mod mysql;
 pub mod operation_repository;
 pub mod platform_auth;
 pub mod project_repository;
-pub mod release_master_key;
 pub mod release_profile_repository;
 pub mod resource_lease_repository;
 pub mod runtime_registry;

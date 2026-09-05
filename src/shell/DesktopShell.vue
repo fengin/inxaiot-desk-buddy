@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { NAlert, NButton, NDescriptions, NDescriptionsItem, NModal, NSpace, NTag } from "naive-ui";
+import { NButton, NDescriptions, NDescriptionsItem, NModal, NSpace, NTag } from "naive-ui";
 import {
   Boxes,
   ChevronLeft,
   ChevronRight,
-  CircleHelp,
   Cpu,
   History,
   Info,
@@ -176,7 +175,6 @@ const businessRouteMessage = computed(() => {
         <Boxes :size="34" />
         <strong>当前项目上下文未就绪</strong>
         <p>{{ businessRouteMessage }}</p>
-        <small>业务页面已阻止加载，不会绕过真实数据库、Schema或会话门禁。</small>
       </section>
       <router-view v-else />
     </main>
@@ -193,25 +191,15 @@ const businessRouteMessage = computed(() => {
     </footer>
 
     <preferences-dialog v-model:show="preferencesOpen" />
-    <n-modal v-model:show="aboutOpen" preset="card" title="关于 INX 实施工作台" class="about-modal" :bordered="false">
-      <div class="about-product"><span class="brand-mark large">INX</span><div><strong>INX 实施工作台</strong><span>Rust + Tauri 阶段 7.5 最终收口版</span></div></div>
-      <p class="modal-description">面向项目实施与维护人员，统一管理一体机部署、升级和结果追踪；生产路径仅使用 Tauri Real Adapter。</p>
-      <n-alert v-if="diagnostics.error" type="error" :bordered="false">
-        {{ diagnostics.error }}
-        <n-button text type="primary" size="tiny" @click="diagnostics.load(true).catch(() => undefined)">重新读取诊断</n-button>
-      </n-alert>
+    <n-modal v-model:show="aboutOpen" preset="card" title="关于" class="about-modal" :bordered="false">
+      <div class="about-product"><span class="brand-mark large">INX</span><div><strong>INX 实施工作台</strong></div></div>
+      <p class="modal-description">为项目实施与维护人员提供一体机清单管理、发布参数配置、部署升级和操作记录查询。</p>
       <n-descriptions :column="1" size="small" bordered label-placement="left">
-        <n-descriptions-item label="版本">{{ diagnostics.value?.applicationVersion ?? '读取中…' }}</n-descriptions-item>
-        <n-descriptions-item label="源码提交"><span class="diagnostic-value">{{ diagnostics.value?.sourceCommit ?? '读取中…' }}</span></n-descriptions-item>
-        <n-descriptions-item label="数据模式">Tauri Real Adapter · 浏览器 Fixture 物理隔离</n-descriptions-item>
-        <n-descriptions-item label="Schema">本地实际 v{{ diagnostics.value?.localSchemaVersion ?? '—' }} · 工作台支持 v{{ diagnostics.value?.workbenchSchemaVersion ?? '—' }}</n-descriptions-item>
-        <n-descriptions-item label="Agent">v{{ diagnostics.value?.agentVersion ?? '—' }} · 协议 {{ diagnostics.value?.agentProtocolVersion ?? '—' }}</n-descriptions-item>
-        <n-descriptions-item label="Agent SHA-256"><span class="diagnostic-value">{{ diagnostics.value?.agentSha256 ?? '—' }}</span></n-descriptions-item>
-        <n-descriptions-item label="运行平台">{{ diagnostics.value?.operatingSystem ?? '—' }} / {{ diagnostics.value?.architecture ?? '—' }}</n-descriptions-item>
-        <n-descriptions-item label="实际数据目录"><span class="diagnostic-value">{{ diagnostics.value?.dataDirectory ?? dataDirectory.activeDirectory ?? '—' }}</span></n-descriptions-item>
-        <n-descriptions-item label="待清理本机凭据">{{ diagnostics.value?.pendingSecretCleanupCount ?? '—' }}</n-descriptions-item>
+        <n-descriptions-item label="版本">{{ diagnostics.value?.applicationVersion ?? '暂时无法读取' }}</n-descriptions-item>
+        <n-descriptions-item label="客户端标识"><span class="diagnostic-value">{{ diagnostics.value?.clientInstanceId ?? '暂时无法读取' }}</span></n-descriptions-item>
+        <n-descriptions-item label="数据目录"><span class="diagnostic-value">{{ diagnostics.value?.dataDirectory ?? dataDirectory.activeDirectory ?? '暂时无法读取' }}</span></n-descriptions-item>
+        <n-descriptions-item label="作者">凌封</n-descriptions-item>
       </n-descriptions>
-      <div class="about-notice"><CircleHelp :size="16" />原 Go/Wails 工作台仅在阶段 8 全量用户验收和替换决策后退役。</div>
     </n-modal>
     <n-modal :show="Boolean(exitImpact)" preset="card" title="确认安全关闭" class="compact-modal" data-testid="application-exit-impact" :bordered="false" :mask-closable="false" :close-on-esc="false">
       <p class="modal-description">当前有 {{ exitImpact?.activeTaskCount ?? 0 }} 个活动任务，其中排队 {{ exitImpact?.queuedTaskCount ?? 0 }} 个、运行 {{ exitImpact?.runningTaskCount ?? 0 }} 个。</p>

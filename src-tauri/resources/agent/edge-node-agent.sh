@@ -2,9 +2,9 @@
 set -eu
 
 ACTION="${1:-}"
-AGENT_VERSION="0.1.4"
+AGENT_VERSION="0.1.10"
 AGENT_PROTOCOL_VERSION="1"
-DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/data/deploy/inxvision-edge}"
+DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/data/deploy}"
 DATA_ROOT="${DATA_ROOT:-/opt/data}"
 RELEASE_VERSION="${RELEASE_VERSION:-}"
 RELEASE_FINGERPRINT="${RELEASE_FINGERPRINT:-}"
@@ -22,12 +22,17 @@ BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
 SERVICE_UPGRADE_RETENTION_DAYS="${SERVICE_UPGRADE_RETENTION_DAYS:-14}"
 STAGING_RETENTION_DAYS="${STAGING_RETENTION_DAYS:-3}"
 ALLOW_EXISTING_PORTS="${ALLOW_EXISTING_PORTS:-false}"
-PORTS="${PORTS:-1883 6001 6002 7000}"
+PORTS="${PORTS:-}"
 COMPOSE_CMD="${COMPOSE_CMD:-}"
 PLATFORM_API_HOST="${PLATFORM_API_HOST:-}"
 PLATFORM_API_PORT="${PLATFORM_API_PORT:-}"
 PLATFORM_MQTT_HOST="${PLATFORM_MQTT_HOST:-}"
 PLATFORM_MQTT_PORT="${PLATFORM_MQTT_PORT:-}"
+SERVICE_CHECK_SOURCE="${SERVICE_CHECK_SOURCE:-manual}"
+ROLLBACK_OBSERVED="false"
+OBSERVATION_RELEASE=""
+OBSERVATION_CACHE=""
+OBSERVATION_SERVICES=""
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -37,6 +42,10 @@ event() {
   step="$1"
   status="$2"
   message="${3:-}"
+  if [ "$step" = "rollback" ]; then
+    ROLLBACK_OBSERVED="true"
+    if [ "$status" = "running" ]; then reset_runtime_observation ""; fi
+  fi
   printf '{"step":"%s","status":"%s","message":"%s","time":"%s"}\n' \
     "$(json_escape "$step")" \
     "$(json_escape "$status")" \
@@ -46,6 +55,12 @@ event() {
 
 fail() {
   event "$1" "failed" "$2"
+  case "$ACTION" in
+    install|service-upgrade|health|service-health)
+      (if [ "$ROLLBACK_OBSERVED" = "true" ]; then SERVICE_CHECK_SOURCE="rollback"; fi
+       inspect_services) || true
+      ;;
+  esac
   exit "${3:-1}"
 }
 
@@ -245,24 +260,7 @@ service_image_env_key() {
     printf '%s' "$SERVICE_IMAGE_ENV"
     return 0
   fi
-  case "$SERVICE_NAME" in
-    emqx)
-      printf '%s' "EMQX_IMAGE"
-      ;;
-    device-edge)
-      printf '%s' "DEVICE_EDGE_IMAGE"
-      ;;
-    rule-engine)
-      printf '%s' "RULE_ENGINE_IMAGE"
-      ;;
-    device-edge-web)
-      printf '%s' "DEVICE_EDGE_WEB_IMAGE"
-      ;;
-    *)
-      printf '%s' "$SERVICE_NAME" | tr '[:lower:]' '[:upper:]' | sed 's/[-.]/_/g'
-      printf '%s' "_IMAGE"
-      ;;
-  esac
+  fail "service_config" "SERVICE_IMAGE_ENV is required for Compose-driven service upgrade" 66
 }
 
 service_exists() {
@@ -316,14 +314,44 @@ service_upgrade_dir() {
   printf '%s' "$DEPLOY_ROOT/service-upgrades/$id"
 }
 
+load_image_archive_with_tag() {
+  image_tar="$1"
+  expected_image="$2"
+  [ -f "$image_tar" ] || return 1
+  [ -n "$expected_image" ] || return 1
+  if ! load_output="$(docker load -i "$image_tar" 2>&1)"; then
+    printf '%s\n' "$load_output" >&2
+    return 1
+  fi
+  printf '%s\n' "$load_output"
+  loaded_id="$(printf '%s\n' "$load_output" | awk '
+    /^Loaded image ID:[[:space:]]*/ {
+      current = $0
+      sub(/^Loaded image ID:[[:space:]]*/, "", current)
+      if (found && current != value) ambiguous = 1
+      value = current
+      found = 1
+    }
+    END {
+      if (ambiguous) exit 1
+      if (found) print value
+    }
+  ')" || return 1
+  if [ -n "$loaded_id" ]; then
+    printf '%s' "$loaded_id" | grep -Eq '^sha256:[0-9a-f]{64}$' || return 1
+    docker image tag "$loaded_id" "$expected_image" || return 1
+  fi
+  docker image inspect "$expected_image" >/dev/null 2>&1
+}
+
 find_release_src() {
   extract_dir="$1"
-  if [ -f "$extract_dir/docker-compose.yml" ]; then
+  if [ -f "$extract_dir/manifest.json" ]; then
     printf '%s' "$extract_dir"
     return 0
   fi
   first_child="$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
-  if [ -n "$first_child" ] && [ -f "$first_child/docker-compose.yml" ]; then
+  if [ -n "$first_child" ] && [ -f "$first_child/manifest.json" ]; then
     printf '%s' "$first_child"
     return 0
   fi
@@ -345,7 +373,7 @@ stop_current_release() {
 verify_release_dir() {
   release_dir="$1"
   (cd "$release_dir" && compose -f docker-compose.yml ps >/dev/null 2>&1) || return 1
-  verify_runtime_containers || return 1
+  verify_runtime_containers "$release_dir" || return 1
   [ -f "$release_dir/manifest.json" ] || return 1
   current_version="$(awk -F'"' '/"version"[[:space:]]*:/ {print $4; exit}' "$release_dir/manifest.json")"
   [ "$current_version" = "$RELEASE_VERSION" ] || return 1
@@ -356,9 +384,32 @@ verify_release_dir() {
   fi
 }
 
+wait_for_release() {
+  release_dir="$1"
+  attempt=0
+  while [ "$attempt" -lt 30 ]; do
+    if verify_release_dir "$release_dir"; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    if [ $((attempt % 5)) -eq 0 ]; then
+      event "health_wait" "running" "waiting for Compose services (${attempt}/30)"
+    fi
+    sleep 2
+  done
+  return 1
+}
+
 verify_runtime_containers() {
-  for container in inx-edge-emqx inx-device-edge inx-rule-engine inx-device-edge-web; do
-    status="$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || true)"
+  release_dir="$1"
+  reset_runtime_observation "$release_dir"
+  services="$(cd "$release_dir" && compose -f docker-compose.yml config --services 2>/dev/null || true)"
+  OBSERVATION_SERVICES="$services"
+  [ -n "$services" ] || return 1
+  for service in $services; do
+    observe_runtime_service "$release_dir" "$service" "verification"
+    [ "$OBSERVATION_RESULT" = "ok" ] || return 1
+    status="$(printf '%s\n' "$OBSERVATION_FACTS" | awk -F'|' '{print $1}')"
     [ "$status" = "running" ] || return 1
   done
 }
@@ -417,7 +468,7 @@ install_release() {
       ;;
   esac
 
-  release_src="$(find_release_src "$tmp_dir/extract")" || fail "install" "docker-compose.yml not found in package" 35
+  release_src="$(find_release_src "$tmp_dir/extract")" || fail "install" "internal manifest.json not found in package" 35
   if [ -f "$release_src/checksums/sha256.txt" ]; then
     need_cmd sha256sum 36
     (cd "$release_src" && sha256sum -c checksums/sha256.txt)
@@ -444,8 +495,12 @@ install_release() {
   if [ -d "$new_release_dir/images" ]; then
     for image_tar in "$new_release_dir"/images/*.tar; do
       [ -f "$image_tar" ] || continue
+      tag_file="${image_tar%.tar}.tag"
+      [ -f "$tag_file" ] || fail "load_images" "image tag metadata is missing: ${tag_file}" 36
+      expected_image="$(tr -d '\r\n' < "$tag_file")"
       event "load_images" "running" "$image_tar"
-      docker load -i "$image_tar"
+      load_image_archive_with_tag "$image_tar" "$expected_image" ||
+        fail "load_images" "loaded image cannot be assigned expected tag: ${expected_image}" 36
     done
   fi
 
@@ -458,7 +513,7 @@ install_release() {
     fail "install" "new release compose start failed; previous release restored" 39
   fi
   ln -sfn "$new_release_dir" "$DEPLOY_ROOT/current"
-  if ! verify_release_dir "$new_release_dir"; then
+  if ! wait_for_release "$new_release_dir"; then
     if ! rollback_release "$new_release_dir" "$previous_release" "$host_info_backup" "$had_host_info"; then
       fail "rollback" "new release health failed and previous release rollback failed" 40
     fi
@@ -516,7 +571,7 @@ backup_current() {
       rm -f "$database_file_list"
       fail "backup" "database backup finished but current release restart failed" 48
     fi
-    if ! verify_runtime_containers; then
+    if ! verify_runtime_containers "$current_dir"; then
       rm -f "$database_file_list"
       fail "backup" "current release restart did not restore all expected containers" 49
     fi
@@ -541,12 +596,13 @@ service_check() {
 verify_service_state() {
   service_dir="$1"
   expected_image="$2"
-  container_id="$(cd "$service_dir" && compose -f docker-compose.yml ps -q "$SERVICE_NAME" 2>/dev/null || true)"
-  [ -n "$container_id" ] || return 1
-  status="$(docker inspect -f '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
+  reset_runtime_observation "$service_dir"
+  observe_runtime_service "$service_dir" "$SERVICE_NAME" "verification"
+  [ "$OBSERVATION_RESULT" = "ok" ] || return 1
+  status="$(printf '%s\n' "$OBSERVATION_FACTS" | awk -F'|' '{print $1}')"
   [ "$status" = "running" ] || return 1
   if [ -n "$expected_image" ]; then
-    actual_image="$(docker inspect -f '{{.Config.Image}}' "$container_id" 2>/dev/null || true)"
+    actual_image="$(printf '%s\n' "$OBSERVATION_FACTS" | awk -F'|' '{print $3}')"
     [ "$actual_image" = "$expected_image" ] || return 1
   fi
 }
@@ -647,8 +703,8 @@ service_upgrade() {
   cp -a "$REMOTE_IMAGE" "$upgrade_dir/$(basename "$REMOTE_IMAGE")" || fail "service_upgrade" "failed to snapshot image" 79
 
   event "load_image" "running" "$SERVICE_IMAGE"
-  docker load -i "$REMOTE_IMAGE"
-  docker image inspect "$SERVICE_IMAGE" >/dev/null 2>&1 || fail "load_image" "loaded image does not contain ${SERVICE_IMAGE}" 73
+  load_image_archive_with_tag "$REMOTE_IMAGE" "$SERVICE_IMAGE" ||
+    fail "load_image" "loaded image cannot be assigned expected tag: ${SERVICE_IMAGE}" 73
 
   if ! replace_env_value "$current_dir/.env" "$image_key" "$SERVICE_IMAGE" ||
     ! cp "$candidate_compose" "$current_dir/docker-compose.yml"; then
@@ -684,6 +740,159 @@ service_upgrade() {
   event "service_upgrade" "success" "service=${SERVICE_NAME}; image=${SERVICE_IMAGE}; backup=${backup_dir}"
 }
 
+# 只读观测使用独立子Shell，避免采集局部变量影响既有部署与回滚函数。
+# Compose config 已完成 .env 插值；仅从规范化输出提取当前服务的镜像。
+configured_service_image() {
+  awk -v wanted="$1" '
+    function unquote(value, quote) {
+      quote = substr(value, 1, 1)
+      if ((quote == "\"" || quote == sprintf("%c", 39)) && substr(value, length(value), 1) == quote)
+        return substr(value, 2, length(value) - 2)
+      return value
+    }
+    /^services: *$/ { in_services = 1; next }
+    /^[^ ]/ { in_services = 0 }
+    in_services && /^  [^ ]/ {
+      service = $0; sub(/^  /, "", service); sub(/: *$/, "", service)
+      service = unquote(service)
+    }
+    in_services && service == wanted && /^    image:/ {
+      value = $0; sub(/^    image: */, "", value); sub(/\r$/, "", value)
+      print unquote(value); exit
+    }
+  '
+}
+
+json_optional() {
+  if [ -n "$1" ]; then printf '"%s"' "$(json_escape "$1")"; else printf 'null'; fi
+}
+
+# 每轮既有验证重置一次；同轮结果供最终报告复用，避免再次读取容器状态。
+reset_runtime_observation() {
+  OBSERVATION_RELEASE="$1"
+  OBSERVATION_CACHE=""
+  OBSERVATION_SERVICES=""
+}
+
+observed_service_names() {
+  if [ "${OBSERVATION_RELEASE:-}" = "$1" ] && [ -n "${OBSERVATION_SERVICES:-}" ]; then
+    printf '%s\n' "$OBSERVATION_SERVICES"
+  else
+    (cd "$1" && compose -f docker-compose.yml config --services 2>/dev/null)
+  fi
+}
+
+observe_runtime_service() {
+  if [ "${OBSERVATION_RELEASE:-}" != "$1" ]; then reset_runtime_observation "$1"; fi
+  OBSERVATION_ROW="$(printf '%s\n' "${OBSERVATION_CACHE:-}" | awk -F'|' -v wanted="$2" '$1 == wanted {sub(/^[^|]*[|]/, ""); print; exit}')"
+  if [ -n "$OBSERVATION_ROW" ]; then
+    OBSERVATION_RESULT="${OBSERVATION_ROW%%|*}"
+    OBSERVATION_FACTS="${OBSERVATION_ROW#*|}"
+    return 0
+  fi
+  OBSERVATION_RESULT="ok"
+  OBSERVATION_FACTS=""
+  if ! OBSERVATION_CONTAINERS="$(
+      cd "$1" || exit 1
+      if [ "${3:-all}" = "verification" ]; then
+        compose -f docker-compose.yml ps -q "$2" 2>/dev/null
+      else
+        compose -f docker-compose.yml ps -a -q "$2" 2>/dev/null
+      fi
+    )"; then
+    OBSERVATION_RESULT="query_failed"
+  elif [ -z "$OBSERVATION_CONTAINERS" ]; then
+    OBSERVATION_RESULT="missing"
+  elif [ "$(printf '%s\n' "$OBSERVATION_CONTAINERS" | awk 'NF {count++} END {print count+0}')" != "1" ]; then
+    OBSERVATION_RESULT="ambiguous"
+  elif ! OBSERVATION_FACTS="$(docker inspect -f '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{.Config.Image}}|{{.Image}}' "$OBSERVATION_CONTAINERS" 2>/dev/null)"; then
+    OBSERVATION_RESULT="inspect_failed"
+  fi
+  OBSERVATION_CACHE="${OBSERVATION_CACHE:-}
+$2|$OBSERVATION_RESULT|$OBSERVATION_FACTS"
+}
+
+inspect_services() (
+  started_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  source="$SERVICE_CHECK_SOURCE"
+  scope="all"
+  [ -z "$SERVICE_NAME" ] || scope="service"
+  check_state="succeeded"
+  check_error=""
+  rows=""
+  expected_services=""
+  separator=""
+  current_dir="$(current_release_dir)"
+  if [ -z "$current_dir" ] || [ ! -f "$current_dir/docker-compose.yml" ]; then
+    check_error="当前一体机缺少生效Compose，无法检查服务"
+  elif ! configured="$(cd "$current_dir" && compose -f docker-compose.yml config 2>/dev/null)"; then
+    check_error="无法解析当前生效Compose"
+  elif ! services="$(observed_service_names "$current_dir")" || [ -z "$services" ]; then
+    check_error="当前生效Compose未返回服务集合"
+  else
+    for service in $services; do
+      [ -z "$expected_services" ] || expected_services="${expected_services},"
+      expected_services="${expected_services}\"$(json_escape "$service")\""
+    done
+    if [ -n "$SERVICE_NAME" ]; then
+      found="false"
+      for service in $services; do [ "$service" != "$SERVICE_NAME" ] || found="true"; done
+      if [ "$found" = "true" ]; then services="$SERVICE_NAME"; else check_error="目标服务不在当前生效Compose中"; fi
+    fi
+    if [ -z "$check_error" ]; then
+      for service in $services; do
+        expected_image="$(printf '%s\n' "$configured" | configured_service_image "$service")"
+        runtime_state="unknown"; health_status=""; actual_image=""; image_id=""
+        state="unknown"; detail=""
+        observe_runtime_service "$current_dir" "$service"
+        if [ "$OBSERVATION_RESULT" = "query_failed" ]; then
+          detail="读取服务容器失败"
+          check_error="部分服务的容器查询失败，保留上次有效检查记录"
+        elif [ "$OBSERVATION_RESULT" = "missing" ]; then
+          runtime_state="missing"; state="abnormal"; detail="Compose未返回可检查的服务容器"
+        else
+          if [ "$OBSERVATION_RESULT" = "ambiguous" ]; then
+            detail="服务存在多个容器，无法确定唯一运行版本"
+          elif [ "$OBSERVATION_RESULT" = "ok" ]; then
+            facts="$OBSERVATION_FACTS"
+            runtime_state="$(printf '%s\n' "$facts" | awk -F'|' '{print $1}')"
+            health_status="$(printf '%s\n' "$facts" | awk -F'|' '{print $2}')"
+            actual_image="$(printf '%s\n' "$facts" | awk -F'|' '{print $3}')"
+            image_id="$(printf '%s\n' "$facts" | awk -F'|' '{print $4}')"
+            if [ -z "$runtime_state" ] || [ -z "$actual_image" ] || [ -z "$image_id" ]; then
+              state="unknown"; detail="容器检查返回的运行事实不完整"
+              check_error="部分服务的运行事实不完整，保留上次有效检查记录"
+            elif [ "$runtime_state" != "running" ]; then
+              state="abnormal"; detail="容器未运行"
+            elif [ -n "$health_status" ] && [ "$health_status" != "healthy" ]; then
+              state="abnormal"; detail="容器健康检查未通过"
+            elif [ -z "$expected_image" ]; then
+              state="unknown"; detail="无法读取生效Compose中的期望镜像"
+            elif [ "$actual_image" != "$expected_image" ]; then
+              state="version_mismatch"; detail="实际镜像与生效Compose不一致"
+            else
+              state="normal"
+            fi
+          else
+            detail="读取容器运行状态和镜像失败"
+            check_error="部分服务的运行事实读取失败，保留上次有效检查记录"
+          fi
+        fi
+        checked_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        row="$(printf '{"serviceName":"%s","state":"%s","runtimeState":"%s","healthStatus":%s,"expectedImage":%s,"actualImage":%s,"imageId":%s,"message":%s,"checkedAt":"%s","source":"%s"}' \
+          "$(json_escape "$service")" "$state" "$(json_escape "$runtime_state")" \
+          "$(json_optional "$health_status")" "$(json_optional "$expected_image")" \
+          "$(json_optional "$actual_image")" "$(json_optional "$image_id")" "$(json_optional "$detail")" "$checked_at" "$source")"
+        rows="${rows}${separator}${row}"; separator=","
+      done
+    fi
+  fi
+  [ -z "$check_error" ] || check_state="failed"
+  checked_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  printf '{"step":"service_observation","status":"info","message":"服务运行事实采集完成","report":{"startedAt":"%s","checkedAt":"%s","source":"%s","scope":"%s","serviceName":%s,"expectedServices":[%s],"services":[%s],"state":"%s","error":%s}}\n' \
+    "$started_at" "$checked_at" "$source" "$scope" "$(json_optional "$SERVICE_NAME")" "$expected_services" "$rows" "$check_state" "$(json_optional "$check_error")"
+)
+
 service_health() {
   current_dir="$(require_service_context "service_health")"
   image_key="$(service_image_env_key)"
@@ -693,13 +902,17 @@ service_health() {
   fi
   verify_service_state "$current_dir" "$expected_image" || fail "service_health" "service state or image mismatch" 80
   (cd "$current_dir" && compose -f docker-compose.yml ps "$SERVICE_NAME")
+  inspect_services
   event "service_health" "success" "service=${SERVICE_NAME}; image=${expected_image}"
 }
 
 health() {
   event "health" "running" "checking containers"
-  verify_release_dir "$DEPLOY_ROOT/current" || fail "health" "release service, version or fingerprint check failed" 50
-  compose -f "$DEPLOY_ROOT/current/docker-compose.yml" ps
+  current_dir="$(current_release_dir)"
+  [ -n "$current_dir" ] || fail "health" "current release does not exist" 50
+  wait_for_release "$current_dir" || fail "health" "release service, version or fingerprint check failed" 50
+  (cd "$current_dir" && compose -f docker-compose.yml ps)
+  inspect_services
   event "health" "success" "compose ps ok"
 }
 
@@ -732,8 +945,11 @@ case "$ACTION" in
   service-health)
     service_health
     ;;
+  inspect-services)
+    inspect_services
+    ;;
   *)
-    echo "usage: edge-node-agent.sh version|precheck|install|backup|health|service-check|service-upgrade|service-health" >&2
+    echo "usage: edge-node-agent.sh version|precheck|install|backup|health|service-check|service-upgrade|service-health|inspect-services" >&2
     exit 2
     ;;
 esac

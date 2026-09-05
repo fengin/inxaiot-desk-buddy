@@ -6,7 +6,9 @@ use crate::domain::aio::deployment_workflow::{
     DeploymentTaskStepView, DeploymentTaskTargetView, DeploymentTaskView, OperationHistoryDetail,
     OperationHistoryItem, OperationHistoryPage, OperationHistoryQuery, OperationHistoryTarget,
 };
-use crate::domain::common::task::{TargetState, TaskState, TaskTargetRecord};
+use crate::domain::common::task::{
+    StepState, TargetState, TaskState, TaskStepRecord, TaskTargetRecord,
+};
 use crate::formal::app_state::FormalAppState;
 use crate::formal::operation_repository::{
     OperationHistoryRecord, OperationHistoryTargetRecord, OperationRepository,
@@ -32,7 +34,14 @@ impl DeploymentTaskQueryPort for Stage75BQueryAdapter<'_> {
         }
         let targets = self.state.task_repository.targets(task_id).await?;
         let steps = self.state.task_repository.steps(task_id).await?;
-        let target_views = targets
+        let visible_targets = targets
+            .iter()
+            .filter(|target| {
+                task.operation_type != "deployment_preflight"
+                    || target.resource_type != "preflight_internal"
+            })
+            .collect::<Vec<_>>();
+        let target_views = visible_targets
             .iter()
             .map(|target| DeploymentTaskTargetView {
                 mac: target.resource_key.clone(),
@@ -40,27 +49,33 @@ impl DeploymentTaskQueryPort for Stage75BQueryAdapter<'_> {
                 stage: target.stage.clone(),
                 progress: percent(target.progress_current, target.progress_total),
                 message_code: target.message_code.clone(),
-                message: target.message_params_json.clone(),
+                message: target_result_message(target, &steps),
                 updated_at: target.updated_at.clone(),
             })
             .collect::<Vec<_>>();
-        let success_count = count_targets(&targets, |state| state == TargetState::Succeeded);
-        let failure_count = count_targets(&targets, |state| {
+        let success_count =
+            count_targets(&visible_targets, |state| state == TargetState::Succeeded);
+        let failure_count = count_targets(&visible_targets, |state| {
             matches!(
                 state,
                 TargetState::Failed | TargetState::Interrupted | TargetState::Unknown
             )
         });
-        let cancelled_count = count_targets(&targets, |state| state == TargetState::Cancelled);
+        let cancelled_count =
+            count_targets(&visible_targets, |state| state == TargetState::Cancelled);
         let completed_count = success_count + failure_count + cancelled_count;
-        let progress = if target_views.is_empty() {
+        let progress_current = targets
+            .iter()
+            .map(|target| target.progress_current)
+            .sum::<u64>();
+        let progress_total = targets
+            .iter()
+            .map(|target| target.progress_total)
+            .sum::<u64>();
+        let progress = if progress_total == 0 {
             0
         } else {
-            target_views
-                .iter()
-                .map(|target| target.progress)
-                .sum::<u32>()
-                / u32::try_from(target_views.len()).unwrap_or(1)
+            percent(progress_current, progress_total)
         };
         let stage = target_views
             .iter()
@@ -148,7 +163,7 @@ impl OperationHistoryQueryPort for Stage75BQueryAdapter<'_> {
     }
 }
 
-fn count_targets(targets: &[TaskTargetRecord], predicate: impl Fn(TargetState) -> bool) -> u32 {
+fn count_targets(targets: &[&TaskTargetRecord], predicate: impl Fn(TargetState) -> bool) -> u32 {
     u32::try_from(
         targets
             .iter()
@@ -166,6 +181,31 @@ fn percent(current: u64, total: u64) -> u32 {
             .unwrap_or(100)
             .min(100)
     }
+}
+
+fn target_result_message(target: &TaskTargetRecord, steps: &[TaskStepRecord]) -> Option<String> {
+    if let Some(message) = target
+        .message_params_json
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        return Some(message.into());
+    }
+    if !matches!(
+        target.state,
+        TargetState::Failed | TargetState::Interrupted | TargetState::Unknown
+    ) {
+        return None;
+    }
+    steps
+        .iter()
+        .rev()
+        .find(|step| {
+            step.resource_type.as_deref() == Some(target.resource_type.as_str())
+                && step.resource_key.as_deref() == Some(target.resource_key.as_str())
+                && matches!(step.state, StepState::Failed | StepState::Interrupted)
+        })
+        .and_then(|step| step.message.clone())
 }
 
 fn map_history(record: OperationHistoryRecord) -> OperationHistoryItem {
@@ -207,12 +247,49 @@ fn map_history_target(record: OperationHistoryTargetRecord) -> OperationHistoryT
 
 #[cfg(test)]
 mod tests {
-    use super::percent;
+    use crate::domain::common::task::{StepState, TargetState, TaskStepRecord, TaskTargetRecord};
+
+    use super::{percent, target_result_message};
 
     #[test]
     fn task_progress_is_bounded() {
         assert_eq!(percent(3, 4), 75);
         assert_eq!(percent(8, 4), 100);
         assert_eq!(percent(0, 0), 0);
+    }
+
+    #[test]
+    fn failed_target_uses_its_latest_failed_step_message() {
+        let target = TaskTargetRecord {
+            local_task_id: "task".into(),
+            resource_type: "aio".into(),
+            resource_key: "000C290B71F4".into(),
+            state: TargetState::Failed,
+            stage: "failed".into(),
+            progress_current: 100,
+            progress_total: 100,
+            fencing_token: None,
+            message_code: None,
+            message_params_json: None,
+            updated_at: "1".into(),
+        };
+        let steps = vec![TaskStepRecord {
+            id: "step".into(),
+            local_task_id: "task".into(),
+            resource_type: Some("aio".into()),
+            resource_key: Some("000C290B71F4".into()),
+            step_code: "backup".into(),
+            state: StepState::Failed,
+            error_code: Some("DEPLOYMENT_FAILED".into()),
+            message: Some("当前一体机不存在可升级的已部署版本，请先执行首次部署".into()),
+            started_at: Some("1".into()),
+            ended_at: Some("2".into()),
+            updated_at: "2".into(),
+        }];
+
+        assert_eq!(
+            target_result_message(&target, &steps).as_deref(),
+            Some("当前一体机不存在可升级的已部署版本，请先执行首次部署")
+        );
     }
 }

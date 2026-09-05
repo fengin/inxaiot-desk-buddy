@@ -1,9 +1,10 @@
 :root {
   color-scheme: light dark;
-  font-family: "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  font-family: var(--inx-font-ui);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --inx-font-ui: "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  /* 中文控件使用同一字体的行框和字形度量，避免西文字体回退使文字视觉偏下。 */
+  --inx-font-ui: "Microsoft YaHei UI", "PingFang SC", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei", sans-serif;
   --inx-font-mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
   --inx-font-size-base: 13px;
   --inx-font-size-table: 12px;
@@ -98,4 +99,3 @@
   animation-duration: 0s !important;
   transition-duration: 0s !important;
 }
-

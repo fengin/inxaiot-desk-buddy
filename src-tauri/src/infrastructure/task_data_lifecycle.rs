@@ -38,6 +38,16 @@ impl<'a> TaskDataLifecycle<'a> {
         self.finalize_task_at(project_id, task_id, state, OffsetDateTime::now_utc())
     }
 
+    pub fn clear_task_log(&self, project_id: &str, task_id: &str) -> AppResult<()> {
+        let log = self
+            .paths
+            .project_task_log_path(project_id, task_id)
+            .map_err(crate::infrastructure::project_context::map_formal_error)?;
+        remove_file_if_present(&log, "清空任务日志")?;
+        remove_file_if_present(&retention_path(&log), "清空任务日志保留标记")?;
+        remove_empty_parent(&log, &self.paths.task_logs_dir)
+    }
+
     fn finalize_task_at(
         &self,
         project_id: &str,
@@ -131,6 +141,14 @@ impl<'a> TaskDataLifecycle<'a> {
 
 fn retention_path(log: &Path) -> PathBuf {
     PathBuf::from(format!("{}.retention.json", log.to_string_lossy()))
+}
+
+fn remove_file_if_present(path: &Path, operation: &'static str) -> AppResult<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AppError::io(operation, &error)),
+    }
 }
 
 fn log_path_from_retention(sidecar: &Path) -> AppResult<PathBuf> {
@@ -272,5 +290,28 @@ mod tests {
                 .is_err()
         );
         assert!(retry_artifacts.exists());
+    }
+
+    #[test]
+    fn clearing_a_task_log_removes_only_the_trusted_log_and_retention_marker() {
+        let root = tempfile::tempdir().expect("root");
+        let paths = AppPaths::from_data_dir(root.path()).expect("paths");
+        paths.ensure().expect("ensure");
+        let lifecycle = TaskDataLifecycle::new(&paths);
+        let log = paths
+            .project_task_log_path("project", "terminal-task")
+            .expect("task log");
+        std::fs::create_dir_all(log.parent().expect("log parent")).expect("log directory");
+        std::fs::write(&log, b"event").expect("task log");
+        std::fs::write(retention_path(&log), b"{}").expect("retention");
+
+        lifecycle
+            .clear_task_log("project", "terminal-task")
+            .expect("clear task log");
+        assert!(!log.exists());
+        assert!(!retention_path(&log).exists());
+        lifecycle
+            .clear_task_log("project", "terminal-task")
+            .expect("repeat clear task log");
     }
 }

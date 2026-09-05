@@ -21,6 +21,7 @@ if agent is None:
 subprocess.run([shell, '-n'], input=agent.encode('utf-8'), env=test_environment, timeout=15, check=True)
 prepare = agent[agent.index('prepare_service_compose() {'):agent.index('\nrollback_service_upgrade() {')]
 rollback = agent[agent.index('rollback_service_upgrade() {'):agent.index('\nservice_upgrade() {')]
+load_image = agent[agent.index('load_image_archive_with_tag() {'):agent.index('\nfind_release_src() {')]
 base = 'services:\n  emqx:\n    image: emqx:1\n  device-edge:\n    image: edge:old\n    labels:\n      image: unchanged\n  device-edge-web:\n    image: web:1\n'
 cases = [
     ('literal', base, True),
@@ -74,6 +75,52 @@ with tempfile.TemporaryDirectory(prefix='inxaiot-compose-contract-') as scratch:
     assert (current / 'docker-compose.yml').read_bytes() == (backup / 'docker-compose.yml').read_bytes()
     assert calls.read_text().strip() == '-f docker-compose.yml up -d --no-deps --force-recreate device-edge'
     results.append({'case': 'rollback_restores_env_and_compose_only_recreates_target', 'passed': True})
+    archive = root / 'untagged.tar'
+    archive.write_bytes(b'fixture')
+    marker = root / 'docker-tag.call'
+    image_id = 'sha256:' + ('a' * 64)
+    docker_stub = r'''
+docker() {
+  if [ "$1" = load ] && [ "$2" = -i ]; then
+    printf 'Loaded image ID: %s\n' "$FIXTURE_IMAGE_ID"
+    if [ "${LOAD_MODE:-single}" = ambiguous ]; then
+      printf 'Loaded image ID: sha256:%064d\n' 0
+    fi
+    return 0
+  fi
+  if [ "$1" = image ] && [ "$2" = inspect ]; then
+    [ -f "$TAG_MARKER" ]
+    return
+  fi
+  if [ "$1" = image ] && [ "$2" = tag ]; then
+    printf '%s|%s' "$3" "$4" > "$TAG_MARKER"
+    return 0
+  fi
+  return 1
+}
+'''
+    load_environment = dict(test_environment, FIXTURE_IMAGE_ID=image_id, TAG_MARKER=marker.as_posix())
+    subprocess.run(
+        [shell, '-c', docker_stub + load_image + '\nload_image_archive_with_tag "$1" repo/manual:1', 'fixture', archive.as_posix()],
+        env=load_environment, timeout=15, check=True,
+    )
+    assert marker.read_text() == image_id + '|repo/manual:1'
+    results.append({'case': 'untagged_image_is_assigned_manual_tag', 'passed': True})
+    marker.write_text('preexisting', encoding='utf-8')
+    subprocess.run(
+        [shell, '-c', docker_stub + load_image + '\nload_image_archive_with_tag "$1" repo/manual:1', 'fixture', archive.as_posix()],
+        env=load_environment, timeout=15, check=True,
+    )
+    assert marker.read_text() == image_id + '|repo/manual:1'
+    results.append({'case': 'untagged_image_replaces_existing_target_tag', 'passed': True})
+    marker.unlink()
+    ambiguous_environment = dict(load_environment, LOAD_MODE='ambiguous')
+    ambiguous = subprocess.run(
+        [shell, '-c', docker_stub + load_image + '\nload_image_archive_with_tag "$1" repo/manual:1', 'fixture', archive.as_posix()],
+        env=ambiguous_environment, timeout=15,
+    )
+    assert ambiguous.returncode != 0 and not marker.exists()
+    results.append({'case': 'multiple_untagged_image_ids_are_rejected', 'passed': True})
 result = {'agentSha256': hashlib.sha256(agent.encode('utf-8')).hexdigest(), 'runtime': shell, 'tests': results, 'passed': len(results), 'realDockerAccessed': False}
 if arguments.output:
     with Path(arguments.output).open('x', encoding='utf-8') as evidence_file:

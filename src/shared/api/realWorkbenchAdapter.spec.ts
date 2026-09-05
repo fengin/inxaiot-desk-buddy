@@ -61,11 +61,13 @@ describe("RealWorkbenchAdapter Tauri Command 契约", () => {
     expect(invokeMock).toHaveBeenLastCalledWith("validate_release_profile", { draft });
     await adapter.saveReleaseProfile("project-1", draft);
     expect(invokeMock).toHaveBeenLastCalledWith("save_release_profile", { projectId: "project-1", draft });
-    const transfer = { filePath: "D:\\secure\\project.inxkey", passphrase: "strong-passphrase" };
-    await adapter.exportReleaseMasterKey("project-1", transfer);
-    expect(invokeMock).toHaveBeenLastCalledWith("export_release_master_key", { projectId: "project-1", request: transfer });
-    await adapter.importReleaseMasterKey("project-1", transfer);
-    expect(invokeMock).toHaveBeenLastCalledWith("import_release_master_key", { projectId: "project-1", request: transfer });
+    const agentRequest = { filePath: "D:\\release\\edge-node-agent.sh", expectedVersion: 3 };
+    await adapter.replaceReleaseAgentScript("project-1", agentRequest);
+    expect(invokeMock).toHaveBeenLastCalledWith("replace_release_agent_script", {
+      projectId: "project-1", request: agentRequest
+    });
+    await adapter.openReleaseAgentScript("project-1");
+    expect(invokeMock).toHaveBeenLastCalledWith("open_release_agent_script", { projectId: "project-1" });
     await adapter.listHostKeys("project-1");
     expect(invokeMock).toHaveBeenLastCalledWith("list_host_keys", { projectId: "project-1" });
     await adapter.captureHostKey("project-1", { host: "192.168.3.79", port: 22 });

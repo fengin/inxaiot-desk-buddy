@@ -1,4 +1,5 @@
 use crate::core::error::AppResult;
+use crate::domain::aio::service_check::ServiceCheckReport;
 use crate::domain::common::task::{StepState, TargetState, TaskEventLevel};
 
 #[derive(Clone, Debug)]
@@ -17,6 +18,10 @@ pub struct DeploymentProgressEvent {
 
 pub trait DeploymentProgressSink: Send + Sync {
     fn emit(&self, event: DeploymentProgressEvent) -> AppResult<()>;
+
+    fn service_check(&self, _mac: &str, _report: ServiceCheckReport) -> AppResult<()> {
+        Ok(())
+    }
 }
 
 #[derive(Default)]

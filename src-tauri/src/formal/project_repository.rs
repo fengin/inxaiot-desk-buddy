@@ -153,14 +153,6 @@ impl LocalProjectRepository {
                 .map_err(|_| FormalError::LocalDatabase("解析待清理凭据引用"))?;
             match self.secrets.delete(&secret_ref) {
                 Ok(()) => {
-                    sqlx::query("DELETE FROM local_project_master_key WHERE secret_ref = ?")
-                        .bind(&secret_ref)
-                        .execute(&self.pool)
-                        .await
-                        .map_err(|error| {
-                            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "remove cleaned master key registry failed");
-                            FormalError::LocalDatabase("清理项目主密钥注册表")
-                        })?;
                     sqlx::query("DELETE FROM local_secret_cleanup WHERE secret_ref = ?")
                         .bind(&secret_ref)
                         .execute(&self.pool)
@@ -212,14 +204,6 @@ impl LocalProjectRepository {
         reason: &str,
     ) -> FormalResult<()> {
         if self.secrets.delete(secret_ref).is_ok() {
-            sqlx::query("DELETE FROM local_project_master_key WHERE secret_ref = ?")
-                .bind(secret_ref)
-                .execute(&self.pool)
-                .await
-                .map_err(|error| {
-                    tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "clear master key registry row failed");
-                    FormalError::LocalDatabase("清理项目主密钥注册表")
-                })?;
             sqlx::query("DELETE FROM local_secret_cleanup WHERE secret_ref = ?")
                 .bind(secret_ref)
                 .execute(&self.pool)
@@ -692,17 +676,6 @@ impl LocalProjectRepository {
         let token_ref: Option<String> = row
             .try_get("token_secret_ref")
             .map_err(|_| FormalError::LocalDatabase("解析平台令牌引用"))?;
-        let master_key_refs: Vec<String> = sqlx::query_scalar(
-            "SELECT secret_ref FROM local_project_master_key \
-             WHERE local_project_id = ? ORDER BY key_version",
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "read project master keys before delete failed");
-            FormalError::LocalDatabase("读取待删除项目主密钥")
-        })?;
         sqlx::query("DELETE FROM local_project WHERE id = ?")
             .bind(project_id)
             .execute(&self.pool)
@@ -714,10 +687,6 @@ impl LocalProjectRepository {
             .await?;
         if let Some(token_ref) = token_ref {
             self.delete_secret_or_enqueue(&token_ref, "project_delete_session")
-                .await?;
-        }
-        for master_key_ref in master_key_refs {
-            self.delete_secret_or_enqueue(&master_key_ref, "project_delete_master_key")
                 .await?;
         }
         Ok(())

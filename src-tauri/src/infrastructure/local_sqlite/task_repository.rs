@@ -62,6 +62,19 @@ pub struct TargetUpdate {
     pub message_params_json: Option<String>,
 }
 
+const PREFLIGHT_OPERATION_TYPE: &str = "deployment_preflight";
+const PREFLIGHT_COMMON_RESOURCE_TYPE: &str = "preflight_internal";
+const PREFLIGHT_COMMON_RESOURCE_KEY: &str = "common";
+const PREFLIGHT_PASSED_CODE: &str = "PREFLIGHT_TARGET_PASSED";
+const PREFLIGHT_SUBMITTED_CODE: &str = "PREFLIGHT_SUBMITTED";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreflightSnapshotBinding {
+    execution_snapshot_sha256: String,
+    submitted_task_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskStepWrite {
     pub id: String,
@@ -93,7 +106,7 @@ impl TaskRepository {
     pub async fn active_counts(&self) -> AppResult<ActiveTaskCounts> {
         let rows = sqlx::query(concat!(
             "SELECT state, COUNT(*) AS count FROM local_task ",
-            "WHERE state IN ('queued', 'running', 'cancelling', 'finalizing_failed') ",
+            "WHERE state IN ('checking', 'queued', 'running', 'cancelling', 'finalizing_failed') ",
             "GROUP BY state"
         ))
         .fetch_all(&self.pool)
@@ -111,6 +124,7 @@ impl TaskRepository {
                 .map_err(|_| AppError::InvalidConfig("活动任务数量超出范围".into()))?;
             counts.total = counts.total.saturating_add(count);
             match state.as_str() {
+                "checking" => counts.running = counts.running.saturating_add(count),
                 "queued" => counts.queued = counts.queued.saturating_add(count),
                 "running" | "cancelling" | "finalizing_failed" => {
                     counts.running = counts.running.saturating_add(count);
@@ -143,7 +157,7 @@ impl TaskRepository {
             "name, state, priority, batch_size, concurrency, payload_ref, sequence, log_path, ",
             "error_code, message, created_at, started_at, ended_at, updated_at ",
             "FROM local_task WHERE state IN ",
-            "('queued', 'running', 'cancelling', 'finalizing_failed') ",
+            "('checking', 'queued', 'running', 'cancelling', 'finalizing_failed') ",
             "ORDER BY updated_at, id"
         ))
         .fetch_all(&self.pool)
@@ -206,6 +220,240 @@ impl TaskRepository {
         self.get(&input.id).await
     }
 
+    pub async fn bind_preflight_snapshot(
+        &self,
+        task_id: &str,
+        local_project_id: &str,
+        execution_snapshot_sha256: &str,
+    ) -> AppResult<()> {
+        validate_snapshot_sha256(execution_snapshot_sha256)?;
+        let now = timestamp();
+        let binding = serde_json::to_string(&PreflightSnapshotBinding {
+            execution_snapshot_sha256: execution_snapshot_sha256.into(),
+            submitted_task_id: None,
+        })
+        .map_err(|_| AppError::InvalidConfig("序列化部署检查快照绑定失败".into()))?;
+        let result = sqlx::query(concat!(
+            "UPDATE local_task_target SET message_params_json = ?, updated_at = ? ",
+            "WHERE local_task_id = ? AND resource_type = ? AND resource_key = ? ",
+            "AND state = 'succeeded' AND message_code = ? AND EXISTS (",
+            "SELECT 1 FROM local_task WHERE id = ? AND local_project_id = ? ",
+            "AND operation_type = ? AND state = 'checking')"
+        ))
+        .bind(binding)
+        .bind(&now)
+        .bind(task_id)
+        .bind(PREFLIGHT_COMMON_RESOURCE_TYPE)
+        .bind(PREFLIGHT_COMMON_RESOURCE_KEY)
+        .bind(PREFLIGHT_PASSED_CODE)
+        .bind(task_id)
+        .bind(local_project_id)
+        .bind(PREFLIGHT_OPERATION_TYPE)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| AppError::database("绑定部署检查快照", &error))?;
+        if result.rows_affected() != 1 {
+            return Err(AppError::Conflict(
+                "部署检查任务尚未成功完成，不能绑定执行快照".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn create_queued_from_preflight(
+        &self,
+        preflight_task_id: &str,
+        execution_snapshot_sha256: &str,
+        input: CreateTask,
+    ) -> AppResult<TaskRecord> {
+        input.validate()?;
+        validate_snapshot_sha256(execution_snapshot_sha256)?;
+        if preflight_task_id.trim().is_empty() || input.id == preflight_task_id {
+            return Err(AppError::InvalidConfig("部署检查任务ID无效".into()));
+        }
+        let deployment_targets = input.targets.iter().cloned().collect::<BTreeSet<_>>();
+        if deployment_targets
+            .iter()
+            .any(|(resource_type, _)| resource_type != "aio")
+        {
+            return Err(AppError::InvalidConfig("部署任务只能包含一体机目标".into()));
+        }
+        let now = timestamp();
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| AppError::database("开始提交部署任务事务", &error))?;
+        let preflight = sqlx::query(
+            "SELECT local_project_id, operation_type, state FROM local_task WHERE id = ?",
+        )
+        .bind(preflight_task_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| AppError::database("读取部署检查任务", &error))?
+        .ok_or_else(|| AppError::NotFound(format!("部署检查任务不存在：{preflight_task_id}")))?;
+        let preflight_project: String = get(&preflight, "local_project_id", "读取部署检查项目")?;
+        let preflight_operation: String = get(&preflight, "operation_type", "读取部署检查类型")?;
+        let preflight_state: String = get(&preflight, "state", "读取部署检查状态")?;
+        if preflight_project != input.local_project_id {
+            return Err(AppError::Conflict(
+                "部署检查结果不属于当前项目，请重新检查".into(),
+            ));
+        }
+        if preflight_operation != PREFLIGHT_OPERATION_TYPE {
+            return Err(AppError::Conflict(
+                "指定任务不是部署检查任务，请重新检查".into(),
+            ));
+        }
+        if preflight_state != TaskState::Succeeded.as_str() {
+            return Err(AppError::Conflict(
+                "部署检查尚未成功完成，不能提交部署任务".into(),
+            ));
+        }
+        let rows = sqlx::query(concat!(
+            "SELECT resource_type, resource_key, state, message_code, message_params_json ",
+            "FROM local_task_target WHERE local_task_id = ? ORDER BY resource_type, resource_key"
+        ))
+        .bind(preflight_task_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|error| AppError::database("读取部署检查目标", &error))?;
+        let mut checked_targets = BTreeSet::new();
+        let mut common_binding = None;
+        for row in rows {
+            let resource_type: String = get(&row, "resource_type", "读取部署检查目标类型")?;
+            let resource_key: String = get(&row, "resource_key", "读取部署检查目标键")?;
+            let state: String = get(&row, "state", "读取部署检查目标状态")?;
+            if resource_type == "aio" {
+                if state != TargetState::Succeeded.as_str() {
+                    return Err(AppError::Conflict(format!(
+                        "一体机{resource_key}未通过部署检查，请重新检查"
+                    )));
+                }
+                checked_targets.insert((resource_type, resource_key));
+                continue;
+            }
+            if resource_type == PREFLIGHT_COMMON_RESOURCE_TYPE
+                && resource_key == PREFLIGHT_COMMON_RESOURCE_KEY
+            {
+                let message_code: Option<String> =
+                    get(&row, "message_code", "读取部署检查快照状态")?;
+                let message_params_json: Option<String> =
+                    get(&row, "message_params_json", "读取部署检查快照绑定")?;
+                common_binding = Some((state, message_code, message_params_json));
+            }
+        }
+        if checked_targets != deployment_targets {
+            return Err(AppError::Conflict(
+                "部署目标与已通过检查的一体机不一致，请重新检查".into(),
+            ));
+        }
+        let (common_state, common_code, binding_json) = common_binding
+            .ok_or_else(|| AppError::Conflict("部署检查缺少公共检查结果，请重新检查".into()))?;
+        if common_state != TargetState::Succeeded.as_str() {
+            return Err(AppError::Conflict(
+                "部署公共检查尚未通过，请重新检查".into(),
+            ));
+        }
+        let binding_json = binding_json
+            .ok_or_else(|| AppError::Conflict("部署检查快照未保存，请重新检查".into()))?;
+        let binding: PreflightSnapshotBinding = serde_json::from_str(&binding_json)
+            .map_err(|_| AppError::Conflict("部署检查快照绑定已损坏，请重新检查".into()))?;
+        if binding.execution_snapshot_sha256 != execution_snapshot_sha256 {
+            return Err(AppError::Conflict(
+                "部署执行内容与已通过的检查结果不一致，请重新检查".into(),
+            ));
+        }
+        if common_code.as_deref() == Some(PREFLIGHT_SUBMITTED_CODE)
+            || binding.submitted_task_id.is_some()
+        {
+            return Err(AppError::Conflict(format!(
+                "该部署检查结果已提交为任务{}，不能重复提交",
+                binding.submitted_task_id.as_deref().unwrap_or("")
+            )));
+        }
+        if common_code.as_deref() != Some(PREFLIGHT_PASSED_CODE) {
+            return Err(AppError::Conflict(
+                "部署检查结果状态无效，请重新检查".into(),
+            ));
+        }
+        let claimed_binding = serde_json::to_string(&PreflightSnapshotBinding {
+            execution_snapshot_sha256: execution_snapshot_sha256.into(),
+            submitted_task_id: Some(input.id.clone()),
+        })
+        .map_err(|_| AppError::InvalidConfig("序列化部署提交绑定失败".into()))?;
+        let claimed = sqlx::query(concat!(
+            "UPDATE local_task_target SET message_code = ?, message_params_json = ?, ",
+            "updated_at = ? WHERE local_task_id = ? AND resource_type = ? AND resource_key = ? ",
+            "AND state = 'succeeded' AND message_code = ? AND message_params_json = ?"
+        ))
+        .bind(PREFLIGHT_SUBMITTED_CODE)
+        .bind(claimed_binding)
+        .bind(&now)
+        .bind(preflight_task_id)
+        .bind(PREFLIGHT_COMMON_RESOURCE_TYPE)
+        .bind(PREFLIGHT_COMMON_RESOURCE_KEY)
+        .bind(PREFLIGHT_PASSED_CODE)
+        .bind(&binding_json)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| AppError::database("占用部署检查结果", &error))?;
+        if claimed.rows_affected() != 1 {
+            return Err(AppError::Conflict(
+                "部署检查结果已被提交，请勿重复操作".into(),
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO local_task \
+             (id, local_project_id, remote_operation_record_id, domain_type, operation_type, \
+              name, state, priority, batch_size, concurrency, payload_ref, sequence, log_path, \
+              created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, 0, ?, ?, ?)",
+        )
+        .bind(&input.id)
+        .bind(&input.local_project_id)
+        .bind(&input.remote_operation_record_id)
+        .bind(&input.domain_type)
+        .bind(&input.operation_type)
+        .bind(&input.name)
+        .bind(input.priority)
+        .bind(i64::from(input.batch_size))
+        .bind(i64::from(input.concurrency))
+        .bind(&input.payload_ref)
+        .bind(&input.log_path)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| AppError::database("创建已检查部署任务", &error))?;
+        for (resource_type, resource_key) in deployment_targets {
+            sqlx::query(
+                "INSERT INTO local_task_target \
+                 (local_task_id, resource_type, resource_key, state, stage, progress, \
+                  progress_current, progress_total, updated_at) \
+                 VALUES (?, ?, ?, 'pending', '', 0, 0, 0, ?)",
+            )
+            .bind(&input.id)
+            .bind(resource_type)
+            .bind(resource_key)
+            .bind(&now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| AppError::database("创建已检查部署任务目标", &error))?;
+        }
+        sqlx::query("UPDATE local_task SET sequence = sequence + 1, updated_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(preflight_task_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| AppError::database("记录部署检查提交结果", &error))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| AppError::database("提交已检查部署任务事务", &error))?;
+        self.get(&input.id).await
+    }
+
     pub async fn get(&self, task_id: &str) -> AppResult<TaskRecord> {
         let row = sqlx::query(
             "SELECT id, local_project_id, remote_operation_record_id, domain_type, operation_type, \
@@ -244,6 +492,35 @@ impl TaskRepository {
         self.get(task_id).await
     }
 
+    pub async fn link_operation_in_state(
+        &self,
+        task_id: &str,
+        operation_id: &str,
+        expected_state: TaskState,
+    ) -> AppResult<TaskRecord> {
+        if task_id.trim().is_empty() || operation_id.trim().is_empty() {
+            return Err(AppError::InvalidConfig("任务与操作关联参数无效".into()));
+        }
+        let now = timestamp();
+        let result = sqlx::query(concat!(
+            "UPDATE local_task SET remote_operation_record_id = ?, sequence = sequence + 1, ",
+            "updated_at = ? WHERE id = ? AND remote_operation_record_id IS NULL AND state = ?"
+        ))
+        .bind(operation_id)
+        .bind(&now)
+        .bind(task_id)
+        .bind(expected_state.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| AppError::database("按状态关联本地任务与共享操作", &error))?;
+        if result.rows_affected() != 1 {
+            return Err(AppError::Conflict(format!(
+                "任务状态已变化，不能关联共享操作：{task_id}"
+            )));
+        }
+        self.get(task_id).await
+    }
+
     pub async fn list_recent(
         &self,
         local_project_id: &str,
@@ -267,6 +544,29 @@ impl TaskRepository {
         .await
         .map_err(|error| AppError::database("查询本地任务列表", &error))?;
         rows.into_iter().map(map_task).collect()
+    }
+
+    pub async fn clear_terminal_for_project(&self, local_project_id: &str) -> AppResult<u32> {
+        if local_project_id.trim().is_empty() {
+            return Err(AppError::InvalidConfig("项目ID不能为空".into()));
+        }
+        let result = sqlx::query(
+            "DELETE FROM local_task WHERE local_project_id = ? AND state IN \
+             ('cancelled', 'succeeded', 'partially_succeeded', 'failed', 'interrupted') \
+             AND NOT (operation_type = 'deployment_preflight' AND state = 'succeeded' \
+             AND EXISTS (SELECT 1 FROM local_task_target target \
+             WHERE target.local_task_id = local_task.id \
+             AND target.resource_type = 'preflight_internal' \
+             AND target.resource_key = 'common' \
+             AND target.state = 'succeeded' \
+             AND target.message_code = 'PREFLIGHT_TARGET_PASSED'))",
+        )
+        .bind(local_project_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| AppError::database("清空已结束任务记录", &error))?;
+        u32::try_from(result.rows_affected())
+            .map_err(|_| AppError::InvalidConfig("已清空任务数量超出范围".into()))
     }
 
     pub async fn list_artifact_cleanup_candidates(&self) -> AppResult<Vec<TaskRecord>> {
@@ -401,6 +701,33 @@ impl TaskRepository {
             .await
             .map_err(|error| AppError::database("提交更新任务目标事务", &error))?;
         Ok(sequence)
+    }
+
+    pub async fn initialize_target_progress(
+        &self,
+        task_id: &str,
+        stage: &str,
+        progress_total: u64,
+    ) -> AppResult<()> {
+        if task_id.trim().is_empty() || stage.trim().is_empty() || progress_total == 0 {
+            return Err(AppError::InvalidConfig("任务目标初始化参数无效".into()));
+        }
+        let now = timestamp();
+        let result = sqlx::query(
+            "UPDATE local_task_target SET state = 'pending', stage = ?, progress = 0, \
+             progress_current = 0, progress_total = ?, updated_at = ? WHERE local_task_id = ?",
+        )
+        .bind(stage)
+        .bind(to_i64(progress_total, "任务目标总进度")?)
+        .bind(&now)
+        .bind(task_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| AppError::database("初始化任务目标进度", &error))?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound(format!("任务目标不存在：{task_id}")));
+        }
+        Ok(())
     }
 
     pub async fn save_step(&self, task_id: &str, step: TaskStepWrite) -> AppResult<u64> {
@@ -582,7 +909,7 @@ impl TaskRepository {
     pub async fn recover_interrupted(&self) -> AppResult<Vec<String>> {
         let ids = sqlx::query_scalar::<_, String>(
             "SELECT id FROM local_task WHERE state IN \
-             ('queued', 'running', 'cancelling') ORDER BY id",
+             ('checking', 'queued', 'running', 'cancelling') ORDER BY id",
         )
         .fetch_all(&self.pool)
         .await
@@ -805,6 +1132,13 @@ fn to_u32(value: i64, field: &'static str) -> AppResult<u32> {
 
 fn to_i64(value: u64, field: &'static str) -> AppResult<i64> {
     i64::try_from(value).map_err(|_| AppError::InvalidConfig(format!("{field}超出范围")))
+}
+
+fn validate_snapshot_sha256(value: &str) -> AppResult<()> {
+    if value.len() != 64 || !value.bytes().all(|item| item.is_ascii_hexdigit()) {
+        return Err(AppError::InvalidConfig("部署检查快照校验码无效".into()));
+    }
+    Ok(())
 }
 
 fn timestamp() -> String {

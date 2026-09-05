@@ -7,5 +7,6 @@ pub mod project_access;
 pub mod project_management;
 pub mod remote_command;
 pub mod remote_session;
+pub mod service_inspection;
 pub mod task_event;
 pub mod task_log;

@@ -9,10 +9,14 @@ use crate::application::ports::deployment_progress::{
 };
 use crate::application::ports::task_event::{TaskEventInput, TaskEventSink};
 use crate::core::error::{AppError, AppResult};
+use crate::domain::aio::service_check::ServiceCheckReport;
 use crate::infrastructure::local_sqlite::task_repository::{
     TargetUpdate, TaskRepository, TaskStepWrite,
 };
 use crate::infrastructure::logging::task_event_pipeline::TaskEventPipeline;
+
+pub const DEPLOYMENT_REMOTE_PROGRESS_START: u64 = 10;
+pub const DEPLOYMENT_PROGRESS_TOTAL: u64 = 100;
 
 enum ProgressMessage {
     Event(DeploymentProgressEvent),
@@ -22,16 +26,44 @@ enum ProgressMessage {
 pub struct TaskProgressReporter {
     sender: mpsc::UnboundedSender<ProgressMessage>,
     fatal: Arc<Mutex<Option<String>>>,
+    progress_range: Option<ProgressRange>,
+    service_checks: Mutex<BTreeMap<String, ServiceCheckReport>>,
+}
+
+#[derive(Clone, Copy)]
+struct ProgressRange {
+    start: u64,
+    end: u64,
+    total: u64,
 }
 
 impl DeploymentProgressSink for TaskProgressReporter {
-    fn emit(&self, event: DeploymentProgressEvent) -> AppResult<()> {
+    fn service_check(&self, mac: &str, report: ServiceCheckReport) -> AppResult<()> {
+        report.validate()?;
+        self.service_checks
+            .lock()
+            .map_err(|_| AppError::Conflict("服务检查结果锁已损坏".into()))?
+            .insert(mac.into(), report);
+        Ok(())
+    }
+
+    fn emit(&self, mut event: DeploymentProgressEvent) -> AppResult<()> {
         if event.mac.trim().is_empty()
             || event.stage.trim().is_empty()
             || event.message_code.trim().is_empty()
             || (event.progress_total > 0 && event.progress_current > event.progress_total)
         {
             return Err(AppError::InvalidConfig("部署进度事件参数无效".into()));
+        }
+        if let Some(range) = self.progress_range
+            && event.progress_total > 0
+        {
+            let span = range.end.saturating_sub(range.start);
+            event.progress_current = range
+                .start
+                .saturating_add(span.saturating_mul(event.progress_current) / event.progress_total)
+                .min(range.end);
+            event.progress_total = range.total;
         }
         if let Some(error) = self
             .fatal
@@ -47,6 +79,15 @@ impl DeploymentProgressSink for TaskProgressReporter {
     }
 }
 
+impl TaskProgressReporter {
+    pub fn service_checks(&self) -> AppResult<BTreeMap<String, ServiceCheckReport>> {
+        self.service_checks
+            .lock()
+            .map(|reports| reports.clone())
+            .map_err(|_| AppError::Conflict("服务检查结果锁已损坏".into()))
+    }
+}
+
 pub struct TaskProgressGuard {
     pub sink: Arc<TaskProgressReporter>,
     join: JoinHandle<()>,
@@ -59,6 +100,37 @@ impl TaskProgressGuard {
         repository: TaskRepository,
         pipeline: TaskEventPipeline,
         secret_values: Vec<String>,
+    ) -> Self {
+        Self::start_with_range(task_id, repository, pipeline, secret_values, None)
+    }
+
+    pub fn start_scaled(
+        task_id: String,
+        repository: TaskRepository,
+        pipeline: TaskEventPipeline,
+        secret_values: Vec<String>,
+        start: u64,
+        end: u64,
+        total: u64,
+    ) -> AppResult<Self> {
+        if total == 0 || start > end || end > total {
+            return Err(AppError::InvalidConfig("部署进度映射范围无效".into()));
+        }
+        Ok(Self::start_with_range(
+            task_id,
+            repository,
+            pipeline,
+            secret_values,
+            Some(ProgressRange { start, end, total }),
+        ))
+    }
+
+    fn start_with_range(
+        task_id: String,
+        repository: TaskRepository,
+        pipeline: TaskEventPipeline,
+        secret_values: Vec<String>,
+        progress_range: Option<ProgressRange>,
     ) -> Self {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let fatal = Arc::new(Mutex::new(None));
@@ -85,6 +157,8 @@ impl TaskProgressGuard {
             sink: Arc::new(TaskProgressReporter {
                 sender,
                 fatal: fatal.clone(),
+                progress_range,
+                service_checks: Mutex::new(BTreeMap::new()),
             }),
             join,
             fatal,
@@ -115,6 +189,10 @@ async fn persist_event(
     event: DeploymentProgressEvent,
 ) -> AppResult<()> {
     let mut event = event;
+    let transient_progress = matches!(
+        event.message_code.as_str(),
+        "SFTP_UPLOAD_PROGRESS" | "LOCAL_ARTIFACT_PROGRESS" | "LOCAL_ARCHIVE_PROGRESS"
+    );
     event.message_code = pipeline.redact_text(&event.message_code);
     event.message = event
         .message
@@ -136,7 +214,9 @@ async fn persist_event(
             },
         )
         .await?;
-    if let (Some(step_code), Some(step_state)) = (event.step_code.as_deref(), event.step_state) {
+    if !transient_progress
+        && let (Some(step_code), Some(step_state)) = (event.step_code.as_deref(), event.step_state)
+    {
         repository
             .save_step(
                 task_id,
@@ -157,33 +237,33 @@ async fn persist_event(
             )
             .await?;
     }
-    pipeline
-        .emit(
-            task_id,
-            TaskEventInput {
-                resource_type: Some("aio".into()),
-                resource_key: Some(event.mac),
-                stage: event.stage,
-                status: event
-                    .step_state
-                    .map(|state| state.as_str())
-                    .unwrap_or_else(|| event.target_state.as_str())
-                    .into(),
-                progress_current: Some(event.progress_current),
-                progress_total: Some(event.progress_total),
-                level: event.level,
-                message_code: event.message_code,
-                message_params: BTreeMap::new(),
-                message: event.message,
-            },
-        )
-        .await?;
+    let input = TaskEventInput {
+        resource_type: Some("aio".into()),
+        resource_key: Some(event.mac),
+        stage: event.stage,
+        status: event
+            .step_state
+            .map(|state| state.as_str())
+            .unwrap_or_else(|| event.target_state.as_str())
+            .into(),
+        progress_current: Some(event.progress_current),
+        progress_total: Some(event.progress_total),
+        level: event.level,
+        message_code: event.message_code,
+        message_params: BTreeMap::new(),
+        message: event.message,
+    };
+    if transient_progress {
+        pipeline.emit_transient(task_id, input).await?;
+    } else {
+        pipeline.emit(task_id, input).await?;
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TaskProgressGuard, TaskProgressReporter};
+    use super::{ProgressMessage, ProgressRange, TaskProgressGuard, TaskProgressReporter};
     use crate::application::ports::deployment_progress::{
         DeploymentProgressEvent, DeploymentProgressSink,
     };
@@ -200,6 +280,8 @@ mod tests {
         let reporter = TaskProgressReporter {
             sender,
             fatal: Default::default(),
+            progress_range: None,
+            service_checks: Default::default(),
         };
         let error = reporter
             .emit(DeploymentProgressEvent {
@@ -216,6 +298,40 @@ mod tests {
             })
             .expect_err("progress over total must fail");
         assert!(error.to_string().contains("参数无效"));
+    }
+
+    #[test]
+    fn reporter_maps_remote_progress_into_reserved_range() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let reporter = TaskProgressReporter {
+            sender,
+            fatal: Default::default(),
+            progress_range: Some(ProgressRange {
+                start: 10,
+                end: 100,
+                total: 100,
+            }),
+            service_checks: Default::default(),
+        };
+        reporter
+            .emit(DeploymentProgressEvent {
+                mac: "001122334455".into(),
+                stage: "upload".into(),
+                step_code: None,
+                step_state: None,
+                target_state: TargetState::Running,
+                progress_current: 50,
+                progress_total: 100,
+                level: TaskEventLevel::Info,
+                message_code: "UPLOAD_PROGRESS".into(),
+                message: None,
+            })
+            .expect("mapped progress");
+        let ProgressMessage::Event(event) = receiver.try_recv().expect("queued event") else {
+            panic!("expected progress event");
+        };
+        assert_eq!(event.progress_current, 55);
+        assert_eq!(event.progress_total, 100);
     }
 
     #[tokio::test]
@@ -266,9 +382,11 @@ mod tests {
                 .expect("transition");
             state = next;
         }
+        let event_bus = TaskEventBus::new(16).expect("bus");
+        let mut events = event_bus.subscribe();
         let pipeline = TaskEventPipeline::new(
             repository.clone(),
-            TaskEventBus::new(16).expect("bus"),
+            event_bus,
             SensitiveValueRedactor::default(),
         );
         let guard = TaskProgressGuard::start(
@@ -301,16 +419,17 @@ mod tests {
             .remove(0);
         assert_eq!(target.stage, "upload");
         assert_eq!(target.progress_current, 42);
-        let step = repository
-            .steps("task-progress")
-            .await
-            .expect("steps")
-            .remove(0);
-        assert_eq!(step.state, StepState::Running);
-        assert_eq!(step.message.as_deref(), Some("output=[REDACTED]"));
-        let log = tokio::fs::read_to_string(log_path).await.expect("log");
-        assert!(!log.contains("stage75b-secret"));
-        assert!(log.contains("[REDACTED]"));
+        assert!(
+            repository
+                .steps("task-progress")
+                .await
+                .expect("steps")
+                .is_empty()
+        );
+        let event = events.recv().await.expect("transient progress event");
+        assert_eq!(event.message_code, "SFTP_UPLOAD_PROGRESS");
+        assert_eq!(event.message.as_deref(), Some("output=[REDACTED]"));
+        assert!(!log_path.exists());
         store.close().await;
     }
 }

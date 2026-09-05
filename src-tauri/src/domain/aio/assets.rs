@@ -27,6 +27,8 @@ pub struct ImportSelection {
 #[serde(rename_all = "camelCase")]
 pub struct PlatformRecordIssue {
     pub platform_aio_id: String,
+    pub name: String,
+    pub ip: String,
     pub code: String,
     pub message: String,
     pub raw_mac: String,

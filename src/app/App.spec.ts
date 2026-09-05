@@ -9,8 +9,42 @@ import { configureDataDirectoryAdapter } from "@/shared/api/dataDirectoryAdapter
 import { configureDiagnosticsAdapter } from "@/shared/api/diagnosticsAdapter";
 import { FixtureWorkbenchAdapter } from "@/dev-fixtures/workbenchFixtureAdapter";
 import { configureWorkbenchAdapter } from "@/shared/api/workbenchAdapter";
+import type { WorkbenchSchemaStatus } from "@/shared/model/project";
 
 const fullAppMountTimeout = 30_000;
+
+function schemaStatus(state: WorkbenchSchemaStatus["state"]): WorkbenchSchemaStatus {
+  return {
+    state,
+    currentVersion: state === "upgrade_required" ? 1 : undefined,
+    latestAvailableVersion: 2,
+    appliedMigrationCount: state === "ready" ? 2 : 1,
+    failedMigrationCount: 0,
+    missingTables: state === "incompatible" ? ["aio_node"] : [],
+    forbiddenTables: [],
+    message: "仅供测试的内部结构信息"
+  };
+}
+
+class SchemaStatusAdapter extends FixtureWorkbenchAdapter {
+  constructor(private readonly currentSchemaStatus: WorkbenchSchemaStatus) {
+    super();
+  }
+
+  override async getWorkbenchSchemaStatus(): Promise<WorkbenchSchemaStatus> {
+    return structuredClone(this.currentSchemaStatus);
+  }
+}
+
+async function openCurrentProjectEditor(wrapper: ReturnType<typeof mount>) {
+  await wrapper.get('[data-testid="project-switcher"]').trigger("click");
+  await flushPromises();
+  const editButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+    .find((button) => button.textContent?.trim() === "编辑当前项目");
+  expect(editButton).toBeDefined();
+  editButton!.click();
+  await flushPromises();
+}
 
 describe("desktop demo shell", () => {
   it("uses Chinese inputs and keeps the refreshed login session identifier internal", async () => {
@@ -104,6 +138,16 @@ describe("desktop demo shell", () => {
     expect(wrapper.text()).toContain("发布参数");
     expect(wrapper.text()).toContain("部署升级");
     expect(wrapper.text()).toContain("深圳湾智慧园区");
+    await wrapper.get('[data-testid="open-about"]').trigger("click");
+    await flushPromises();
+    expect(document.body.textContent).toContain("一体机清单管理、发布参数配置、部署升级和操作记录查询");
+    expect(document.body.textContent).toContain("客户端标识");
+    expect(document.body.textContent).toContain("DEMO-PC-001122AABBCC-192.0.2.142");
+    expect(document.body.textContent).not.toContain("com.inxaiot.desk-buddy");
+    expect(document.body.textContent).toContain("作者");
+    expect(document.body.textContent).toContain("凌封");
+    expect(document.body.textContent).not.toContain("Tauri Real Adapter");
+    expect(document.body.textContent).not.toContain("Agent SHA-256");
     wrapper.unmount();
   }, fullAppMountTimeout);
 
@@ -136,8 +180,71 @@ describe("desktop demo shell", () => {
 
     await wrapper.get('[data-testid="open-about"]').trigger("click");
     await flushPromises();
-    expect(document.body.textContent).toContain("diagnostics unavailable");
-    expect(document.body.textContent).toContain("重新读取诊断");
+    expect(document.body.textContent).toContain("暂时无法读取");
+    expect(document.body.textContent).not.toContain("diagnostics unavailable");
     wrapper.unmount();
+  }, fullAppMountTimeout);
+
+  it("hides schema metadata when the current project is compatible", async () => {
+    configureWorkbenchAdapter(new SchemaStatusAdapter(schemaStatus("ready")));
+    const { default: App } = await import("@/app/App.vue");
+    await router.push("/aio/nodes");
+    await router.isReady();
+    const wrapper = mount(App, {
+      attachTo: document.body,
+      global: { plugins: [createPinia(), router, i18n] }
+    });
+    try {
+      await flushPromises();
+      await openCurrentProjectEditor(wrapper);
+      expect(document.querySelector('[data-testid="schema-maintenance"]')).toBeNull();
+      expect(document.body.textContent).not.toContain("当前版本");
+      expect(document.body.textContent).not.toContain("可用版本");
+      expect(document.body.textContent).not.toContain("检查结构");
+    } finally {
+      wrapper.unmount();
+    }
+  }, fullAppMountTimeout);
+
+  it("shows only a user-facing compatibility action when an upgrade is required", async () => {
+    configureWorkbenchAdapter(new SchemaStatusAdapter(schemaStatus("upgrade_required")));
+    const { default: App } = await import("@/app/App.vue");
+    await router.push("/aio/nodes");
+    await router.isReady();
+    const wrapper = mount(App, {
+      attachTo: document.body,
+      global: { plugins: [createPinia(), router, i18n] }
+    });
+    try {
+      await flushPromises();
+      await openCurrentProjectEditor(wrapper);
+      expect(document.body.textContent).toContain("工作台版本和平台表结构不兼容");
+      expect(document.body.textContent).toContain("初始化/升级");
+      expect(document.body.textContent).not.toContain("当前版本");
+      expect(document.body.textContent).not.toContain("可用版本");
+      expect(document.body.textContent).not.toContain("仅供测试的内部结构信息");
+    } finally {
+      wrapper.unmount();
+    }
+  }, fullAppMountTimeout);
+
+  it("does not offer schema migration for an incompatible project", async () => {
+    configureWorkbenchAdapter(new SchemaStatusAdapter(schemaStatus("incompatible")));
+    const { default: App } = await import("@/app/App.vue");
+    await router.push("/aio/nodes");
+    await router.isReady();
+    const wrapper = mount(App, {
+      attachTo: document.body,
+      global: { plugins: [createPinia(), router, i18n] }
+    });
+    try {
+      await flushPromises();
+      await openCurrentProjectEditor(wrapper);
+      expect(document.body.textContent).toContain("工作台版本和平台表结构不兼容");
+      expect(document.querySelector('[data-testid="schema-upgrade"]')).toBeNull();
+      expect(document.body.textContent).toContain("重新检查");
+    } finally {
+      wrapper.unmount();
+    }
   }, fullAppMountTimeout);
 });

@@ -4,8 +4,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::credential_crypto::{
-    CredentialEnvelope, CredentialMetadata, ProjectMasterKey, ReleaseCredentials,
-    decrypt_release_credentials, encrypt_release_credentials,
+    CredentialEnvelope, INXVISION_CREDENTIAL_KEY_VERSION, INXVISION_CREDENTIAL_SCHEME,
+    ReleaseCredentials, decrypt_release_credentials, encrypt_release_credentials,
 };
 use super::error::{FormalError, FormalResult};
 
@@ -14,6 +14,7 @@ use super::error::{FormalError, FormalResult};
 pub struct ReleaseProfileValues {
     pub env_template: String,
     pub compose_template: String,
+    pub host_info_template: String,
     pub platform_host: String,
     pub platform_api_port: u16,
     pub platform_mqtt_host: String,
@@ -34,11 +35,30 @@ pub struct ReleaseProfileWrite {
     pub instance_id: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredReleaseAgentScript {
+    pub content: String,
+    pub version: String,
+    pub protocol_version: String,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReleaseAgentScriptWrite {
+    pub profile_key: String,
+    pub script: StoredReleaseAgentScript,
+    pub expected_version: u64,
+    pub operator_name: String,
+    pub instance_id: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct ReleaseProfileRecord {
     pub profile_key: String,
     pub values: ReleaseProfileValues,
     pub credentials: ReleaseCredentials,
+    pub credentials_reset_required: bool,
+    pub agent_script: Option<StoredReleaseAgentScript>,
     pub version: u64,
     pub updated_by: String,
     pub updated_at: OffsetDateTime,
@@ -54,21 +74,70 @@ impl ReleaseProfileRepository {
         Self { pool }
     }
 
-    pub async fn save(
-        &self,
-        key: &ProjectMasterKey,
-        write: ReleaseProfileWrite,
-    ) -> FormalResult<ReleaseProfileRecord> {
+    pub async fn save(&self, write: ReleaseProfileWrite) -> FormalResult<ReleaseProfileRecord> {
         validate_write(&write)?;
-        let envelope = encrypt_release_credentials(key, &write.credentials)?;
-        self.save_envelope(write, envelope, key).await
+        let envelope = encrypt_release_credentials(&write.credentials)?;
+        self.save_envelope(write, envelope).await
+    }
+
+    pub async fn replace_agent_script(
+        &self,
+        write: ReleaseAgentScriptWrite,
+    ) -> FormalResult<ReleaseProfileRecord> {
+        validate_agent_script_write(&write)?;
+        let now = OffsetDateTime::now_utc();
+        let mut transaction = self.pool.begin().await.map_err(|error| {
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "begin agent script transaction failed");
+            FormalError::LocalDatabase("开始更换一体机脚本事务")
+        })?;
+        let result = sqlx::query(
+            "UPDATE aio_release_profile SET agent_script = ?, agent_version = ?, \
+             agent_protocol_version = ?, agent_sha256 = ?, version = version + 1, \
+             updated_by = ?, updated_at = ? WHERE profile_key = ? AND version = ?",
+        )
+        .bind(&write.script.content)
+        .bind(&write.script.version)
+        .bind(&write.script.protocol_version)
+        .bind(&write.script.sha256)
+        .bind(&write.operator_name)
+        .bind(now)
+        .bind(&write.profile_key)
+        .bind(write.expected_version)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| map_error("更换一体机脚本", error))?;
+        if result.rows_affected() != 1 {
+            return Err(FormalError::Conflict("发布配置已被其他实例更新".into()));
+        }
+        let new_version = write.expected_version + 1;
+        sqlx::query(
+            "INSERT INTO audit_event \
+             (id, domain_type, object_type, object_key, action, operator_name, instance_id, \
+              old_version, new_version, changed_fields_json, created_at) \
+             VALUES (?, 'aio', 'aio_release_profile', ?, 'replace_agent_script', ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::now_v7().to_string())
+        .bind(&write.profile_key)
+        .bind(&write.operator_name)
+        .bind(&write.instance_id)
+        .bind(write.expected_version)
+        .bind(new_version)
+        .bind(serde_json::json!(["agent_script"]).to_string())
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| map_error("记录一体机脚本更换审计", error))?;
+        transaction.commit().await.map_err(|error| {
+            tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "commit agent script transaction failed");
+            FormalError::LocalDatabase("提交一体机脚本更换事务")
+        })?;
+        self.get(&write.profile_key).await
     }
 
     async fn save_envelope(
         &self,
         write: ReleaseProfileWrite,
         envelope: CredentialEnvelope,
-        key: &ProjectMasterKey,
     ) -> FormalResult<ReleaseProfileRecord> {
         let now = OffsetDateTime::now_utc();
         let mut transaction = self.pool.begin().await.map_err(|error| {
@@ -80,7 +149,7 @@ impl ReleaseProfileRepository {
         {
             let result = sqlx::query(
                 "UPDATE aio_release_profile SET env_template = ?, compose_template = ?, \
-                 platform_host = ?, platform_api_port = ?, platform_mqtt_host = ?, \
+                 host_info_template = ?, platform_host = ?, platform_api_port = ?, platform_mqtt_host = ?, \
                  platform_mqtt_port = ?, ssh_port = ?, ssh_timeout_seconds = ?, \
                  aio_data_root = ?, aio_deploy_root = ?, credential_scheme = ?, \
                  credential_key_version = ?, credential_salt = ?, credential_nonce = ?, \
@@ -89,6 +158,7 @@ impl ReleaseProfileRepository {
             )
             .bind(&write.values.env_template)
             .bind(&write.values.compose_template)
+            .bind(&write.values.host_info_template)
             .bind(&write.values.platform_host)
             .bind(u32::from(write.values.platform_api_port))
             .bind(&write.values.platform_mqtt_host)
@@ -116,15 +186,16 @@ impl ReleaseProfileRepository {
         } else {
             sqlx::query(
                 "INSERT INTO aio_release_profile \
-                 (profile_key, env_template, compose_template, platform_host, platform_api_port, \
+                 (profile_key, env_template, compose_template, host_info_template, platform_host, platform_api_port, \
                   platform_mqtt_host, platform_mqtt_port, ssh_port, ssh_timeout_seconds, \
                   aio_data_root, aio_deploy_root, credential_scheme, credential_key_version, \
                   credential_salt, credential_nonce, credential_ciphertext, version, updated_by, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
             )
             .bind(&write.profile_key)
             .bind(&write.values.env_template)
             .bind(&write.values.compose_template)
+            .bind(&write.values.host_info_template)
             .bind(&write.values.platform_host)
             .bind(u32::from(write.values.platform_api_port))
             .bind(&write.values.platform_mqtt_host)
@@ -148,6 +219,7 @@ impl ReleaseProfileRepository {
         let changed_fields = serde_json::json!([
             "env_template",
             "compose_template",
+            "host_info_template",
             "platform_host",
             "platform_api_port",
             "platform_mqtt_host",
@@ -180,16 +252,13 @@ impl ReleaseProfileRepository {
             tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "commit release profile transaction failed");
             FormalError::LocalDatabase("提交发布配置事务")
         })?;
-        self.get(key, &write.profile_key).await
+        self.get(&write.profile_key).await
     }
 
-    pub async fn get(
-        &self,
-        key: &ProjectMasterKey,
-        profile_key: &str,
-    ) -> FormalResult<ReleaseProfileRecord> {
+    pub async fn get(&self, profile_key: &str) -> FormalResult<ReleaseProfileRecord> {
         let row = sqlx::query(
-            "SELECT profile_key, env_template, compose_template, platform_host, platform_api_port, \
+            "SELECT profile_key, env_template, compose_template, host_info_template, agent_script, agent_version, \
+             agent_protocol_version, agent_sha256, platform_host, platform_api_port, \
              platform_mqtt_host, platform_mqtt_port, ssh_port, ssh_timeout_seconds, \
              aio_data_root, aio_deploy_root, credential_scheme, credential_key_version, \
              credential_salt, credential_nonce, credential_ciphertext, version, updated_by, updated_at \
@@ -200,26 +269,60 @@ impl ReleaseProfileRepository {
         .await
         .map_err(|error| map_error("读取发布配置", error))?
         .ok_or_else(|| FormalError::NotFound(format!("发布配置不存在：{profile_key}")))?;
-        let salt = fixed_array::<16>(
-            row.try_get("credential_salt")
-                .map_err(|_| FormalError::LocalDatabase("解析发布凭据盐值"))?,
-        )?;
-        let nonce = fixed_array::<12>(
-            row.try_get("credential_nonce")
-                .map_err(|_| FormalError::LocalDatabase("解析发布凭据随机数"))?,
-        )?;
-        let envelope = CredentialEnvelope {
-            scheme: row
-                .try_get("credential_scheme")
-                .map_err(|_| FormalError::LocalDatabase("解析凭据加密格式"))?,
-            key_version: row
-                .try_get("credential_key_version")
-                .map_err(|_| FormalError::LocalDatabase("解析凭据密钥版本"))?,
-            salt,
-            nonce,
-            ciphertext: row
-                .try_get("credential_ciphertext")
-                .map_err(|_| FormalError::LocalDatabase("解析发布凭据密文"))?,
+        let credential_scheme: String = row
+            .try_get("credential_scheme")
+            .map_err(|_| FormalError::LocalDatabase("解析凭据加密格式"))?;
+        let credential_key_version: u32 = row
+            .try_get("credential_key_version")
+            .map_err(|_| FormalError::LocalDatabase("解析凭据密钥版本"))?;
+        let credentials_reset_required = credential_scheme != INXVISION_CREDENTIAL_SCHEME
+            || credential_key_version != INXVISION_CREDENTIAL_KEY_VERSION;
+        let credentials = if credentials_reset_required {
+            empty_release_credentials()
+        } else {
+            let salt = fixed_array::<16>(
+                row.try_get("credential_salt")
+                    .map_err(|_| FormalError::LocalDatabase("解析发布凭据盐值"))?,
+            )?;
+            let nonce = fixed_array::<12>(
+                row.try_get("credential_nonce")
+                    .map_err(|_| FormalError::LocalDatabase("解析发布凭据随机数"))?,
+            )?;
+            let envelope = CredentialEnvelope {
+                scheme: credential_scheme,
+                key_version: credential_key_version,
+                salt,
+                nonce,
+                ciphertext: row
+                    .try_get("credential_ciphertext")
+                    .map_err(|_| FormalError::LocalDatabase("解析发布凭据密文"))?,
+            };
+            decrypt_release_credentials(&envelope)?
+        };
+        let agent_script = match (
+            row.try_get::<Option<String>, _>("agent_script")
+                .map_err(|_| FormalError::LocalDatabase("解析一体机脚本内容"))?,
+            row.try_get::<Option<String>, _>("agent_version")
+                .map_err(|_| FormalError::LocalDatabase("解析一体机脚本版本"))?,
+            row.try_get::<Option<String>, _>("agent_protocol_version")
+                .map_err(|_| FormalError::LocalDatabase("解析一体机脚本协议版本"))?,
+            row.try_get::<Option<String>, _>("agent_sha256")
+                .map_err(|_| FormalError::LocalDatabase("解析一体机脚本哈希"))?,
+        ) {
+            (None, None, None, None) => None,
+            (Some(content), Some(version), Some(protocol_version), Some(sha256)) => {
+                Some(StoredReleaseAgentScript {
+                    content,
+                    version,
+                    protocol_version,
+                    sha256,
+                })
+            }
+            _ => {
+                return Err(FormalError::InvalidConfig(
+                    "项目一体机脚本记录不完整，请重新更换脚本".into(),
+                ));
+            }
         };
         Ok(ReleaseProfileRecord {
             profile_key: row
@@ -232,6 +335,9 @@ impl ReleaseProfileRepository {
                 compose_template: row
                     .try_get("compose_template")
                     .map_err(|_| FormalError::LocalDatabase("解析Compose模板"))?,
+                host_info_template: row
+                    .try_get("host_info_template")
+                    .map_err(|_| FormalError::LocalDatabase("解析host-info模板"))?,
                 platform_host: row
                     .try_get("platform_host")
                     .map_err(|_| FormalError::LocalDatabase("解析平台主机"))?,
@@ -260,7 +366,9 @@ impl ReleaseProfileRepository {
                     .try_get("aio_deploy_root")
                     .map_err(|_| FormalError::LocalDatabase("解析一体机部署目录"))?,
             },
-            credentials: decrypt_release_credentials(key, &envelope)?,
+            credentials,
+            credentials_reset_required,
+            agent_script,
             version: row
                 .try_get("version")
                 .map_err(|_| FormalError::LocalDatabase("解析发布配置版本"))?,
@@ -271,31 +379,6 @@ impl ReleaseProfileRepository {
                 .try_get("updated_at")
                 .map_err(|_| FormalError::LocalDatabase("解析发布配置时间"))?,
         })
-    }
-
-    pub async fn credential_metadata(
-        &self,
-        profile_key: &str,
-    ) -> FormalResult<Option<CredentialMetadata>> {
-        let row = sqlx::query(
-            "SELECT credential_scheme, credential_key_version \
-             FROM aio_release_profile WHERE profile_key = ?",
-        )
-        .bind(profile_key)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| map_error("读取发布凭据元数据", error))?;
-        row.map(|row| {
-            Ok(CredentialMetadata {
-                scheme: row
-                    .try_get("credential_scheme")
-                    .map_err(|_| FormalError::LocalDatabase("解析凭据加密格式"))?,
-                key_version: row
-                    .try_get("credential_key_version")
-                    .map_err(|_| FormalError::LocalDatabase("解析凭据密钥版本"))?,
-            })
-        })
-        .transpose()
     }
 
     pub async fn delete_test_profile(&self, profile_key: &str) -> FormalResult<()> {
@@ -327,6 +410,7 @@ fn validate_write(write: &ReleaseProfileWrite) -> FormalResult<()> {
     if write.profile_key.is_empty()
         || write.values.env_template.is_empty()
         || write.values.compose_template.is_empty()
+        || write.values.host_info_template.is_empty()
         || write.values.platform_host.is_empty()
         || write.values.platform_api_port == 0
         || write.values.platform_mqtt_host.is_empty()
@@ -340,6 +424,41 @@ fn validate_write(write: &ReleaseProfileWrite) -> FormalResult<()> {
         return Err(FormalError::InvalidConfig("发布配置参数不完整".into()));
     }
     Ok(())
+}
+
+fn validate_agent_script_write(write: &ReleaseAgentScriptWrite) -> FormalResult<()> {
+    if write.profile_key.is_empty()
+        || write.expected_version == 0
+        || write.operator_name.is_empty()
+        || write.instance_id.is_empty()
+        || write.script.content.is_empty()
+        || write.script.version.is_empty()
+        || write.script.protocol_version.is_empty()
+        || write.script.sha256.len() != 64
+        || !write
+            .script
+            .sha256
+            .bytes()
+            .all(|value| value.is_ascii_hexdigit())
+    {
+        return Err(FormalError::InvalidConfig(
+            "一体机脚本保存参数不完整".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn empty_release_credentials() -> ReleaseCredentials {
+    ReleaseCredentials {
+        platform_auth_key: String::new(),
+        platform_mqtt_user: String::new(),
+        platform_mqtt_password: String::new(),
+        aio_mqtt_user: String::new(),
+        aio_mqtt_password: String::new(),
+        ssh_user: String::new(),
+        ssh_password: None,
+        ssh_private_key: None,
+    }
 }
 
 fn fixed_array<const N: usize>(value: Vec<u8>) -> FormalResult<[u8; N]> {

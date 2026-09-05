@@ -89,27 +89,24 @@ impl PlatformAioRepository {
             let id = row
                 .try_get::<String, _>("id_text")
                 .map_err(|error| AppError::database("解析平台一体机ID", &error))?;
-            let raw_mac = row
-                .try_get::<String, _>("mac_text")
-                .map_err(|error| AppError::database("解析平台一体机MAC", &error))?;
-            let mac = match MacAddress::parse(&raw_mac) {
-                Ok(mac) => mac,
-                Err(_) => {
-                    snapshot.issues.push(PlatformRecordIssue {
-                        platform_aio_id: id,
-                        code: "PLATFORM_MAC_INVALID".into(),
-                        message: "平台一体机 MAC 为空或格式无效，无法参与资产匹配".into(),
-                        raw_mac,
-                    });
-                    continue;
-                }
-            };
             let name: String = row
                 .try_get("name_text")
                 .map_err(|error| AppError::database("解析平台一体机名称", &error))?;
             let ip: String = row
                 .try_get("ip_text")
                 .map_err(|error| AppError::database("解析平台一体机IP", &error))?;
+            let raw_mac = row
+                .try_get::<String, _>("mac_text")
+                .map_err(|error| AppError::database("解析平台一体机MAC", &error))?;
+            let mac = match MacAddress::parse(&raw_mac) {
+                Ok(mac) => mac,
+                Err(_) => {
+                    snapshot
+                        .issues
+                        .push(invalid_mac_issue(id, name, ip, raw_mac));
+                    continue;
+                }
+            };
             let last_beat_text: Option<String> = row
                 .try_get("last_beat_text")
                 .map_err(|error| AppError::database("解析平台心跳时间", &error))?;
@@ -152,9 +149,29 @@ impl PlatformAioRepository {
     }
 }
 
+fn invalid_mac_issue(
+    platform_aio_id: String,
+    name: String,
+    ip: String,
+    raw_mac: String,
+) -> PlatformRecordIssue {
+    PlatformRecordIssue {
+        platform_aio_id,
+        name,
+        ip,
+        code: "PLATFORM_MAC_INVALID".into(),
+        message: if raw_mac.trim().is_empty() {
+            "未填写 MAC 地址".into()
+        } else {
+            "MAC 地址格式无效".into()
+        },
+        raw_mac,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::PLATFORM_AIO_SELECT;
+    use super::{PLATFORM_AIO_SELECT, invalid_mac_issue};
 
     #[test]
     fn platform_adapter_statement_is_strictly_read_only() {
@@ -166,5 +183,30 @@ mod tests {
             assert!(!normalized.contains(forbidden));
         }
         assert!(normalized.contains("FROM OP_EDGE_AIO_SERVER"));
+    }
+
+    #[test]
+    fn invalid_mac_issue_keeps_the_platform_record_locator() {
+        let issue = invalid_mac_issue(
+            "42".into(),
+            "东区弱电间".into(),
+            "192.168.3.42".into(),
+            "bad-mac".into(),
+        );
+        assert_eq!(issue.platform_aio_id, "42");
+        assert_eq!(issue.name, "东区弱电间");
+        assert_eq!(issue.ip, "192.168.3.42");
+        assert_eq!(issue.raw_mac, "bad-mac");
+        assert_eq!(issue.message, "MAC 地址格式无效");
+        assert_eq!(
+            invalid_mac_issue(
+                "43".into(),
+                "西区弱电间".into(),
+                "192.168.3.43".into(),
+                "".into()
+            )
+            .message,
+            "未填写 MAC 地址"
+        );
     }
 }

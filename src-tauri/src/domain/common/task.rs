@@ -75,7 +75,14 @@ impl TaskState {
         matches!(
             (self, next),
             (Self::Draft, Self::Checking)
-                | (Self::Checking, Self::CheckFailed | Self::Ready)
+                | (
+                    Self::Checking,
+                    Self::CheckFailed
+                        | Self::Ready
+                        | Self::Succeeded
+                        | Self::Failed
+                        | Self::Interrupted
+                )
                 | (Self::CheckFailed, Self::Checking)
                 | (Self::Ready, Self::Queued)
                 | (Self::Queued, Self::Running | Self::Cancelled)

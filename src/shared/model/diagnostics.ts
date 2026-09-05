@@ -1,4 +1,5 @@
 export interface SystemDiagnostics {
+  clientInstanceId: string;
   applicationVersion: string;
   sourceCommit: string;
   localSchemaVersion: string;

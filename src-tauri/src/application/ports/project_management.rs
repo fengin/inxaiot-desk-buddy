@@ -1,7 +1,6 @@
 use crate::core::error::AppResult;
 use crate::domain::aio::release_profile::{
-    ReleaseMasterKeyOperationResult, ReleaseMasterKeyTransferRequest, ReleaseProfileDraft,
-    ReleaseProfileView,
+    ReleaseAgentScriptReplaceRequest, ReleaseProfileDraft, ReleaseProfileView,
 };
 use crate::domain::common::project::{
     ConfirmHostKeyRequest, HostKeyCaptureRequest, HostKeyObservation, PlatformLoginChallenge,
@@ -43,16 +42,12 @@ pub trait ReleaseProfileManagementPort: Send + Sync {
         project_id: &str,
         draft: ReleaseProfileDraft,
     ) -> AppResult<ReleaseProfileView>;
-    async fn export_release_master_key(
+    async fn replace_release_agent_script(
         &self,
         project_id: &str,
-        request: ReleaseMasterKeyTransferRequest,
-    ) -> AppResult<ReleaseMasterKeyOperationResult>;
-    async fn import_release_master_key(
-        &self,
-        project_id: &str,
-        request: ReleaseMasterKeyTransferRequest,
-    ) -> AppResult<ReleaseMasterKeyOperationResult>;
+        request: ReleaseAgentScriptReplaceRequest,
+    ) -> AppResult<ReleaseProfileView>;
+    async fn open_release_agent_script(&self, project_id: &str) -> AppResult<()>;
 }
 
 #[allow(async_fn_in_trait)]

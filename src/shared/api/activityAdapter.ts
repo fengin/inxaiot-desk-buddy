@@ -17,6 +17,8 @@ export interface ActivityAdapter {
     newestFirst: boolean
   ): Promise<ActivityLogPage>;
   cancelTask(taskId: string): Promise<ActivityTask>;
+  clearFinishedTasks(projectId: string): Promise<number>;
+  clearTaskLogs(taskId: string): Promise<void>;
   listen(handler: (event: TaskEventPayload) => void): Promise<() => void>;
 }
 

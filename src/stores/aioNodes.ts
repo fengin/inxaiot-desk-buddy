@@ -13,6 +13,7 @@ import type {
   PlatformRecordIssue
 } from "@/shared/model/aio";
 import { usePreferencesStore } from "@/stores/preferences";
+import { useActivityStore } from "@/stores/activity";
 
 const emptyStats = (): AioNodeStats => ({ total: 0, online: 0, offline: 0, pending: 0, conflicts: 0 });
 const SELECTION_PAGE_SIZE = 100;
@@ -20,6 +21,7 @@ const MAX_SELECTION_NODES = 10_000;
 
 export const useAioNodesStore = defineStore("aio-nodes", () => {
   const preferences = usePreferencesStore();
+  const activity = useActivityStore();
   const realBackend = useAioAdapter().real;
   const projectId = ref("");
   const nodes = ref<AioNodeListItem[]>([]);
@@ -38,6 +40,9 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
   const selectionNodes = ref<AioNodeListItem[]>([]);
   const selectionLoading = ref(false);
   const importLoading = ref(false);
+  const serviceInspections = ref<Record<string, { projectId: string; mac: string; taskId?: string }>>({});
+  let listSearch = "";
+  let listState = "all";
   let listRequest = 0;
   let detailRequest = 0;
   let importRequest = 0;
@@ -62,6 +67,8 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
       selectionNodes.value = [];
     }
     projectId.value = nextProjectId;
+    listSearch = search;
+    listState = state;
     loading.value = true;
     error.value = "";
     try {
@@ -147,6 +154,7 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
     const request = ++detailRequest;
     const expectedProjectId = projectId.value;
     detailLoading.value = true;
+    if (detail.value?.node.mac !== mac) detail.value = undefined;
     try {
       const result = await useAioAdapter().getNodeDetail(expectedProjectId, mac);
       if (request === detailRequest && projectId.value === expectedProjectId) {
@@ -160,6 +168,63 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
       }
     } finally {
       if (request === detailRequest) detailLoading.value = false;
+    }
+  }
+
+  function inspectionKey(mac: string, expectedProjectId = projectId.value) {
+    return `${expectedProjectId}:${mac.replace(/[:-]/g, "").toUpperCase()}`;
+  }
+
+  function serviceInspection(mac: string) {
+    return serviceInspections.value[inspectionKey(mac)];
+  }
+
+  async function finishServiceInspection(key: string) {
+    const inspection = serviceInspections.value[key];
+    if (!inspection) return;
+    delete serviceInspections.value[key];
+    if (projectId.value !== inspection.projectId) return;
+    const currentDetailMac = detail.value?.node.mac;
+    const currentDetailRequest = detailRequest;
+    await refresh(inspection.projectId, listSearch, listState);
+    if (projectId.value === inspection.projectId && currentDetailMac
+      && detailRequest === currentDetailRequest && detail.value?.node.mac === currentDetailMac) {
+      await loadDetail(currentDetailMac);
+    }
+    if (selectionNodes.value.length && projectId.value === inspection.projectId) {
+      await loadSelectionNodes(inspection.projectId).catch(() => undefined);
+    }
+  }
+
+  watch(() => activity.tasks.map((task) => `${task.id}:${task.state}`).join("|"), () => {
+    for (const [key, inspection] of Object.entries(serviceInspections.value)) {
+      const task = activity.tasks.find((item) => item.id === inspection.taskId && item.projectId === inspection.projectId);
+      if (task && ["succeeded", "partially_succeeded", "failed", "cancelled", "interrupted"].includes(task.state)) {
+        void finishServiceInspection(key);
+      }
+    }
+  });
+
+  async function checkServices(mac: string) {
+    const expectedProjectId = projectId.value;
+    if (!expectedProjectId) throw new Error("请先选择项目");
+    const key = inspectionKey(mac, expectedProjectId);
+    if (serviceInspections.value[key]) return;
+    serviceInspections.value[key] = { projectId: expectedProjectId, mac };
+    try {
+      await activity.start(expectedProjectId);
+      const result = await useAioAdapter().checkServices(expectedProjectId, mac);
+      serviceInspections.value[key] = { projectId: expectedProjectId, mac, taskId: result.taskId };
+      if (projectId.value === expectedProjectId) {
+        await activity.refreshTasks(expectedProjectId);
+        await activity.selectTask(result.taskId);
+        activity.openPanel("logs");
+      }
+      return result;
+    } catch (cause) {
+      delete serviceInspections.value[key];
+      if (projectId.value === expectedProjectId) error.value = commandErrorText(cause, "提交服务检查失败");
+      throw cause;
     }
   }
 
@@ -260,7 +325,7 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
   return {
     realBackend, nodes, stats, total, page, pageSize, refreshedAt, latestImportSessionId,
     loading, error, detail, detailLoading, importPreview, importLoading, platformIssues,
-    selectionNodes, selectionLoading,
-    refresh, loadSelectionNodes, loadDetail, resumeImport, previewImport, updateSelection, applyImport, discardImport
+    selectionNodes, selectionLoading, serviceInspections, serviceInspection,
+    refresh, loadSelectionNodes, loadDetail, checkServices, resumeImport, previewImport, updateSelection, applyImport, discardImport
   };
 });

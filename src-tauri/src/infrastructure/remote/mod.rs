@@ -30,7 +30,7 @@ mod private_key;
 use private_key::SigningKey;
 pub mod observed;
 
-const DEFAULT_TRANSPORT_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_TRANSPORT_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(150);
 const MAX_REMOTE_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
 
@@ -397,10 +397,8 @@ impl FileTransferService for RemoteSession {
                 .flush()
                 .await
                 .map_err(|error| AppError::sftp("刷新远端临时文件", error))?;
-            remote
-                .shutdown()
-                .await
-                .map_err(|error| AppError::sftp("关闭远端临时文件", error))?;
+            let close_failed = remote.shutdown().await.is_err();
+            drop(remote);
             let metadata = sftp
                 .metadata(&temporary_path)
                 .await
@@ -414,6 +412,12 @@ impl FileTransferService for RemoteSession {
             if let Some(expected) = &request.expected_sha256 {
                 self.verify_remote_sha256(&temporary_path, expected, cancellation)
                     .await?;
+            }
+            if close_failed {
+                tracing::warn!(
+                    remote_path = %temporary_path,
+                    "remote file close acknowledgement failed but size and SHA-256 verification succeeded"
+                );
             }
             let backup_path = format!(
                 "{}.inxaiot-backup.{}",
@@ -619,6 +623,24 @@ impl FileTransferService for RemoteSession {
 
 impl RemoteSession {
     async fn open_sftp(&self) -> AppResult<SftpSession> {
+        let mut last_error = None;
+        for attempt in 0..3 {
+            match self.open_sftp_once().await {
+                Ok(session) => return Ok(session),
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
+                }
+            }
+        }
+        Err(last_error.unwrap_or(AppError::Sftp {
+            operation: "初始化SFTP会话",
+        }))
+    }
+
+    async fn open_sftp_once(&self) -> AppResult<SftpSession> {
         let channel = self
             .handle
             .channel_open_session()

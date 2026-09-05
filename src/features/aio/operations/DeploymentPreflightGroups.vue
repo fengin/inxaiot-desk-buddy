@@ -37,8 +37,8 @@ function toggleGroup(key: string) {
       <div v-if="expandedGroups.has(group.key)" :id="'preflight-details-' + group.key" class="preflight-group-details">
         <div v-for="item in group.items" :key="item.key" class="preflight-item-row" data-testid="preflight-business-check">
           <span class="preflight-item-label">{{ item.label }}</span>
-          <div class="preflight-item-description"><span>{{ item.message }}</span>
-            <span v-for="issue in item.issues" :key="issue.code" class="preflight-issue">
+          <div class="preflight-item-description"><span v-if="item.message">{{ item.message }}</span>
+            <span v-for="issue in item.issues" :key="issue.code" class="preflight-issue" :class="issue.status">
               <span>{{ issue.code === 'host_key_changed' ? '连接信息与上次不同，已自动记录并继续，无需操作。' : issue.message }}</span>
               <n-button v-if="issue.remediation" size="tiny" quaternary @click="emit('remediate', issue)">{{ issue.remediation.label }}</n-button>
             </span>

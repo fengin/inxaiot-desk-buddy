@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::application::agent_protocol::{agent_exec_request, parse_agent_events};
+use crate::application::agent_protocol::{
+    agent_exec_request, parse_agent_events, parse_service_check_report_at,
+};
 use crate::application::ports::deployment_progress::{
     DeploymentProgressEvent, DeploymentProgressSink, NoopDeploymentProgressSink,
 };
@@ -44,6 +47,7 @@ pub struct RemoteDeploymentConfig {
     pub platform_mqtt_host: String,
     pub platform_mqtt_port: u16,
     pub allow_existing_ports: bool,
+    pub published_ports: Vec<u16>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -456,6 +460,10 @@ where
             )?;
             let mut environment = invocation.environment;
             environment.extend([
+                (
+                    "SERVICE_CHECK_SOURCE".into(),
+                    deployment_check_source(plan.mode).into(),
+                ),
                 ("DATA_ROOT".into(), config.data_root.clone()),
                 ("DEPLOY_ROOT".into(), config.deploy_root.clone()),
                 ("REMOTE_PACKAGE".into(), remote_artifact.clone()),
@@ -482,6 +490,15 @@ where
                     config.platform_mqtt_port.to_string(),
                 ),
             ]);
+            environment.insert(
+                "PORTS".into(),
+                config
+                    .published_ports
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
             if plan.mode == DeploymentMode::FullUpgrade || config.allow_existing_ports {
                 environment.insert("ALLOW_EXISTING_PORTS".into(), "true".into());
             }
@@ -675,11 +692,16 @@ struct TransferProgressBridge<'a> {
     config: &'a RemoteDeploymentConfig,
     base_bytes: u64,
     total_bytes: u64,
+    high_watermark: AtomicU64,
 }
 
 impl TransferProgressSink for TransferProgressBridge<'_> {
     fn emit(&self, transfer: TransferProgress) -> AppResult<()> {
-        let completed = self.base_bytes.saturating_add(transfer.transferred);
+        let transferred = self
+            .high_watermark
+            .fetch_max(transfer.transferred, Ordering::Relaxed)
+            .max(transfer.transferred);
+        let completed = self.base_bytes.saturating_add(transferred);
         let total = self.total_bytes.max(1);
         let overall = 2_u64.saturating_add(completed.saturating_mul(33) / total);
         emit_progress(
@@ -765,42 +787,107 @@ async fn upload_observed(
     base_bytes: u64,
     total_bytes: u64,
 ) -> AppResult<()> {
+    let file_size = local_file_size(local)?;
+    let file_name = local
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("发布文件");
+    let start_progress = 2_u64.saturating_add(base_bytes.saturating_mul(33) / total_bytes.max(1));
+    emit_progress(
+        progress,
+        config,
+        "upload",
+        Some("upload"),
+        Some(StepState::Running),
+        TargetState::Running,
+        start_progress,
+        TaskEventLevel::Info,
+        "SFTP_UPLOAD_STARTED",
+        Some(format!("开始上传{file_name}（{file_size}字节）")),
+    )?;
     let bridge = TransferProgressBridge {
         progress,
         config,
         base_bytes,
         total_bytes,
+        high_watermark: AtomicU64::new(0),
     };
-    let result = session
-        .upload(
-            &UploadRequest {
-                operation_id: operation_id.into(),
-                local_path: local.to_path_buf(),
-                remote_path: remote.into(),
-                expected_sha256: Some(sha256_file(local)?),
-                overwrite: true,
-                chunk_size: 1024 * 1024,
-                inactivity_timeout: Duration::from_secs(60),
-                minimum_bytes_per_second: 64 * 1024,
-                minimum_total_timeout: Duration::from_secs(120),
-            },
-            cancellation,
-            &bridge,
-        )
-        .await;
-    if let Err(error) = &result {
-        let _ = emit_progress(
+    let request = UploadRequest {
+        operation_id: operation_id.into(),
+        local_path: local.to_path_buf(),
+        remote_path: remote.into(),
+        expected_sha256: Some(sha256_file(local)?),
+        overwrite: true,
+        chunk_size: 1024 * 1024,
+        inactivity_timeout: Duration::from_secs(60),
+        minimum_bytes_per_second: 64 * 1024,
+        minimum_total_timeout: Duration::from_secs(120),
+    };
+    let mut attempt = 1_u8;
+    let result = loop {
+        match session.upload(&request, cancellation, &bridge).await {
+            Ok(()) => break Ok(()),
+            Err(error)
+                if attempt < 3 && matches!(error, AppError::Sftp { .. } | AppError::Ssh { .. }) =>
+            {
+                attempt += 1;
+                let retry_progress = 2_u64.saturating_add(
+                    base_bytes
+                        .saturating_add(bridge.high_watermark.load(Ordering::Relaxed))
+                        .saturating_mul(33)
+                        / total_bytes.max(1),
+                );
+                emit_progress(
+                    progress,
+                    config,
+                    "upload",
+                    Some("upload"),
+                    Some(StepState::Running),
+                    TargetState::Running,
+                    retry_progress.min(35),
+                    TaskEventLevel::Warn,
+                    "SFTP_UPLOAD_RETRY",
+                    Some(format!(
+                        "{file_name}上传通道异常，正在进行第{attempt}次尝试"
+                    )),
+                )?;
+                tokio::select! {
+                    _ = cancellation.cancelled() => break Err(AppError::Cancelled),
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                }
+            }
+            Err(error) => break Err(error),
+        }
+    };
+    match &result {
+        Ok(()) => emit_progress(
             progress,
             config,
             "upload",
-            Some("upload"),
-            Some(StepState::Failed),
-            TargetState::Failed,
-            2_u64.saturating_add(base_bytes.saturating_mul(33) / total_bytes.max(1)),
-            TaskEventLevel::Error,
-            "SFTP_UPLOAD_FAILED",
-            Some(error.to_string()),
-        );
+            None,
+            None,
+            TargetState::Running,
+            2_u64.saturating_add(
+                base_bytes.saturating_add(file_size).saturating_mul(33) / total_bytes.max(1),
+            ),
+            TaskEventLevel::Info,
+            "SFTP_UPLOAD_FILE_COMPLETED",
+            Some(format!("{file_name}上传并校验完成")),
+        )?,
+        Err(error) => {
+            let _ = emit_progress(
+                progress,
+                config,
+                "upload",
+                Some("upload"),
+                Some(StepState::Failed),
+                TargetState::Failed,
+                start_progress,
+                TaskEventLevel::Error,
+                "SFTP_UPLOAD_FAILED",
+                Some(error.to_string()),
+            );
+        }
     }
     result
 }
@@ -823,14 +910,143 @@ async fn run_command_observed(
         step_code,
         overall,
     };
+    let observed_started_at = time::OffsetDateTime::now_utc();
     let result = session.run(&request, cancellation, &output).await?;
+    if result
+        .stdout
+        .lines()
+        .any(|line| line.contains("\"service_observation\""))
+    {
+        let observation: AppResult<()> = (|| {
+            let observed_started_at = observed_started_at
+                .format(&time::format_description::well_known::Rfc3339)
+                .map_err(|_| AppError::InvalidConfig("生成服务检查开始时间失败".into()))?;
+            let observed_checked_at = time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .map_err(|_| AppError::InvalidConfig("生成服务检查结束时间失败".into()))?;
+            let report = parse_service_check_report_at(
+                &result.stdout,
+                &observed_started_at,
+                &observed_checked_at,
+            )
+            .unwrap_or_else(|error| {
+                crate::domain::aio::service_check::ServiceCheckReport {
+                    started_at: observed_started_at,
+                    checked_at: observed_checked_at,
+                    source: request
+                        .env
+                        .get("SERVICE_CHECK_SOURCE")
+                        .cloned()
+                        .unwrap_or_else(|| "manual".into()),
+                    scope: if request.env.contains_key("SERVICE_NAME") {
+                        "service"
+                    } else {
+                        "all"
+                    }
+                    .into(),
+                    service_name: request.env.get("SERVICE_NAME").cloned(),
+                    expected_services: Vec::new(),
+                    services: Vec::new(),
+                    state: "failed".into(),
+                    error: Some(format!(
+                        "真实服务检查报告无法解析，保留上次有效记录：{error}"
+                    )),
+                }
+            });
+            let abnormal = report
+                .services
+                .iter()
+                .filter(|service| service.state != "normal")
+                .count();
+            let message = if report.state == "failed" {
+                format!(
+                    "服务检查失败：{}",
+                    report.error.as_deref().unwrap_or("未取得运行事实")
+                )
+            } else if abnormal > 0 {
+                format!("服务检查发现{abnormal}项异常、版本不符或状态未知，请查看一体机服务详情")
+            } else {
+                format!("已检查{}项服务，运行事实均正常", report.services.len())
+            };
+            let warning = report.state == "failed" || abnormal > 0;
+            progress.service_check(&config.mac_normalized, report)?;
+            emit_progress(
+                progress,
+                config,
+                stage,
+                None,
+                None,
+                TargetState::Running,
+                overall,
+                if warning {
+                    TaskEventLevel::Warn
+                } else {
+                    TaskEventLevel::Info
+                },
+                "SERVICE_CHECK_OBSERVED",
+                Some(message),
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = observation {
+            // 服务观测是旁路信息，采集/缓存/提示失败不得改写Agent原退出结果。
+            let _ = emit_progress(
+                progress,
+                config,
+                stage,
+                None,
+                None,
+                TargetState::Running,
+                overall,
+                TaskEventLevel::Warn,
+                "SERVICE_CHECK_OBSERVATION_FAILED",
+                Some(format!("服务检查结果未能保存在本机：{error}")),
+            );
+        }
+    }
     if result.exit_status != 0 {
-        return Err(AppError::Conflict(format!(
-            "远端命令退出码={}，详细输出见脱敏任务日志",
-            result.exit_status
-        )));
+        return Err(remote_command_exit_error(
+            result.exit_status,
+            &result.stdout,
+        ));
     }
     Ok(result.stdout)
+}
+
+pub fn deployment_check_source(mode: DeploymentMode) -> &'static str {
+    match mode {
+        DeploymentMode::FirstDeploy => "first_deploy",
+        DeploymentMode::FullUpgrade => "full_upgrade",
+        DeploymentMode::ServiceUpgrade => "service_upgrade",
+    }
+}
+
+fn remote_command_exit_error(exit_status: u32, stdout: &str) -> AppError {
+    let detail = parse_agent_events(stdout).ok().and_then(|events| {
+        events.into_iter().rev().find_map(|event| {
+            let failed = matches!(event.status.as_str(), "failed" | "failure" | "error")
+                || event.code.is_some_and(|code| code != 0);
+            (failed && !event.message.trim().is_empty())
+                .then(|| localized_agent_failure(event.message.trim()))
+        })
+    });
+    AppError::Conflict(match detail {
+        Some(detail) => format!("远端命令退出码={exit_status}：{detail}"),
+        None => format!("远端命令退出码={exit_status}，详细输出见脱敏任务日志"),
+    })
+}
+
+fn localized_agent_failure(message: &str) -> String {
+    if message == "current release does not exist" {
+        return "当前一体机不存在可升级的已部署版本，请先执行首次部署".into();
+    }
+    if let Some(file) = message.strip_prefix("required backup file is missing: ") {
+        return format!("当前发布缺少备份所需文件：{file}");
+    }
+    if message == "host-info.json is missing" {
+        return "当前一体机缺少host-info.json，无法执行升级备份".into();
+    }
+    message.into()
 }
 
 fn local_file_size(path: &Path) -> AppResult<u64> {
@@ -859,4 +1075,200 @@ fn validate_files(mode: DeploymentMode, files: &RemoteDeploymentFiles) -> AppRes
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remote_command_exit_error;
+
+    #[tokio::test]
+    async fn observation_parse_cache_and_notice_failures_do_not_change_command_outcome() {
+        use crate::application::ports::remote_command::{RemoteCommandResult, RemoteOutputSink};
+        use crate::domain::aio::service_check::ServiceCheckReport;
+        struct MalformedObservation(u32);
+        impl super::RemoteCommandExecutor for MalformedObservation {
+            async fn run(
+                &self,
+                _: &super::ExecRequest,
+                _: &super::CancellationToken,
+                _: &dyn RemoteOutputSink,
+            ) -> crate::core::error::AppResult<RemoteCommandResult> {
+                Ok(RemoteCommandResult {
+                    exit_status: self.0,
+                    stdout:
+                        "{\"step\":\"service_observation\",\"status\":\"info\",\"report\":{}}\n"
+                            .into(),
+                    stderr: String::new(),
+                    duration_ms: 1,
+                })
+            }
+        }
+        struct CaptureFailure(bool);
+        impl super::DeploymentProgressSink for CaptureFailure {
+            fn emit(&self, _: super::DeploymentProgressEvent) -> crate::core::error::AppResult<()> {
+                Err(super::AppError::Conflict("观测提示失败".into()))
+            }
+            fn service_check(
+                &self,
+                _: &str,
+                report: ServiceCheckReport,
+            ) -> crate::core::error::AppResult<()> {
+                assert_eq!(report.state, "failed");
+                assert!(report.services.is_empty());
+                if self.0 {
+                    Err(super::AppError::Conflict("观测缓存失败".into()))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let config = super::RemoteDeploymentConfig {
+            operation_id: "operation".into(),
+            release_fingerprint: "fingerprint".into(),
+            mac_normalized: "001122334455".into(),
+            data_root: "/opt/data".into(),
+            deploy_root: "/opt/data/deploy".into(),
+            platform_api_host: "platform.test".into(),
+            platform_api_port: 80,
+            platform_mqtt_host: "platform.test".into(),
+            platform_mqtt_port: 1883,
+            allow_existing_ports: false,
+            published_ports: Vec::new(),
+        };
+        for exit_status in [0, 42] {
+            for reject_cache in [false, true] {
+                let request = crate::application::agent_protocol::inspect_services_request(
+                    "agent",
+                    &config.deploy_root,
+                    "manual",
+                    None,
+                )
+                .unwrap();
+                let result = super::run_command_observed(
+                    &MalformedObservation(exit_status),
+                    request,
+                    &super::CancellationToken::new(),
+                    &CaptureFailure(reject_cache),
+                    &config,
+                    "health",
+                    None,
+                    90,
+                )
+                .await;
+                if exit_status == 0 {
+                    assert!(result.is_ok());
+                } else {
+                    assert!(result.unwrap_err().to_string().contains("退出码=42"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_upgrade_keeps_the_rollback_observation_and_the_failure_result() {
+        use crate::application::ports::remote_command::{RemoteCommandResult, RemoteOutputSink};
+        use crate::domain::aio::service_check::ServiceCheckReport;
+        use std::sync::Mutex;
+
+        struct FailedUpgrade;
+        impl super::RemoteCommandExecutor for FailedUpgrade {
+            async fn run(
+                &self,
+                _request: &super::ExecRequest,
+                _cancellation: &super::CancellationToken,
+                _output: &dyn RemoteOutputSink,
+            ) -> crate::core::error::AppResult<RemoteCommandResult> {
+                Ok(RemoteCommandResult {
+                    exit_status: 86, stderr: String::new(), duration_ms: 1,
+                    stdout: concat!(
+                        "{\"step\":\"service_upgrade\",\"status\":\"failed\",\"message\":\"service health failed; previous image restored\"}\n",
+                        "{\"step\":\"service_observation\",\"status\":\"info\",\"report\":{",
+                        "\"startedAt\":\"2026-09-05T01:00:00Z\",\"checkedAt\":\"2026-09-05T01:00:01Z\",",
+                        "\"source\":\"rollback\",\"scope\":\"service\",\"serviceName\":\"edge\",\"expectedServices\":[\"edge\",\"rule\"],",
+                        "\"services\":[{\"serviceName\":\"edge\",\"state\":\"normal\",\"runtimeState\":\"running\",",
+                        "\"expectedImage\":\"edge:old\",\"actualImage\":\"edge:old\",\"imageId\":\"sha256:old\",",
+                        "\"checkedAt\":\"2026-09-05T01:00:01Z\",\"source\":\"rollback\"}],\"state\":\"succeeded\"}}\n"
+                    ).into(),
+                })
+            }
+        }
+        #[derive(Default)]
+        struct Capture(Mutex<Option<ServiceCheckReport>>);
+        impl super::DeploymentProgressSink for Capture {
+            fn emit(&self, _: super::DeploymentProgressEvent) -> crate::core::error::AppResult<()> {
+                Ok(())
+            }
+            fn service_check(
+                &self,
+                _: &str,
+                report: ServiceCheckReport,
+            ) -> crate::core::error::AppResult<()> {
+                *self.0.lock().unwrap() = Some(report);
+                Ok(())
+            }
+        }
+        let capture = Capture::default();
+        let config = super::RemoteDeploymentConfig {
+            operation_id: "operation".into(),
+            release_fingerprint: "fingerprint".into(),
+            mac_normalized: "001122334455".into(),
+            data_root: "/opt/data".into(),
+            deploy_root: "/opt/data/deploy".into(),
+            platform_api_host: "platform.test".into(),
+            platform_api_port: 80,
+            platform_mqtt_host: "platform.test".into(),
+            platform_mqtt_port: 1883,
+            allow_existing_ports: false,
+            published_ports: Vec::new(),
+        };
+        let request = crate::application::agent_protocol::inspect_services_request(
+            "agent",
+            &config.deploy_root,
+            "rollback",
+            Some("edge"),
+        )
+        .unwrap();
+        let result = super::run_command_observed(
+            &FailedUpgrade,
+            request,
+            &super::CancellationToken::new(),
+            &capture,
+            &config,
+            "service_upgrade",
+            None,
+            90,
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("退出码=86"));
+        let report = capture.0.lock().unwrap().clone().unwrap();
+        assert_eq!(report.source, "rollback");
+        assert_eq!(report.services.len(), 1);
+        assert_eq!(report.services[0].actual_image.as_deref(), Some("edge:old"));
+        assert_ne!(report.started_at, "2026-09-05T01:00:00Z");
+        assert_eq!(report.services[0].checked_at, report.checked_at);
+    }
+
+    #[test]
+    fn failed_agent_event_is_exposed_as_a_readable_remote_error() {
+        let error = remote_command_exit_error(
+            41,
+            concat!(
+                "{\"protocolVersion\":\"1\"}\n",
+                "{\"step\":\"retention\",\"status\":\"success\",\"message\":\"done\"}\n",
+                "{\"step\":\"backup\",\"status\":\"failed\",\"message\":\"current release does not exist\"}\n"
+            ),
+        );
+
+        let message = error.to_string();
+        assert!(message.contains("退出码=41"));
+        assert!(message.contains("当前一体机不存在可升级的已部署版本"));
+        assert!(!message.contains("current release does not exist"));
+    }
+
+    #[test]
+    fn unstructured_remote_failure_keeps_the_log_fallback() {
+        let error = remote_command_exit_error(9, "plain command output");
+
+        assert!(error.to_string().contains("详细输出见脱敏任务日志"));
+    }
 }

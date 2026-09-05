@@ -183,7 +183,7 @@ export const demoReleaseProfile: ReleaseProfile = {
   sshUsername: "root",
   sshPassword: "inx-edge-ssh",
   sshPrivateKey: "",
-  envTemplate: `# 项目公共参数\nPLATFORM_HOST={{ project.platform_host }}\nPLATFORM_API={{ project.platform_api }}\nPLATFORM_MQTT_HOST={{ mqtt.platform_host }}\nPLATFORM_MQTT_PORT={{ mqtt.platform_port }}\nAIO_AUTH_KEY={{ project.auth_key }}\nAIO_NAME={{ node.name }}\nAIO_IP={{ node.ip }}\nAIO_MAC={{ node.mac }}\nDEVICE_EDGE_IMAGE={{ image.device_edge }}\nRULE_ENGINE_IMAGE={{ image.rule_engine }}`,
+  envTemplate: `# 项目公共参数\nPLATFORM_HOST={{ project.platform_host }}\nPLATFORM_API={{ project.platform_api }}\nPLATFORM_MQTT_HOST={{ mqtt.platform_host }}\nPLATFORM_MQTT_PORT={{ mqtt.platform_port }}\nAIO_AUTH_KEY={{ project.auth_key }}\nAIO_NAME={{ node.name }}\nAIO_IP={{ node.ip }}\nAIO_MAC={{ node.mac }}\nDEVICE_EDGE_IMAGE={{ images.device-edge }}\nRULE_ENGINE_IMAGE={{ images.rule-engine }}`,
   composeTemplate: `services:\n  device-edge:\n    image: \${DEVICE_EDGE_IMAGE}\n    restart: always\n    env_file: .env\n    volumes:\n      - /opt/data/device-edge:/opt/data/device-edge\n  rule-engine:\n    image: \${RULE_ENGINE_IMAGE}\n    restart: always\n    env_file: .env\n    volumes:\n      - /opt/data/rule-engine:/opt/data/rule-engine`
 };
 
@@ -213,4 +213,3 @@ export const demoHistory: OperationHistoryItem[] = [
   { id: "OP-20260821-003", type: "单服升级", operator: "陈工", targetSummary: "1 台 · AIO-3F-弱电间", artifact: "device-edge 3.2.8", result: "成功", finishedAt: "2026-08-21 09:18" },
   { id: "OP-20260819-002", type: "首次部署", operator: "实施管理员", targetSummary: "3 台 · A栋", artifact: "Release 2026.08.18", result: "部分成功", finishedAt: "2026-08-19 14:06" }
 ];
-

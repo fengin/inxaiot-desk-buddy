@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::error::{AppError, AppResult};
+use crate::domain::aio::release_profile::inspect_compose_services;
 use crate::domain::aio::release_render::{ReleaseRenderContext, RenderedReleaseFiles};
 use regex::Regex;
 
@@ -12,22 +13,106 @@ pub fn render_release_templates(
 ) -> AppResult<RenderedReleaseFiles> {
     let values = template_values(context);
     let mut env = render_placeholders(env_template, &values, false)?;
+    let compose_services = inspect_compose_services(compose_template)?;
+    let expected_services = compose_services
+        .iter()
+        .map(|service| service.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let selected_services = context
+        .images
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if expected_services != selected_services {
+        let missing = expected_services
+            .difference(&selected_services)
+            .copied()
+            .collect::<Vec<_>>();
+        let extra = selected_services
+            .difference(&expected_services)
+            .copied()
+            .collect::<Vec<_>>();
+        return Err(AppError::InvalidConfig(format!(
+            "镜像选择与Compose服务不一致；缺少：{}；多余：{}",
+            if missing.is_empty() {
+                "无".into()
+            } else {
+                missing.join("、")
+            },
+            if extra.is_empty() {
+                "无".into()
+            } else {
+                extra.join("、")
+            }
+        )));
+    }
+    for service in &compose_services {
+        env = replace_env_value(
+            &env,
+            &service.image_environment_variable,
+            context
+                .images
+                .get(&service.name)
+                .expect("service set checked"),
+        );
+    }
     if !env.ends_with('\n') {
         env.push('\n');
     }
     validate_env(&env)?;
     let host_info_json = render_placeholders(host_info_template, &values, true)?;
-    serde_json::from_str::<serde_json::Value>(&host_info_json)
+    let host_info: serde_json::Value = serde_json::from_str(&host_info_json)
         .map_err(|_| AppError::InvalidConfig("渲染后的host-info不是有效JSON".into()))?;
+    let host_info = host_info
+        .as_object()
+        .ok_or_else(|| AppError::InvalidConfig("渲染后的host-info根节点不是对象".into()))?;
+    for field in ["mac", "ip", "hostname", "authKey"] {
+        if host_info
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(AppError::InvalidConfig(format!(
+                "渲染后的host-info缺少有效字符串字段：{field}"
+            )));
+        }
+    }
     let environment = parse_env(&env);
-    let compose_preview = render_compose(compose_template, &environment, false)?;
-    let compose_runtime = render_compose(compose_template, &environment, true)?;
+    let image_variables = compose_services
+        .iter()
+        .map(|service| service.image_environment_variable.as_str())
+        .collect::<BTreeSet<_>>();
+    let compose_preview = render_compose(compose_template, &environment, &BTreeSet::new())?;
+    let compose_runtime = render_compose(compose_template, &environment, &image_variables)?;
+    inspect_compose_services(&compose_runtime)?;
     Ok(RenderedReleaseFiles {
         env,
         host_info_json,
         compose_preview,
         compose_runtime,
     })
+}
+
+fn replace_env_value(content: &str, name: &str, value: &str) -> String {
+    let mut found = false;
+    let mut lines = content
+        .lines()
+        .map(|line| {
+            if line
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim() == name)
+            {
+                found = true;
+                format!("{name}={value}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+    if !found {
+        lines.push(format!("{name}={value}"));
+    }
+    format!("{}\n", lines.join("\n"))
 }
 
 fn render_placeholders(
@@ -116,7 +201,7 @@ fn parse_env(content: &str) -> BTreeMap<String, String> {
 fn render_compose(
     template: &str,
     env: &BTreeMap<String, String>,
-    preserve_service_images: bool,
+    preserved_variables: &BTreeSet<&str>,
 ) -> AppResult<String> {
     let pattern = Regex::new(r"\$\{([^}]+)\}").expect("static compose regex");
     let mut missing = BTreeSet::new();
@@ -126,15 +211,7 @@ fn render_compose(
         if let Some(value) = env.get(name)
             && (!default_on_empty || !value.is_empty())
         {
-            if preserve_service_images
-                && matches!(
-                    name,
-                    "DEVICE_EDGE_IMAGE"
-                        | "DEVICE_EDGE_WEB_IMAGE"
-                        | "RULE_ENGINE_IMAGE"
-                        | "EMQX_IMAGE"
-                )
-            {
+            if preserved_variables.contains(name) {
                 return format!("${{{name}}}");
             }
             return value.clone();
@@ -225,6 +302,7 @@ fn template_values(context: &ReleaseRenderContext) -> BTreeMap<String, String> {
     ]);
     for (service, image) in &context.images {
         values.insert(format!("images.{service}"), image.clone());
+        values.insert(format!("image.{service}"), image.clone());
         values.insert(format!(".Images.{service}"), image.clone());
     }
     values
@@ -261,8 +339,8 @@ mod tests {
     fn renders_env_json_and_compose_with_defaults() {
         let output = render_release_templates(
             "RELEASE={{release.version}}\nAPP_IMAGE={{images.device-edge}}\nCONFIG_MARKER={{node.name}}\n",
-            r#"{"name":"{{node.name}}","password":"{{platform.password}}"}"#,
-            "services:\n  app:\n    image: ${APP_IMAGE}\n    labels:\n      config-marker: ${CONFIG_MARKER}\n  fallback:\n    image: ${OTHER:-busybox:latest}\n",
+            r#"{"mac":"{{node.mac}}","ip":"{{node.ip}}","hostname":"{{node.name}}","authKey":"{{authKey}}","password":"{{platform.password}}"}"#,
+            "services:\n  device-edge:\n    image: ${APP_IMAGE}\n    labels:\n      config-marker: ${CONFIG_MARKER}\n      fallback: ${OTHER:-busybox:latest}\n",
             &context(),
         )
         .expect("render");
@@ -289,11 +367,17 @@ mod tests {
 
     #[test]
     fn runtime_compose_preserves_mutable_images_but_preview_resolves_them() {
+        let mut context = context();
+        context.images.extend([
+            ("device-edge-web".into(), "web:1".into()),
+            ("rule-engine".into(), "rule:1".into()),
+            ("emqx".into(), "emqx:1".into()),
+        ]);
         let output = render_release_templates(
             "DEVICE_EDGE_IMAGE={{images.device-edge}}\nDEVICE_EDGE_WEB_IMAGE=web:1\nRULE_ENGINE_IMAGE=rule:1\nEMQX_IMAGE=emqx:1\nCONFIG_MARKER={{node.name}}\n",
-            "{}",
-            "services:\n  device-edge:\n    image: ${DEVICE_EDGE_IMAGE:?required}\n    labels:\n      config-marker: ${CONFIG_MARKER}\n  device-edge-web:\n    image: ${DEVICE_EDGE_WEB_IMAGE:-web:0}\n  rule-engine:\n    image: ${RULE_ENGINE_IMAGE}\n  emqx:\n    image: ${EMQX_IMAGE}\n",
-            &context(),
+            r#"{"mac":"{{node.mac}}","ip":"{{node.ip}}","hostname":"{{node.name}}","authKey":"{{authKey}}"}"#,
+            "services:\n  device-edge:\n    image: ${DEVICE_EDGE_IMAGE}\n    labels:\n      config-marker: ${CONFIG_MARKER}\n  device-edge-web:\n    image: ${DEVICE_EDGE_WEB_IMAGE}\n  rule-engine:\n    image: ${RULE_ENGINE_IMAGE}\n  emqx:\n    image: ${EMQX_IMAGE}\n",
+            &context,
         )
         .expect("render runtime and preview");
         assert!(!output.compose_preview.contains("${"));

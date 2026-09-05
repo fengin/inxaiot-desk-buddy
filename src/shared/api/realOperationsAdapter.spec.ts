@@ -16,21 +16,33 @@ describe("RealOperationsAdapter Tauri Command 契约", () => {
     const plan = {
       mode: "full_upgrade" as const,
       targetMacs: ["001122334455"],
+      imageFiles: [{ serviceName: "device-edge", filePath: "C:/fixture/device-edge.tar", imageTag: "device-edge:fixture" }],
       artifactPath: "C:/release",
       artifactName: "Release",
       artifactVersion: "1",
       batchSize: 1,
       concurrency: 1
     };
-    await adapter.preflight("project-1", plan);
+    await adapter.preflight("project-1", "preflight-task-1", plan);
     expect(invokeMock).toHaveBeenLastCalledWith("preflight_deployment", {
       localProjectId: "project-1",
+      preflightTaskId: "preflight-task-1",
       input: plan
     });
-    await adapter.submit("project-1", plan);
+    const executionSnapshot = {
+      schemaVersion: 2,
+      localProjectId: "project-1",
+      checkedAt: "2026-09-05T08:00:00Z",
+      profileVersion: 1,
+      artifactFingerprint: "a".repeat(64),
+      plan,
+      targets: []
+    };
+    await adapter.submit("project-1", "preflight-task-1", executionSnapshot);
     expect(invokeMock).toHaveBeenLastCalledWith("submit_deployment", {
       localProjectId: "project-1",
-      input: plan
+      preflightTaskId: "preflight-task-1",
+      executionSnapshot
     });
 
     await adapter.getTask("project-1", "task-1");

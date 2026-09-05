@@ -12,6 +12,7 @@ export interface AioAdapter {
   readonly real: boolean;
   listNodes(projectId: string, query: ListAioNodesQuery): Promise<AioNodeListPage>;
   getNodeDetail(projectId: string, mac: string): Promise<AioNodeDetail>;
+  checkServices(projectId: string, mac: string): Promise<{ taskId: string }>;
   previewImport(projectId: string, filePath: string): Promise<InventoryPreview>;
   getLatestImport(projectId: string): Promise<AioImportSession | null>;
   updateImportSelection(projectId: string, sessionId: string, selections: ImportSelection[]): Promise<AioImportSession>;

@@ -34,7 +34,7 @@ function item(key: string, label: string, checks: DeploymentPreflightCheck[], re
   return {
     key, label, issues, complete,
     status: failed ? "failed" : issues.length ? "warning" : complete ? "passed" : "pending",
-    message: failed ? "请处理以下问题后重新检查" : !complete ? "尚未完成检查" : summary
+    message: failed ? "" : !complete ? "尚未完成检查" : summary
   };
 }
 
@@ -55,11 +55,15 @@ export function preflightGroups(report: DeploymentPreflightReport | undefined, n
     const node = nodes.find((value) => value.macNormalized === mac)
       ?? report.executionSnapshot?.targets.find((target) => target.node.macNormalized === mac)?.node;
     const checks = report.checks.filter((check) => check.targetMac === mac);
+    const environmentRequiredCodes = ["runtime_os", "runtime_arch", "docker", "docker_compose", "remote_storage", "remote_ports"];
+    if (report.normalizedPlan.mode !== "first_deploy") {
+      environmentRequiredCodes.push("remote_current_release");
+    }
     groups.push({
       key: mac, title: node?.name || node?.ip || "待检查一体机", subtitle: node?.ip,
       items: [
         item("connectivity", "连通性", checks.filter((check) => connectionCodes.has(check.code)), ["ssh_auth", "platform_endpoints"], "SSH 连接、登录验证及一体机到平台 API/MQTT 连通性通过"),
-        item("environment", "环境准备", checks.filter((check) => !connectionCodes.has(check.code)), ["runtime_os", "runtime_arch", "docker", "docker_compose", "remote_storage", "remote_ports"], "系统、Docker、Compose、目录、空间和服务端口检查通过")
+        item("environment", "环境准备", checks.filter((check) => !connectionCodes.has(check.code)), environmentRequiredCodes, report.normalizedPlan.mode === "first_deploy" ? "系统、Docker、Compose、目录、空间和服务端口检查通过" : "当前版本、系统、Docker、Compose、目录、空间和服务端口检查通过")
       ]
     });
   }

@@ -1,63 +1,43 @@
 use std::collections::BTreeSet;
 use std::io::Read;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use walkdir::WalkDir;
 
 use crate::core::error::{AppError, AppResult};
+use crate::domain::aio::deployment::DeploymentImageInput;
 
-const REQUIRED_SERVICES: &[&str] = &["emqx", "device-edge", "rule-engine", "device-edge-web"];
-const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_IMAGE_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_IMAGE_ARCHIVE_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const MAX_IMAGE_TAR_ENTRIES: usize = 100_000;
 const MAX_IMAGE_DECLARED_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const MAX_RELEASE_VERSION_BYTES: usize = 128;
-const MAX_RELEASE_FILE_COUNT: usize = 10_000;
-const MAX_RELEASE_TOTAL_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// 工作台自动生成并交给 Agent 的内部清单。它不是用户发布物契约。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReleaseManifest {
-    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub version: String,
-    pub compose_file: String,
     pub images: Vec<ReleaseImage>,
-    pub templates: ReleaseTemplates,
-    #[serde(default)]
-    pub runtime: ReleaseRuntime,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReleaseImage {
     pub service: String,
     pub image: String,
-    #[serde(default)]
     pub archive: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReleaseTemplates {
-    pub env: String,
-    pub host_info: String,
+    pub sha256: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReleaseRuntime {
-    #[serde(default)]
     pub os: String,
-    #[serde(default)]
     pub arch: String,
-    #[serde(default)]
     pub docker: String,
-    #[serde(default)]
     pub compose: String,
 }
 
@@ -69,84 +49,77 @@ pub struct ImageArchiveInfo {
     pub repo_tags: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReleaseValidation {
-    pub valid: bool,
-    pub package_dir: String,
-    pub manifest: Option<ReleaseManifest>,
-    pub fingerprint: Option<String>,
-    pub images: Vec<ImageArchiveInfo>,
-    pub errors: Vec<String>,
-    pub warnings: Vec<String>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InspectedDeploymentImages {
+    pub image_files: Vec<DeploymentImageInput>,
+    pub fingerprint: String,
 }
 
-pub fn inspect_release_directory(package_dir: &Path) -> AppResult<ReleaseValidation> {
-    let root = canonical_directory(package_dir)?;
-    let manifest_path = root.join("manifest.json");
-    let mut errors = Vec::new();
-    let manifest = match read_manifest(&manifest_path) {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            return Ok(ReleaseValidation {
-                valid: false,
-                package_dir: root.to_string_lossy().into_owned(),
-                manifest: None,
-                fingerprint: None,
-                images: Vec::new(),
-                errors: vec![error.to_string()],
-                warnings: Vec::new(),
-            });
-        }
-    };
-    validate_manifest_fields(&manifest, &mut errors);
-    let compose = resolve_release_file(&root, &manifest.compose_file, "Compose", &mut errors);
-    let env = resolve_release_file(&root, &manifest.templates.env, "环境变量模板", &mut errors);
-    let _host_info = resolve_release_file(
-        &root,
-        &manifest.templates.host_info,
-        "host-info模板",
-        &mut errors,
-    );
-    if let (Some(compose), Some(env)) = (&compose, &env) {
-        validate_compose_variables(compose, env, &mut errors)?;
+pub fn standard_runtime() -> ReleaseRuntime {
+    ReleaseRuntime {
+        os: "linux".into(),
+        arch: "x86_64".into(),
+        docker: ">=20.10".into(),
+        compose: ">=2.0".into(),
     }
-    let mut images = Vec::new();
-    for image in &manifest.images {
-        if image.archive.trim().is_empty() {
-            errors.push(format!("服务 {} 未声明镜像归档", image.service));
-            continue;
-        }
-        let Some(path) = resolve_release_file(&root, &image.archive, "镜像归档", &mut errors)
-        else {
-            continue;
-        };
-        match inspect_image_archive(&path) {
-            Ok(info) => {
-                if !info.repo_tags.iter().any(|tag| tag == &image.image) {
-                    errors.push(format!(
-                        "服务 {} 声明镜像 {} 与归档 RepoTags 不一致",
-                        image.service, image.image
-                    ));
-                }
-                images.push(info);
-            }
-            Err(error) => errors.push(format!("检查服务 {} 镜像失败：{error}", image.service)),
-        }
+}
+
+/// 在任务提交前逐个打开镜像归档并核对 RepoTag，避免上传后才发现选错文件。
+pub fn inspect_deployment_images(
+    images: &[DeploymentImageInput],
+) -> AppResult<InspectedDeploymentImages> {
+    if images.is_empty() {
+        return Err(AppError::InvalidConfig("请至少选择一个服务镜像".into()));
     }
-    let fingerprint = if errors.is_empty() {
-        Some(fingerprint_directory(&root)?)
-    } else {
-        None
-    };
-    Ok(ReleaseValidation {
-        valid: errors.is_empty(),
-        package_dir: root.to_string_lossy().into_owned(),
-        manifest: Some(manifest),
-        fingerprint,
-        images,
-        errors,
-        warnings: Vec::new(),
+    let mut inspected = Vec::with_capacity(images.len());
+    let mut services = BTreeSet::new();
+    for image in images {
+        let service = image.service_name.trim();
+        let tag = image.image_tag.trim();
+        if tag.is_empty()
+            || tag.chars().any(char::is_whitespace)
+            || tag.chars().any(char::is_control)
+        {
+            return Err(AppError::InvalidConfig(format!(
+                "服务 {service} 的镜像标签无效"
+            )));
+        }
+        if !services.insert(service.to_string()) {
+            return Err(AppError::InvalidConfig(format!(
+                "服务 {service} 重复选择了镜像"
+            )));
+        }
+        let archive = inspect_image_archive(Path::new(image.file_path.trim()))?;
+        if !archive.repo_tags.is_empty()
+            && !archive.repo_tags.iter().any(|candidate| candidate == tag)
+        {
+            return Err(AppError::InvalidConfig(format!(
+                "服务 {service} 填写的镜像标签 {tag} 不在所选归档的RepoTags中"
+            )));
+        }
+        let file_sha256 = sha256_file(Path::new(&archive.path))?;
+        inspected.push((
+            DeploymentImageInput {
+                service_name: service.to_string(),
+                file_path: archive.path,
+                image_tag: tag.to_string(),
+            },
+            file_sha256,
+        ));
+    }
+    inspected.sort_by(|left, right| left.0.service_name.cmp(&right.0.service_name));
+    let mut digest = Sha256::new();
+    for (image, file_sha256) in &inspected {
+        digest.update(image.service_name.as_bytes());
+        digest.update([0]);
+        digest.update(image.image_tag.as_bytes());
+        digest.update([0]);
+        digest.update(file_sha256.as_bytes());
+        digest.update([0]);
+    }
+    Ok(InspectedDeploymentImages {
+        image_files: inspected.into_iter().map(|(image, _)| image).collect(),
+        fingerprint: hex::encode(digest.finalize()),
     })
 }
 
@@ -226,21 +199,22 @@ fn inspect_image_archive_with_limits(
     #[serde(rename_all = "PascalCase")]
     struct DockerManifestEntry {
         #[serde(default)]
-        repo_tags: Vec<String>,
+        repo_tags: Option<Vec<String>>,
     }
     let records = serde_json::from_slice::<Vec<DockerManifestEntry>>(&bytes)
         .map_err(|_| AppError::InvalidConfig("Docker镜像manifest.json格式无效".into()))?;
+    let image_count = records.len();
     let repo_tags = records
         .into_iter()
-        .flat_map(|record| record.repo_tags)
+        .flat_map(|record| record.repo_tags.unwrap_or_default())
         .map(|tag| tag.trim().to_string())
         .filter(|tag| !tag.is_empty() && tag != "<none>:<none>")
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    if repo_tags.is_empty() {
+    if repo_tags.is_empty() && image_count != 1 {
         return Err(AppError::InvalidConfig(
-            "Docker镜像归档没有有效RepoTag".into(),
+            "Docker镜像归档包含多个无标签镜像，无法确定手工标签对应关系".into(),
         ));
     }
     Ok(ImageArchiveInfo {
@@ -293,67 +267,10 @@ pub fn validate_release_version(version: &str) -> AppResult<()> {
             .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'.' | b'_' | b'-'))
     {
         return Err(AppError::InvalidConfig(
-            "Release版本只能由字母、数字、点、下划线和连字符组成，且必须以字母或数字开头".into(),
+            "内部发布标识只能由字母、数字、点、下划线和连字符组成".into(),
         ));
     }
     Ok(())
-}
-
-fn read_manifest(path: &Path) -> AppResult<ReleaseManifest> {
-    let metadata =
-        std::fs::metadata(path).map_err(|error| AppError::io("读取Release manifest", &error))?;
-    if metadata.len() > MAX_MANIFEST_BYTES {
-        return Err(AppError::InvalidConfig(
-            "Release manifest.json超过1MiB".into(),
-        ));
-    }
-    let bytes =
-        std::fs::read(path).map_err(|error| AppError::io("读取Release manifest", &error))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|_| AppError::InvalidConfig("Release manifest.json格式无效".into()))
-}
-
-fn validate_manifest_fields(manifest: &ReleaseManifest, errors: &mut Vec<String>) {
-    if manifest.schema_version != 1 {
-        errors.push("manifest.schemaVersion当前只支持1".into());
-    }
-    if let Err(error) = validate_release_version(&manifest.version) {
-        errors.push(error.to_string());
-    }
-    if manifest.compose_file.trim().is_empty() {
-        errors.push("manifest.composeFile不能为空".into());
-    }
-    validate_runtime(&manifest.runtime, errors);
-    let mut services = BTreeSet::new();
-    for image in &manifest.images {
-        if image.service.trim().is_empty() || image.image.trim().is_empty() {
-            errors.push("镜像service和image不能为空".into());
-        } else if !services.insert(image.service.trim().to_string()) {
-            errors.push(format!("服务名重复：{}", image.service));
-        }
-    }
-    for service in REQUIRED_SERVICES {
-        if !services.contains(*service) {
-            errors.push(format!("缺少必需服务镜像：{service}"));
-        }
-    }
-}
-
-fn validate_runtime(runtime: &ReleaseRuntime, errors: &mut Vec<String>) {
-    if runtime.os.trim() != "linux" {
-        errors.push("manifest.runtime.os当前只支持linux".into());
-    }
-    if runtime.arch.trim() != "x86_64" {
-        errors.push("manifest.runtime.arch当前只支持x86_64".into());
-    }
-    for (label, requirement) in [
-        ("docker", runtime.docker.as_str()),
-        ("compose", runtime.compose.as_str()),
-    ] {
-        if let Err(error) = parse_runtime_requirement(requirement) {
-            errors.push(format!("manifest.runtime.{label}约束无效：{error}"));
-        }
-    }
 }
 
 fn parse_runtime_requirement(value: &str) -> AppResult<(u64, u64, u64)> {
@@ -392,325 +309,100 @@ fn parse_version_triplet(value: &str) -> Option<(u64, u64, u64)> {
     ))
 }
 
-fn canonical_directory(path: &Path) -> AppResult<PathBuf> {
-    let canonical = path
-        .canonicalize()
-        .map_err(|error| AppError::io("读取Release目录", &error))?;
-    if !canonical.is_dir() {
-        return Err(AppError::InvalidConfig("Release路径不是目录".into()));
-    }
-    Ok(canonical)
-}
-
-fn resolve_release_file(
-    root: &Path,
-    relative: &str,
-    label: &str,
-    errors: &mut Vec<String>,
-) -> Option<PathBuf> {
-    let relative_path = Path::new(relative.trim());
-    if relative.trim().is_empty()
-        || relative_path.is_absolute()
-        || relative_path.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        })
-    {
-        errors.push(format!("{label}路径不安全：{relative}"));
-        return None;
-    }
-    let candidate = root.join(relative_path);
-    let canonical = match candidate.canonicalize() {
-        Ok(path) => path,
-        Err(_) => {
-            errors.push(format!("{label}不存在：{relative}"));
-            return None;
-        }
-    };
-    if !canonical.starts_with(root) || !canonical.is_file() {
-        errors.push(format!("{label}逃逸Release目录或不是文件：{relative}"));
-        return None;
-    }
-    Some(canonical)
-}
-
-fn validate_compose_variables(
-    compose_path: &Path,
-    env_path: &Path,
-    errors: &mut Vec<String>,
-) -> AppResult<()> {
-    let compose = std::fs::read_to_string(compose_path)
-        .map_err(|error| AppError::io("读取Compose文件", &error))?;
-    let env = std::fs::read_to_string(env_path)
-        .map_err(|error| AppError::io("读取环境变量模板", &error))?;
-    let env_pattern = Regex::new(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)=").expect("static env regex");
-    let compose_pattern = Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:-|:\?|-|\?)[^}]*)?\}")
-        .expect("static compose regex");
-    let defined = env_pattern
-        .captures_iter(&env)
-        .map(|capture| capture[1].to_string())
-        .collect::<BTreeSet<_>>();
-    let mut missing = BTreeSet::new();
-    for capture in compose_pattern.captures_iter(&compose) {
-        let modifier = capture.get(2).map(|value| value.as_str()).unwrap_or("");
-        if !matches!(modifier, ":-" | "-") && !defined.contains(&capture[1]) {
-            missing.insert(capture[1].to_string());
-        }
-    }
-    for name in missing {
-        errors.push(format!("环境变量模板未定义Compose变量 {name}"));
-    }
-    Ok(())
-}
-
-fn fingerprint_directory(root: &Path) -> AppResult<String> {
-    let mut files = Vec::new();
-    let mut total_bytes = 0_u64;
-    for entry in WalkDir::new(root).follow_links(false) {
-        let entry = entry.map_err(|_| AppError::InvalidConfig("遍历Release目录失败".into()))?;
-        if entry.file_type().is_symlink() {
-            return Err(AppError::InvalidConfig(
-                "Release目录不允许包含符号链接".into(),
-            ));
-        }
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        files.push(entry.path().to_path_buf());
-        if files.len() > MAX_RELEASE_FILE_COUNT {
-            return Err(AppError::InvalidConfig(
-                "Release文件数量超过10000个安全上限".into(),
-            ));
-        }
-        total_bytes = total_bytes.saturating_add(
-            entry
-                .metadata()
-                .map_err(|_| AppError::Io {
-                    operation: "读取Release文件属性",
-                })?
-                .len(),
-        );
-        if total_bytes > MAX_RELEASE_TOTAL_BYTES {
-            return Err(AppError::InvalidConfig(
-                "Release总大小超过50GiB安全上限".into(),
-            ));
-        }
-    }
-    files.sort();
-    let mut digest = Sha256::new();
-    for path in files {
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|_| AppError::InvalidConfig("Release文件路径异常".into()))?;
-        digest.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
-        digest.update([0]);
-        let mut file =
-            std::fs::File::open(&path).map_err(|error| AppError::io("读取Release文件", &error))?;
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let count = file
-                .read(&mut buffer)
-                .map_err(|error| AppError::io("计算Release指纹", &error))?;
-            if count == 0 {
-                break;
-            }
-            digest.update(&buffer[..count]);
-        }
-    }
-    Ok(hex::encode(digest.finalize()))
-}
-
-fn default_schema_version() -> u32 {
-    1
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
-    use std::path::Path;
 
-    use super::{
-        ReleaseImage, ReleaseManifest, ReleaseRuntime, ReleaseTemplates, inspect_image_archive,
-        inspect_image_archive_with_limits, inspect_release_directory, runtime_version_satisfies,
-        validate_runtime,
-    };
+    use super::{inspect_deployment_images, inspect_image_archive_with_limits};
+    use crate::domain::aio::deployment::DeploymentImageInput;
 
-    fn image_tar(path: &Path, repo_tag: &str) {
+    fn image_tar_manifest(path: &std::path::Path, manifest: serde_json::Value) {
         let file = std::fs::File::create(path).expect("image tar");
         let mut builder = tar::Builder::new(file);
-        let content = serde_json::to_vec(&serde_json::json!([
-            { "Config": "config.json", "RepoTags": [repo_tag], "Layers": [] }
-        ]))
-        .expect("manifest");
+        let content = serde_json::to_vec(&manifest).expect("manifest");
         let mut header = tar::Header::new_gnu();
         header.set_size(content.len() as u64);
         header.set_mode(0o644);
         header.set_cksum();
         builder
             .append_data(&mut header, "manifest.json", Cursor::new(content))
-            .expect("append manifest");
-        builder.finish().expect("finish tar");
+            .expect("append");
+        builder.finish().expect("finish");
+    }
+
+    fn image_tar(path: &std::path::Path, tag: &str) {
+        image_tar_manifest(path, serde_json::json!([{"RepoTags": [tag]}]));
     }
 
     #[test]
-    fn validates_complete_release_and_image_repo_tags() {
+    fn selected_image_tag_must_exist_in_archive() {
         let temp = tempfile::tempdir().expect("temp");
-        std::fs::create_dir_all(temp.path().join("templates")).expect("templates");
-        std::fs::create_dir_all(temp.path().join("images")).expect("images");
-        std::fs::write(
-            temp.path().join("docker-compose.yml"),
-            "services:\n  app:\n    image: ${APP_IMAGE}\n",
-        )
-        .expect("compose");
-        std::fs::write(
-            temp.path().join("templates/env.template"),
-            "APP_IMAGE={{images.device-edge}}\n",
-        )
-        .expect("env");
-        std::fs::write(
-            temp.path().join("templates/host-info.json.template"),
-            "{}\n",
-        )
-        .expect("host info");
-        let images = [
-            ("emqx", "emqx:1"),
-            ("device-edge", "device-edge:1"),
-            ("rule-engine", "rule-engine:1"),
-            ("device-edge-web", "device-edge-web:1"),
-        ]
-        .into_iter()
-        .map(|(service, image)| {
-            let archive = format!("images/{service}.tar");
-            image_tar(&temp.path().join(&archive), image);
-            ReleaseImage {
-                service: service.into(),
-                image: image.into(),
-                archive,
-            }
-        })
-        .collect::<Vec<_>>();
-        let manifest = ReleaseManifest {
-            schema_version: 1,
-            version: "2026.08.28".into(),
-            compose_file: "docker-compose.yml".into(),
-            images,
-            templates: ReleaseTemplates {
-                env: "templates/env.template".into(),
-                host_info: "templates/host-info.json.template".into(),
-            },
-            runtime: ReleaseRuntime {
-                os: "linux".into(),
-                arch: "x86_64".into(),
-                docker: ">=20.10".into(),
-                compose: ">=2.0".into(),
-            },
+        let path = temp.path().join("app.tar");
+        image_tar(&path, "repo/app:1");
+        let input = DeploymentImageInput {
+            service_name: "app".into(),
+            file_path: path.to_string_lossy().into_owned(),
+            image_tag: "repo/app:1".into(),
         };
-        std::fs::write(
-            temp.path().join("manifest.json"),
-            serde_json::to_vec_pretty(&manifest).expect("json"),
-        )
-        .expect("manifest");
-        let result = inspect_release_directory(temp.path()).expect("inspect");
-        assert!(result.valid, "{:?}", result.errors);
-        assert_eq!(result.images.len(), 4);
-        assert!(result.fingerprint.is_some());
-        let image =
-            inspect_image_archive(&temp.path().join("images/device-edge.tar")).expect("image");
-        assert_eq!(image.repo_tags, vec!["device-edge:1"]);
+        let inspected = inspect_deployment_images(std::slice::from_ref(&input)).expect("inspect");
+        assert_eq!(inspected.image_files[0].image_tag, "repo/app:1");
+        let mut wrong = input;
+        wrong.image_tag = "repo/app:2".into();
+        assert!(inspect_deployment_images(&[wrong]).is_err());
     }
 
     #[test]
-    fn rejects_path_escape_missing_service_and_repo_tag_mismatch() {
+    fn single_untagged_image_accepts_a_manual_tag_but_ambiguous_archive_is_rejected() {
         let temp = tempfile::tempdir().expect("temp");
-        std::fs::write(
-            temp.path().join("manifest.json"),
-            r#"{
-              "version":"bad",
-              "composeFile":"../compose.yml",
-              "images":[{"service":"emqx","image":"emqx:2","archive":"missing.tar"}],
-              "templates":{"env":"missing.env","hostInfo":"missing.json"}
-            }"#,
-        )
-        .expect("manifest");
-        let result = inspect_release_directory(temp.path()).expect("inspect");
-        assert!(!result.valid);
-        assert!(
-            result
-                .errors
-                .iter()
-                .any(|error| error.contains("路径不安全"))
+        let single = temp.path().join("single.tar");
+        image_tar_manifest(&single, serde_json::json!([{"RepoTags": null}]));
+        let inspected = inspect_deployment_images(&[DeploymentImageInput {
+            service_name: "app".into(),
+            file_path: single.to_string_lossy().into_owned(),
+            image_tag: "registry.example/app:1".into(),
+        }])
+        .expect("manual tag");
+        assert_eq!(inspected.image_files[0].image_tag, "registry.example/app:1");
+
+        let ambiguous = temp.path().join("ambiguous.tar");
+        image_tar_manifest(
+            &ambiguous,
+            serde_json::json!([{"RepoTags": null}, {"RepoTags": ["<none>:<none>"]}]),
         );
-        assert!(
-            result
-                .errors
-                .iter()
-                .any(|error| error.contains("device-edge"))
-        );
+        assert!(inspect_image_archive_with_limits(&ambiguous, 1024 * 1024, 10, 1024).is_err());
     }
 
     #[test]
-    fn runtime_constraints_are_semantic_and_match_real_version_output() {
-        assert!(
-            runtime_version_satisfies("Docker version 24.0.7, build test", ">=20.10")
-                .expect("docker version")
-        );
-        assert!(
-            !runtime_version_satisfies("Docker version 19.03.15", ">=20.10")
-                .expect("old docker version")
-        );
-        assert!(
-            runtime_version_satisfies("Docker Compose version v2.27.1", ">=2.0")
-                .expect("compose version")
-        );
-        assert!(runtime_version_satisfies("unknown", ">=2.0").is_err());
-        assert!(runtime_version_satisfies("Docker 24.0", "24.0").is_err());
-
-        let mut errors = Vec::new();
-        validate_runtime(
-            &ReleaseRuntime {
-                os: "windows".into(),
-                arch: "arm64".into(),
-                docker: "latest".into(),
-                compose: ">=v2".into(),
+    fn deployment_image_fingerprint_is_independent_of_selection_order() {
+        let temp = tempfile::tempdir().expect("temp");
+        let first = temp.path().join("first.tar");
+        let second = temp.path().join("second.tar");
+        image_tar(&first, "repo/first:1");
+        image_tar(&second, "repo/second:2");
+        let images = vec![
+            DeploymentImageInput {
+                service_name: "second".into(),
+                file_path: second.to_string_lossy().into_owned(),
+                image_tag: "repo/second:2".into(),
             },
-            &mut errors,
-        );
-        assert_eq!(errors.len(), 4);
+            DeploymentImageInput {
+                service_name: "first".into(),
+                file_path: first.to_string_lossy().into_owned(),
+                image_tag: "repo/first:1".into(),
+            },
+        ];
+        let forward = inspect_deployment_images(&images).expect("forward");
+        let reverse = inspect_deployment_images(&images.into_iter().rev().collect::<Vec<_>>())
+            .expect("reverse");
+        assert_eq!(forward.fingerprint, reverse.fingerprint);
+        assert_eq!(forward.image_files, reverse.image_files);
     }
 
     #[test]
-    fn image_tar_limits_cover_file_size_entry_count_and_declared_bytes() {
+    fn image_archive_limits_are_enforced() {
         let temp = tempfile::tempdir().expect("temp");
-        let oversized = temp.path().join("oversized.tar");
-        std::fs::File::create(&oversized)
-            .expect("create oversized")
-            .set_len(11)
-            .expect("size oversized");
-        assert!(inspect_image_archive_with_limits(&oversized, 10, 10, 100).is_err());
-
-        let archive_path = temp.path().join("entries.tar");
-        let file = std::fs::File::create(&archive_path).expect("create tar");
-        let mut builder = tar::Builder::new(file);
-        for (path, content) in [
-            (
-                "manifest.json",
-                br#"[{"Config":"config.json","RepoTags":["device-edge:1"],"Layers":[]}]"#
-                    .as_slice(),
-            ),
-            ("layer.tar", b"layer".as_slice()),
-        ] {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(content.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            builder
-                .append_data(&mut header, path, Cursor::new(content))
-                .expect("append tar entry");
-        }
-        builder.finish().expect("finish tar");
-        assert!(inspect_image_archive_with_limits(&archive_path, 1024 * 1024, 1, 1024).is_err());
-        assert!(inspect_image_archive_with_limits(&archive_path, 1024 * 1024, 10, 10).is_err());
+        let path = temp.path().join("app.tar");
+        image_tar(&path, "repo/app:1");
+        assert!(inspect_image_archive_with_limits(&path, 1, 10, 1024).is_err());
     }
 }

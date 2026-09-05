@@ -8,3 +8,7 @@ export function commandErrorText(error: unknown, fallback: string) {
 export function commandErrorCode(error: unknown) {
   return (error as Partial<CommandErrorDto> | undefined)?.code;
 }
+
+export function commandFieldErrors(error: unknown) {
+  return (error as Partial<CommandErrorDto> | undefined)?.fieldErrors ?? {};
+}

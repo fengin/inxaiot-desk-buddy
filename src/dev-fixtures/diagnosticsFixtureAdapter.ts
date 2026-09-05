@@ -3,6 +3,7 @@ import type { DiagnosticsAdapter } from "@/shared/api/diagnosticsAdapter";
 export class FixtureDiagnosticsAdapter implements DiagnosticsAdapter {
   async getSystemDiagnostics() {
     return {
+      clientInstanceId: "DEMO-PC-001122AABBCC-192.0.2.142",
       applicationVersion: "fixture",
       sourceCommit: "fixture-only",
       localSchemaVersion: "fixture",

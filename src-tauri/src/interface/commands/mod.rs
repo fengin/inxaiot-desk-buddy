@@ -6,4 +6,5 @@ pub mod diagnostics;
 pub mod project_database;
 pub mod project_management;
 pub mod release_artifacts;
+pub mod service_inspection;
 pub mod task_activity;

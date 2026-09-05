@@ -3,8 +3,8 @@ use crate::application::ports::project_management::{
 };
 use crate::core::error::{AppError, AppResult};
 use crate::domain::aio::release_profile::{
-    ReleaseMasterKeyOperationResult, ReleaseMasterKeyTransferRequest, ReleaseProfileDraft,
-    ReleaseProfileValidation, ReleaseProfileView,
+    ReleaseAgentScriptReplaceRequest, ReleaseProfileDraft, ReleaseProfileValidation,
+    ReleaseProfileView,
 };
 use crate::domain::common::project::{
     ConfirmHostKeyRequest, HostKeyCaptureRequest, HostKeyObservation, PlatformLoginChallenge,
@@ -113,22 +113,20 @@ pub async fn save_release_profile<P: ReleaseProfileManagementPort>(
     port.save_release_profile(project_id, draft).await
 }
 
-pub async fn export_release_master_key<P: ReleaseProfileManagementPort>(
+pub async fn replace_release_agent_script<P: ReleaseProfileManagementPort>(
     port: &P,
     project_id: &str,
-    request: ReleaseMasterKeyTransferRequest,
-) -> AppResult<ReleaseMasterKeyOperationResult> {
+    request: ReleaseAgentScriptReplaceRequest,
+) -> AppResult<ReleaseProfileView> {
     request.validate()?;
-    port.export_release_master_key(project_id, request).await
+    port.replace_release_agent_script(project_id, request).await
 }
 
-pub async fn import_release_master_key<P: ReleaseProfileManagementPort>(
+pub async fn open_release_agent_script<P: ReleaseProfileManagementPort>(
     port: &P,
     project_id: &str,
-    request: ReleaseMasterKeyTransferRequest,
-) -> AppResult<ReleaseMasterKeyOperationResult> {
-    request.validate()?;
-    port.import_release_master_key(project_id, request).await
+) -> AppResult<()> {
+    port.open_release_agent_script(project_id).await
 }
 
 pub async fn list_host_keys<P: HostKeyManagementPort>(

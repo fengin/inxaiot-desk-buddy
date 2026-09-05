@@ -143,36 +143,19 @@ pub struct BuiltTestRelease {
     pub host_template: String,
     pub compose: String,
     pub images: BTreeMap<String, String>,
+    pub image_files: Vec<inxaiot_desk_buddy_lib::domain::aio::deployment::DeploymentImageInput>,
 }
 
 pub fn build_test_release(version: &str) -> BuiltTestRelease {
     use inxaiot_desk_buddy_lib::domain::aio::release::{
-        ReleaseImage, ReleaseManifest, ReleaseTemplates, inspect_image_archive,
-        inspect_release_directory,
+        ReleaseImage, ReleaseManifest, inspect_image_archive, sha256_file,
     };
-    use inxaiot_desk_buddy_lib::infrastructure::release_archive::create_release_tar;
+    use inxaiot_desk_buddy_lib::infrastructure::release_archive::create_generated_release_tar;
 
     let root = project_root();
     let temp = tempfile::tempdir().expect("temp release");
     let release = temp.path().join("release");
     std::fs::create_dir_all(release.join("images")).expect("images");
-    std::fs::create_dir_all(release.join("templates")).expect("templates");
-    for (source, destination) in [
-        (
-            root.join("test/docker-compose.yml"),
-            release.join("docker-compose.yml"),
-        ),
-        (
-            root.join("test/templates/env.template"),
-            release.join("templates/env.template"),
-        ),
-        (
-            root.join("test/templates/host-info.json.template"),
-            release.join("templates/host-info.json.template"),
-        ),
-    ] {
-        std::fs::copy(source, destination).expect("release template");
-    }
     let image_files = [
         ("emqx", "emqx-5.10.0.tar"),
         ("device-edge", "device-edge-1.0.0.Alpha.20260819.tar"),
@@ -184,6 +167,7 @@ pub fn build_test_release(version: &str) -> BuiltTestRelease {
     ];
     let mut manifest_images = Vec::new();
     let mut images = BTreeMap::new();
+    let mut deployment_images = Vec::new();
     for (service, file) in image_files {
         let source = root.join("test/images").join(file);
         let destination = release.join("images").join(file);
@@ -201,45 +185,43 @@ pub fn build_test_release(version: &str) -> BuiltTestRelease {
             .cloned()
             .expect("service tag");
         images.insert(service.into(), tag.clone());
+        deployment_images.push(
+            inxaiot_desk_buddy_lib::domain::aio::deployment::DeploymentImageInput {
+                service_name: service.into(),
+                file_path: destination.to_string_lossy().into_owned(),
+                image_tag: tag.clone(),
+            },
+        );
         manifest_images.push(ReleaseImage {
             service: service.into(),
             image: tag,
             archive: format!("images/{file}"),
+            sha256: sha256_file(&destination).expect("image sha"),
         });
     }
     let manifest = ReleaseManifest {
         schema_version: 1,
         version: version.into(),
-        compose_file: "docker-compose.yml".into(),
         images: manifest_images,
-        templates: ReleaseTemplates {
-            env: "templates/env.template".into(),
-            host_info: "templates/host-info.json.template".into(),
-        },
-        runtime: inxaiot_desk_buddy_lib::domain::aio::release::ReleaseRuntime {
-            os: "linux".into(),
-            arch: "x86_64".into(),
-            docker: ">=20.10".into(),
-            compose: ">=2.0".into(),
-        },
     };
     std::fs::write(
         release.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest).expect("manifest json"),
     )
     .expect("manifest");
-    let validation = inspect_release_directory(&release).expect("validate");
-    assert!(validation.valid, "{:?}", validation.errors);
-    let archive = create_release_tar(&release, &temp.path().join("release.tar")).expect("tar");
+    let archive =
+        create_generated_release_tar(&release, &temp.path().join("release.tar")).expect("tar");
     BuiltTestRelease {
-        env_template: std::fs::read_to_string(release.join("templates/env.template")).expect("env"),
-        host_template: std::fs::read_to_string(release.join("templates/host-info.json.template"))
+        env_template: std::fs::read_to_string(root.join("test/templates/env.template"))
+            .expect("env"),
+        host_template: std::fs::read_to_string(root.join("test/templates/host-info.json.template"))
             .expect("host"),
-        compose: std::fs::read_to_string(release.join("docker-compose.yml")).expect("compose"),
+        compose: std::fs::read_to_string(root.join("test/docker-compose.yml")).expect("compose"),
         _temp: temp,
         release_dir: release,
         archive,
         manifest,
         images,
+        image_files: deployment_images,
     }
 }

@@ -1,5 +1,6 @@
 import {
   applyInventoryImport,
+  checkEdgeNodeServices,
   discardInventoryImport,
   getEdgeNodeDetail,
   getLatestInventoryImport,
@@ -13,6 +14,7 @@ export class RealAioAdapter implements AioAdapter {
   readonly real = true;
   listNodes(projectId: string, query: Parameters<AioAdapter["listNodes"]>[1]) { return listEdgeNodes(projectId, query); }
   getNodeDetail(projectId: string, mac: string) { return getEdgeNodeDetail(projectId, mac); }
+  checkServices(projectId: string, mac: string) { return checkEdgeNodeServices(projectId, mac); }
   previewImport(projectId: string, filePath: string) { return previewInventoryImport(projectId, filePath); }
   getLatestImport(projectId: string) { return getLatestInventoryImport(projectId); }
   updateImportSelection(projectId: string, sessionId: string, selections: Parameters<AioAdapter["updateImportSelection"]>[2]) {

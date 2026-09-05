@@ -15,8 +15,7 @@ import type {
   WorkbenchSchemaStatus
 } from "@/shared/model/project";
 import type {
-  ReleaseMasterKeyOperationResult,
-  ReleaseMasterKeyTransferRequest,
+  ReleaseAgentScriptReplaceRequest,
   ReleaseProfileDraft,
   ReleaseProfileValidation,
   ReleaseProfileView
@@ -61,11 +60,11 @@ export class RealWorkbenchAdapter implements WorkbenchAdapter {
   saveReleaseProfile(projectId: string, draft: ReleaseProfileDraft) {
     return invoke<ReleaseProfileView>("save_release_profile", { projectId, draft });
   }
-  exportReleaseMasterKey(projectId: string, request: ReleaseMasterKeyTransferRequest) {
-    return invoke<ReleaseMasterKeyOperationResult>("export_release_master_key", { projectId, request });
+  replaceReleaseAgentScript(projectId: string, request: ReleaseAgentScriptReplaceRequest) {
+    return invoke<ReleaseProfileView>("replace_release_agent_script", { projectId, request });
   }
-  importReleaseMasterKey(projectId: string, request: ReleaseMasterKeyTransferRequest) {
-    return invoke<ReleaseMasterKeyOperationResult>("import_release_master_key", { projectId, request });
+  openReleaseAgentScript(projectId: string) {
+    return invoke<void>("open_release_agent_script", { projectId });
   }
   listHostKeys(projectId: string) {
     return invoke<HostKeyObservation[]>("list_host_keys", { projectId });

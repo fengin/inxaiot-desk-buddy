@@ -1,11 +1,14 @@
 import { createPinia, setActivePinia } from "pinia";
 import { nextTick } from "vue";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FixtureAioAdapter } from "@/dev-fixtures/aioFixtureAdapter";
 import { configureAioAdapter } from "@/shared/api/aioAdapter";
 import { useAioNodesStore } from "@/stores/aioNodes";
 import { usePreferencesStore } from "@/stores/preferences";
+import { configureActivityAdapter } from "@/shared/api/activityAdapter";
+import { FixtureActivityAdapter } from "@/dev-fixtures/activityFixtureAdapter";
+import { useActivityStore } from "@/stores/activity";
 
 const projectId = "project-shenzhen-bay";
 
@@ -13,6 +16,75 @@ describe("aio nodes store", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+    configureAioAdapter(new FixtureAioAdapter());
+    configureActivityAdapter(new FixtureActivityAdapter());
+  });
+
+  afterEach(() => {
+    useActivityStore().dispose();
+    vi.useRealTimers();
+  });
+
+  it("普通刷新只读记录，显式服务检查防重复且终态刷新列表与详情", async () => {
+    vi.useFakeTimers();
+    const adapter = new FixtureAioAdapter();
+    const check = vi.spyOn(adapter, "checkServices");
+    const list = vi.spyOn(adapter, "listNodes");
+    const detail = vi.spyOn(adapter, "getNodeDetail");
+    configureAioAdapter(adapter);
+    const store = useAioNodesStore();
+    const activity = useActivityStore();
+    await store.refresh(projectId, "AIO-1F");
+    const target = store.nodes[0]!;
+    await store.loadDetail(target.mac);
+    expect(check).not.toHaveBeenCalled();
+    const submitted = store.checkServices(target.mac);
+    await store.checkServices(target.mac);
+    const result = await submitted;
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(activity.selectedTaskId).toBe(result?.taskId);
+    expect(activity.panelTab).toBe("logs");
+    expect(activity.panelOpen).toBe(true);
+    expect(store.serviceInspection(target.mac)).toBeDefined();
+    await vi.advanceTimersByTimeAsync(600);
+    expect(store.serviceInspection(target.mac)).toBeUndefined();
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(list.mock.lastCall?.[1].search).toBe("AIO-1F");
+    expect(detail).toHaveBeenCalledTimes(2);
+    expect(store.detail?.node.serviceCheck?.services).toHaveLength(target.versions.length);
+    expect(store.detail?.node.serviceCheck?.lastFullCheckAt).toBeTruthy();
+  });
+
+  it("检查提交失败后释放按钮并保留之前的实测记录", async () => {
+    const adapter = new FixtureAioAdapter();
+    vi.spyOn(adapter, "checkServices").mockRejectedValue(new Error("检查任务正在执行"));
+    configureAioAdapter(adapter);
+    const store = useAioNodesStore();
+    await store.refresh(projectId);
+    const target = store.nodes[0]!;
+    await store.loadDetail(target.mac);
+    const detail = store.detail;
+    await expect(store.checkServices(target.mac)).rejects.toThrow("检查任务正在执行");
+    expect(store.serviceInspection(target.mac)).toBeUndefined();
+    expect(store.detail).toBe(detail);
+    expect(store.error).toContain("检查任务正在执行");
+  });
+
+  it("切换项目后旧检查完成不会刷新新项目详情", async () => {
+    vi.useFakeTimers();
+    const adapter = new FixtureAioAdapter();
+    const list = vi.spyOn(adapter, "listNodes");
+    configureAioAdapter(adapter);
+    const store = useAioNodesStore();
+    await store.refresh(projectId);
+    const target = store.nodes[0]!;
+    await store.checkServices(target.mac);
+    await store.refresh("another-project");
+    await store.loadDetail(target.mac);
+    const callsBeforeCompletion = list.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(600);
+    expect(list).toHaveBeenCalledTimes(callsBeforeCompletion);
+    expect(store.detail?.node.serviceCheck).toBeUndefined();
   });
 
   it("keeps browser fixtures behind the same real node DTO", async () => {

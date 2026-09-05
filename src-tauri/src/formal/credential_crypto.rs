@@ -4,14 +4,15 @@ use argon2::Argon2;
 use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
 
 use super::error::{FormalError, FormalResult};
 
-pub const PROJECT_KEY_CREDENTIAL_SCHEME: &str = "argon2id-aes256gcm-project-key";
-pub const PROJECT_MASTER_KEY_BYTES: usize = 32;
-const PROJECT_KEY_ASSOCIATED_DATA_PREFIX: &str =
-    "inxaiot-desk-buddy:aio-release-profile:project-key:v1";
+pub const INXVISION_CREDENTIAL_SCHEME: &str = "inxvision-aes256gcm-v1";
+pub const INXVISION_CREDENTIAL_KEY_VERSION: u32 = 1;
+const INXVISION_CREDENTIAL_MATERIAL: &[u8] = b"inxvision";
+const INXVISION_CREDENTIAL_ASSOCIATED_DATA: &[u8] =
+    b"inxaiot-desk-buddy:aio-release-profile:inxvision-fixed:v1";
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -32,56 +33,6 @@ impl std::fmt::Debug for ReleaseCredentials {
     }
 }
 
-#[derive(Clone)]
-pub struct ProjectMasterKey {
-    version: u32,
-    material: Zeroizing<Vec<u8>>,
-}
-
-impl ProjectMasterKey {
-    pub fn generate(version: u32) -> FormalResult<Self> {
-        if version == 0 {
-            return Err(FormalError::InvalidConfig("项目主密钥版本必须大于0".into()));
-        }
-        let mut material = vec![0_u8; PROJECT_MASTER_KEY_BYTES];
-        OsRng.fill_bytes(&mut material);
-        Ok(Self {
-            version,
-            material: Zeroizing::new(material),
-        })
-    }
-
-    pub fn from_bytes(version: u32, material: Vec<u8>) -> FormalResult<Self> {
-        if version == 0 || material.len() != PROJECT_MASTER_KEY_BYTES {
-            return Err(FormalError::InvalidConfig(
-                "项目主密钥版本或长度无效".into(),
-            ));
-        }
-        Ok(Self {
-            version,
-            material: Zeroizing::new(material),
-        })
-    }
-
-    pub fn version(&self) -> u32 {
-        self.version
-    }
-
-    pub fn material(&self) -> &[u8] {
-        self.material.as_slice()
-    }
-}
-
-impl std::fmt::Debug for ProjectMasterKey {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ProjectMasterKey")
-            .field("version", &self.version)
-            .field("material", &"[REDACTED]")
-            .finish()
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct CredentialEnvelope {
     pub scheme: String,
@@ -91,63 +42,14 @@ pub struct CredentialEnvelope {
     pub ciphertext: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CredentialMetadata {
-    pub scheme: String,
-    pub key_version: u32,
-}
-
-impl CredentialMetadata {
-    pub fn is_project_key(&self) -> bool {
-        self.scheme == PROJECT_KEY_CREDENTIAL_SCHEME && self.key_version > 0
-    }
-}
-
 pub fn encrypt_release_credentials(
-    key: &ProjectMasterKey,
     credentials: &ReleaseCredentials,
 ) -> FormalResult<CredentialEnvelope> {
-    let associated_data = project_key_associated_data(key.version());
-    encrypt_with_material(
-        key.material(),
-        PROJECT_KEY_CREDENTIAL_SCHEME,
-        key.version(),
-        associated_data.as_bytes(),
-        credentials,
-    )
-}
-
-pub fn decrypt_release_credentials(
-    key: &ProjectMasterKey,
-    envelope: &CredentialEnvelope,
-) -> FormalResult<ReleaseCredentials> {
-    if envelope.scheme != PROJECT_KEY_CREDENTIAL_SCHEME
-        || envelope.key_version == 0
-        || envelope.key_version != key.version()
-    {
-        return Err(FormalError::InvalidConfig(
-            "发布凭据与项目主密钥版本不匹配".into(),
-        ));
-    }
-    let associated_data = project_key_associated_data(envelope.key_version);
-    decrypt_with_material(key.material(), envelope, associated_data.as_bytes())
-}
-
-fn encrypt_with_material(
-    material: &[u8],
-    scheme: &str,
-    key_version: u32,
-    associated_data: &[u8],
-    credentials: &ReleaseCredentials,
-) -> FormalResult<CredentialEnvelope> {
-    if material.is_empty() {
-        return Err(FormalError::InvalidConfig("凭据加密密钥不能为空".into()));
-    }
     let mut salt = [0_u8; 16];
     let mut nonce = [0_u8; 12];
     OsRng.fill_bytes(&mut salt);
     OsRng.fill_bytes(&mut nonce);
-    let mut key = derive_key(material, &salt)?;
+    let mut key = derive_key(&salt)?;
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| {
         key.zeroize();
         FormalError::InvalidConfig("初始化凭据加密器失败".into())
@@ -161,30 +63,32 @@ fn encrypt_with_material(
             &nonce_value,
             aes_gcm::aead::Payload {
                 msg: &plaintext,
-                aad: associated_data,
+                aad: INXVISION_CREDENTIAL_ASSOCIATED_DATA,
             },
         )
         .map_err(|_| FormalError::InvalidConfig("加密发布凭据失败".into()))?;
     plaintext.zeroize();
     key.zeroize();
     Ok(CredentialEnvelope {
-        scheme: scheme.into(),
-        key_version,
+        scheme: INXVISION_CREDENTIAL_SCHEME.into(),
+        key_version: INXVISION_CREDENTIAL_KEY_VERSION,
         salt,
         nonce,
         ciphertext,
     })
 }
 
-fn decrypt_with_material(
-    material: &[u8],
+pub fn decrypt_release_credentials(
     envelope: &CredentialEnvelope,
-    associated_data: &[u8],
 ) -> FormalResult<ReleaseCredentials> {
-    if material.is_empty() {
-        return Err(FormalError::InvalidConfig("凭据解密密钥不能为空".into()));
+    if envelope.scheme != INXVISION_CREDENTIAL_SCHEME
+        || envelope.key_version != INXVISION_CREDENTIAL_KEY_VERSION
+    {
+        return Err(FormalError::InvalidConfig(
+            "发布凭据加密格式已更新，请重新填写发布参数".into(),
+        ));
     }
-    let mut key = derive_key(material, &envelope.salt)?;
+    let mut key = derive_key(&envelope.salt)?;
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| {
         key.zeroize();
         FormalError::InvalidConfig("初始化凭据解密器失败".into())
@@ -196,7 +100,7 @@ fn decrypt_with_material(
             &nonce_value,
             aes_gcm::aead::Payload {
                 msg: &envelope.ciphertext,
-                aad: associated_data,
+                aad: INXVISION_CREDENTIAL_ASSOCIATED_DATA,
             },
         )
         .map_err(|_| FormalError::InvalidConfig("发布凭据解密失败".into()))?;
@@ -207,10 +111,10 @@ fn decrypt_with_material(
     result
 }
 
-fn derive_key(material: &[u8], salt: &[u8; 16]) -> FormalResult<[u8; 32]> {
+fn derive_key(salt: &[u8; 16]) -> FormalResult<[u8; 32]> {
     let mut key = [0_u8; 32];
     Argon2::default()
-        .hash_password_into(material, salt, &mut key)
+        .hash_password_into(INXVISION_CREDENTIAL_MATERIAL, salt, &mut key)
         .map_err(|error| {
             tracing::error!(error = ?crate::core::log_safety::safe_error(&error), "derive release credential key failed");
             FormalError::InvalidConfig("派生发布凭据密钥失败".into())
@@ -218,14 +122,10 @@ fn derive_key(material: &[u8], salt: &[u8; 16]) -> FormalResult<[u8; 32]> {
     Ok(key)
 }
 
-fn project_key_associated_data(version: u32) -> String {
-    format!("{PROJECT_KEY_ASSOCIATED_DATA_PREFIX}:key-version:{version}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        PROJECT_KEY_CREDENTIAL_SCHEME, ProjectMasterKey, ReleaseCredentials,
+        INXVISION_CREDENTIAL_KEY_VERSION, INXVISION_CREDENTIAL_SCHEME, ReleaseCredentials,
         decrypt_release_credentials, encrypt_release_credentials,
     };
 
@@ -243,25 +143,31 @@ mod tests {
     }
 
     #[test]
-    fn project_master_key_round_trip_is_version_bound() {
+    fn fixed_inxvision_key_round_trip_is_authenticated() {
         let credentials = fixture();
-        let key = ProjectMasterKey::generate(3).expect("generate project key");
-        let envelope =
-            encrypt_release_credentials(&key, &credentials).expect("encrypt credentials");
+        let envelope = encrypt_release_credentials(&credentials).expect("encrypt credentials");
         let cipher_text = String::from_utf8_lossy(&envelope.ciphertext);
-        assert_eq!(envelope.scheme, PROJECT_KEY_CREDENTIAL_SCHEME);
-        assert_eq!(envelope.key_version, 3);
+        assert_eq!(envelope.scheme, INXVISION_CREDENTIAL_SCHEME);
+        assert_eq!(envelope.key_version, INXVISION_CREDENTIAL_KEY_VERSION);
         assert!(!cipher_text.contains("auth-key-secret"));
         assert!(!cipher_text.contains("private-key-secret"));
         assert_eq!(
-            decrypt_release_credentials(&key, &envelope).expect("decrypt credentials"),
+            decrypt_release_credentials(&envelope).expect("decrypt credentials"),
             credentials
         );
-        let wrong_key = ProjectMasterKey::generate(3).expect("generate wrong key");
-        assert!(decrypt_release_credentials(&wrong_key, &envelope).is_err());
-        let wrong_version =
-            ProjectMasterKey::from_bytes(4, key.material().to_vec()).expect("wrong version key");
-        assert!(decrypt_release_credentials(&wrong_version, &envelope).is_err());
-        assert!(!format!("{key:?}").contains(&hex::encode(key.material())));
+        let second = encrypt_release_credentials(&fixture()).expect("encrypt again");
+        assert_ne!(envelope.salt, second.salt);
+        assert_ne!(envelope.nonce, second.nonce);
+        let mut tampered = envelope.clone();
+        tampered.ciphertext[0] ^= 1;
+        assert!(decrypt_release_credentials(&tampered).is_err());
+        tampered = envelope;
+        tampered.key_version += 1;
+        assert!(
+            decrypt_release_credentials(&tampered)
+                .expect_err("reject prior credential format")
+                .to_string()
+                .contains("发布凭据加密格式已更新，请重新填写发布参数")
+        );
     }
 }

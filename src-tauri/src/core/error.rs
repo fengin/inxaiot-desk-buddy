@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use thiserror::Error;
 
 pub type AppResult<T> = Result<T, AppError>;
@@ -6,6 +8,8 @@ pub type AppResult<T> = Result<T, AppError>;
 pub enum AppError {
     #[error("配置无效：{0}")]
     InvalidConfig(String),
+    #[error("参数校验失败，请修正标红的输入项")]
+    InvalidFields(BTreeMap<String, String>),
     #[error("资源状态冲突：{0}")]
     Conflict(String),
     #[error("未找到资源：{0}")]

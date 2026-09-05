@@ -15,6 +15,7 @@ export interface FieldConflict {
   platformValue?: string;
 }
 
+/** 项目共享的成功部署版本记录；旧 observed 字段不作为本机服务观测。 */
 export interface ServiceVersionRecord {
   macNormalized: string;
   serviceName: string;
@@ -23,6 +24,41 @@ export interface ServiceVersionRecord {
   observedImageName?: string;
   observedVersion?: string;
   observedAt?: string;
+}
+
+export type ServiceObservationState = "normal" | "abnormal" | "version_mismatch" | "unknown";
+
+export interface ServiceObservation {
+  serviceName: string;
+  state: ServiceObservationState;
+  runtimeState: string;
+  healthStatus?: string;
+  expectedImage?: string;
+  actualImage?: string;
+  imageId?: string;
+  message?: string;
+  checkedAt: string;
+  source: string;
+}
+
+export interface ServiceCheckReport {
+  startedAt: string;
+  checkedAt: string;
+  source: string;
+  scope: "all" | "service";
+  serviceName?: string;
+  expectedServices?: string[];
+  services: ServiceObservation[];
+  state: "succeeded" | "failed";
+  error?: string;
+}
+
+/** 当前电脑保存的服务检查快照，按项目及 MAC 隔离。 */
+export interface NodeServiceCheckSnapshot {
+  expectedServices?: string[];
+  services: ServiceObservation[];
+  lastFullCheckAt?: string;
+  lastAttempt?: ServiceCheckReport;
 }
 
 export interface AioNodeListItem {
@@ -38,11 +74,13 @@ export interface AioNodeListItem {
   serviceState: "healthy" | "warning" | "unreachable" | "unknown";
   serviceLabel: string;
   lastOperation: string;
+  lastOperationAt?: string;
   platformId?: string;
   source: string;
   version: number;
   conflicts: FieldConflict[];
   versions: ServiceVersionRecord[];
+  serviceCheck?: NodeServiceCheckSnapshot;
 }
 
 export interface AioNodeStats {
@@ -55,6 +93,8 @@ export interface AioNodeStats {
 
 export interface PlatformRecordIssue {
   platformAioId: string;
+  name: string;
+  ip: string;
   code: string;
   message: string;
   rawMac: string;
@@ -107,7 +147,6 @@ export interface AioNodeDetail {
   versions: ServiceVersionRecord[];
   lastOperation?: OperationRecordSummary;
   latestSshCheck?: LocalCheckRecord;
-  latestServiceCheck?: LocalCheckRecord;
 }
 
 export interface InventoryValues {

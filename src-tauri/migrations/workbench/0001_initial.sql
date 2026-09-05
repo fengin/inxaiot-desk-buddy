@@ -4,7 +4,7 @@ CREATE TABLE operation_record (
     operation_type VARCHAR(64) NOT NULL,
     operation_name VARCHAR(255) NOT NULL,
     operator_name VARCHAR(128) NOT NULL,
-    instance_id VARCHAR(64) NOT NULL,
+    instance_id VARCHAR(512) NOT NULL,
     state VARCHAR(32) NOT NULL,
     target_count INT UNSIGNED NOT NULL DEFAULT 0,
     success_count INT UNSIGNED NOT NULL DEFAULT 0,
@@ -48,15 +48,17 @@ CREATE TABLE resource_lease (
     resource_key VARCHAR(191) NOT NULL,
     domain_type VARCHAR(32) NOT NULL,
     operation_id CHAR(36) NOT NULL,
-    owner_instance_id VARCHAR(64) NOT NULL,
+    owner_instance_id VARCHAR(512) NOT NULL,
     owner_user VARCHAR(128) NOT NULL,
     lease_token CHAR(36) NOT NULL,
     fencing_token BIGINT UNSIGNED NOT NULL,
+    lease_state VARCHAR(16) NOT NULL DEFAULT 'active',
     acquired_at DATETIME(6) NOT NULL,
     heartbeat_at DATETIME(6) NOT NULL,
     expires_at DATETIME(6) NOT NULL,
     PRIMARY KEY (resource_type, resource_key),
     INDEX idx_lease_expiry (expires_at),
+    INDEX idx_lease_state_expiry (lease_state, expires_at),
     INDEX idx_lease_operation (operation_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -67,7 +69,7 @@ CREATE TABLE audit_event (
     object_key VARCHAR(191) NOT NULL,
     action VARCHAR(32) NOT NULL,
     operator_name VARCHAR(128) NOT NULL,
-    instance_id VARCHAR(64) NOT NULL,
+    instance_id VARCHAR(512) NOT NULL,
     old_version BIGINT UNSIGNED NULL,
     new_version BIGINT UNSIGNED NULL,
     changed_fields_json JSON NOT NULL,
@@ -80,6 +82,11 @@ CREATE TABLE aio_release_profile (
     profile_key VARCHAR(32) NOT NULL PRIMARY KEY,
     env_template MEDIUMTEXT NOT NULL,
     compose_template MEDIUMTEXT NOT NULL,
+    host_info_template MEDIUMTEXT NOT NULL,
+    agent_script MEDIUMTEXT NULL,
+    agent_version VARCHAR(64) NULL,
+    agent_protocol_version VARCHAR(16) NULL,
+    agent_sha256 CHAR(64) NULL,
     platform_host VARCHAR(255) NOT NULL,
     platform_api_port INT UNSIGNED NOT NULL,
     platform_mqtt_host VARCHAR(255) NOT NULL,
@@ -135,4 +142,3 @@ CREATE TABLE aio_node_service_version (
     CONSTRAINT fk_service_aio_node
         FOREIGN KEY (mac_normalized) REFERENCES aio_node(mac_normalized) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-

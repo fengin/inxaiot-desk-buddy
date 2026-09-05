@@ -107,17 +107,40 @@ for root in "$1" "$2"; do
 done
 "#;
 
-// 沿用旧版Agent的默认服务端口；升级允许现有服务占用，不能把自身容器误报为冲突。
+// 端口来自已经校验并渲染的项目Compose；升级允许现有服务占用，不能把自身容器误报为冲突。
 const PORTS_SCRIPT: &str = r#"set -eu
 [ "$1" = first ] || exit 0
+shift
 command -v ss >/dev/null 2>&1 || exit 23
 listeners=$(ss -lntH) || exit 23
-for port in 1883 6001 6002 7000; do
+for port in "$@"; do
   if printf '%s\n' "$listeners" | awk '{print $4}' | grep -Eq "[:.]${port}$"; then
     printf '%s' "$port"
     exit 20
   fi
 done
+"#;
+
+// 升级必须从已经落盘的current版本开始；路径和部署模式始终通过独立位置参数传入。
+// 校验口径分别对齐Agent的backup（整包升级）和service-check（单服升级）前置要求。
+const CURRENT_RELEASE_SCRIPT: &str = r#"set -eu
+case "$3" in
+  first_deploy) exit 0 ;;
+  full_upgrade|service_upgrade) ;;
+  *) exit 29 ;;
+esac
+current_path="$1/current"
+if [ ! -L "$current_path" ] && [ ! -d "$current_path" ]; then
+  exit 24
+fi
+current_dir=$(readlink -f "$current_path" 2>/dev/null || true)
+[ -n "$current_dir" ] && [ -d "$current_dir" ] || exit 24
+[ -f "$current_dir/docker-compose.yml" ] || exit 25
+[ -f "$current_dir/.env" ] || exit 26
+if [ "$3" = full_upgrade ]; then
+  [ -f "$current_dir/manifest.json" ] || exit 27
+  [ -f "$2/config/host-info.json" ] || exit 28
+fi
 "#;
 
 fn script_request(script: &str, args: Vec<String>) -> ExecRequest {
@@ -190,8 +213,67 @@ pub(super) async fn remote_environment_checks(
     values: &ReleaseProfileValues,
     mac: &str,
     mode: DeploymentMode,
+    published_ports: &[u16],
 ) -> Vec<DeploymentPreflightCheck> {
     let mut checks = Vec::new();
+    if mode != DeploymentMode::FirstDeploy {
+        let mode_argument = match mode {
+            DeploymentMode::FullUpgrade => "full_upgrade",
+            DeploymentMode::ServiceUpgrade => "service_upgrade",
+            DeploymentMode::FirstDeploy => unreachable!("首次部署不执行当前版本检查"),
+        };
+        let result = connection
+            .run(
+                &script_request(
+                    CURRENT_RELEASE_SCRIPT,
+                    vec![
+                        values.aio_deploy_root.clone(),
+                        values.aio_data_root.clone(),
+                        mode_argument.into(),
+                    ],
+                ),
+                &CancellationToken::new(),
+                &NoopRemoteOutputSink,
+            )
+            .await;
+        let message = match result {
+            Ok(result) if result.exit_status == 0 => {
+                checks.push(passed(
+                    "remote_current_release",
+                    "当前版本",
+                    Some(mac),
+                    "当前版本满足升级前置条件".into(),
+                ));
+                None
+            }
+            Ok(result) => Some(match result.exit_status {
+                24 => "当前一体机尚未完成首次部署，请选择首次部署".into(),
+                25 => "当前版本缺少docker-compose.yml，无法执行升级，请先恢复当前版本".into(),
+                26 => "当前版本缺少.env，无法执行升级，请先恢复当前版本".into(),
+                27 => "当前版本缺少manifest.json，无法执行整包升级，请先恢复当前版本".into(),
+                28 => {
+                    "当前一体机缺少config/host-info.json，无法执行整包升级，请先恢复当前配置".into()
+                }
+                29 => "升级模式无效，未执行当前版本检查".into(),
+                _ => "当前版本检查未完成，请检查一体机部署目录".into(),
+            }),
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(message) = message {
+            checks.push(failed(
+                "remote_current_release",
+                "当前版本",
+                Some(mac),
+                message,
+                remediation(
+                    "repair_remote_runtime",
+                    "检查一体机当前版本",
+                    None,
+                    Some(mac),
+                ),
+            ));
+        }
+    }
     for (code, script, args, summary) in [
         (
             "remote_storage",
@@ -202,14 +284,18 @@ pub(super) async fn remote_environment_checks(
         (
             "remote_ports",
             PORTS_SCRIPT,
-            vec![
-                if mode == DeploymentMode::FirstDeploy {
-                    "first"
-                } else {
-                    "upgrade"
-                }
-                .into(),
-            ],
+            [
+                vec![
+                    if mode == DeploymentMode::FirstDeploy {
+                        "first"
+                    } else {
+                        "upgrade"
+                    }
+                    .into(),
+                ],
+                published_ports.iter().map(u16::to_string).collect(),
+            ]
+            .concat(),
             if mode == DeploymentMode::FirstDeploy {
                 "服务端口未被占用"
             } else {
@@ -234,7 +320,10 @@ pub(super) async fn remote_environment_checks(
                 16 => "数据或部署目录所在磁盘剩余空间不足1GiB，请先释放空间".into(),
                 20 => {
                     let port = result.stdout.trim();
-                    if ["1883", "6001", "6002", "7000"].contains(&port) {
+                    if port
+                        .parse::<u16>()
+                        .is_ok_and(|port| published_ports.contains(&port))
+                    {
                         format!("首次部署所需端口{port}已被占用，请确认旧服务或其他程序")
                     } else {
                         "首次部署所需服务端口已被占用".into()
@@ -270,6 +359,33 @@ mod tests {
         requests: Mutex<Vec<ExecRequest>>,
     }
 
+    struct CurrentReleaseProbeConnection {
+        current_exit_status: u32,
+        requests: Mutex<Vec<ExecRequest>>,
+    }
+
+    impl RemoteCommandExecutor for CurrentReleaseProbeConnection {
+        async fn run(
+            &self,
+            request: &ExecRequest,
+            _: &CancellationToken,
+            _: &dyn RemoteOutputSink,
+        ) -> AppResult<RemoteCommandResult> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(RemoteCommandResult {
+                exit_status: if request.stdin.as_deref() == Some(CURRENT_RELEASE_SCRIPT.as_bytes())
+                {
+                    self.current_exit_status
+                } else {
+                    0
+                },
+                stdout: String::new(),
+                stderr: "不应回显的远端输出".into(),
+                duration_ms: 1,
+            })
+        }
+    }
+
     impl RemoteCommandExecutor for ProbeConnection {
         async fn run(
             &self,
@@ -291,6 +407,7 @@ mod tests {
         ReleaseProfileValues {
             env_template: String::new(),
             compose_template: String::new(),
+            host_info_template: String::new(),
             platform_host: "192.0.2.1".into(),
             platform_api_port: 8055,
             platform_mqtt_host: "192.0.2.2".into(),
@@ -298,7 +415,7 @@ mod tests {
             ssh_port: 22,
             ssh_timeout_seconds: 15,
             aio_data_root: "/opt/data".into(),
-            aio_deploy_root: "/opt/data/inxaiot".into(),
+            aio_deploy_root: "/opt/data/deploy".into(),
         }
     }
 
@@ -333,11 +450,22 @@ mod tests {
             &values(),
             "001122334455",
             DeploymentMode::FirstDeploy,
+            &[1883, 6002],
         )
         .await;
         assert!(checks.iter().all(|check| check.blocking));
         assert!(checks[0].message.contains("空间不足"));
-        assert_eq!(connection.requests.lock().unwrap()[1].args[2], "first");
+        assert_eq!(
+            connection
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|request| request.stdin.as_deref() == Some(PORTS_SCRIPT.as_bytes()))
+                .expect("必须执行端口检查")
+                .args[2],
+            "first"
+        );
         let connection = ProbeConnection {
             exit_status: 0,
             stdout: String::new(),
@@ -348,6 +476,7 @@ mod tests {
             &values(),
             "001122334455",
             DeploymentMode::FullUpgrade,
+            &[1883, 6002],
         )
         .await;
         assert!(
@@ -355,7 +484,103 @@ mod tests {
                 .iter()
                 .all(|check| check.status == PreflightStatus::Passed)
         );
-        assert_eq!(connection.requests.lock().unwrap()[1].args[2], "upgrade");
+        assert_eq!(
+            connection
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|request| request.stdin.as_deref() == Some(PORTS_SCRIPT.as_bytes()))
+                .expect("必须执行端口检查")
+                .args[2],
+            "upgrade"
+        );
+    }
+
+    #[tokio::test]
+    async fn upgrade_requires_a_valid_current_release_but_first_deploy_does_not_probe_it() {
+        let first = CurrentReleaseProbeConnection {
+            current_exit_status: 24,
+            requests: Mutex::new(vec![]),
+        };
+        let first_checks = remote_environment_checks(
+            &first,
+            &values(),
+            "001122334455",
+            DeploymentMode::FirstDeploy,
+            &[1883, 6002],
+        )
+        .await;
+        assert!(
+            first_checks
+                .iter()
+                .all(|check| check.code != "remote_current_release")
+        );
+        assert!(first.requests.lock().unwrap().iter().all(|request| {
+            request.stdin.as_deref() != Some(CURRENT_RELEASE_SCRIPT.as_bytes())
+        }));
+
+        for (mode, mode_argument) in [
+            (DeploymentMode::FullUpgrade, "full_upgrade"),
+            (DeploymentMode::ServiceUpgrade, "service_upgrade"),
+        ] {
+            let upgrade = CurrentReleaseProbeConnection {
+                current_exit_status: 24,
+                requests: Mutex::new(vec![]),
+            };
+            let checks =
+                remote_environment_checks(&upgrade, &values(), "001122334455", mode, &[1883, 6002])
+                    .await;
+            let current = checks
+                .iter()
+                .find(|check| check.code == "remote_current_release")
+                .expect("升级必须产生当前版本检查");
+            assert_eq!(current.status, PreflightStatus::Failed);
+            assert!(current.blocking);
+            assert_eq!(
+                current.message,
+                "当前一体机尚未完成首次部署，请选择首次部署"
+            );
+            let requests = upgrade.requests.lock().unwrap();
+            let request = requests
+                .iter()
+                .find(|request| request.stdin.as_deref() == Some(CURRENT_RELEASE_SCRIPT.as_bytes()))
+                .expect("升级必须执行固定当前版本脚本");
+            assert_eq!(
+                request.args,
+                ["-s", "--", "/opt/data/deploy", "/opt/data", mode_argument]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn upgrade_current_release_file_failures_are_specific_and_do_not_echo_remote_output() {
+        for (exit_status, expected) in [
+            (25, "docker-compose.yml"),
+            (26, ".env"),
+            (27, "manifest.json"),
+            (28, "config/host-info.json"),
+        ] {
+            let connection = CurrentReleaseProbeConnection {
+                current_exit_status: exit_status,
+                requests: Mutex::new(vec![]),
+            };
+            let checks = remote_environment_checks(
+                &connection,
+                &values(),
+                "001122334455",
+                DeploymentMode::FullUpgrade,
+                &[1883, 6002],
+            )
+            .await;
+            let current = checks
+                .iter()
+                .find(|check| check.code == "remote_current_release")
+                .expect("整包升级必须产生当前版本检查");
+            assert_eq!(current.status, PreflightStatus::Failed);
+            assert!(current.message.contains(expected));
+            assert!(!current.message.contains("不应回显"));
+        }
     }
 
     #[tokio::test]
@@ -376,5 +601,8 @@ mod tests {
         assert!(!STORAGE_SCRIPT.contains("mkdir"));
         assert!(!STORAGE_SCRIPT.contains("rm "));
         assert!(PORTS_SCRIPT.contains("[ \"$1\" = first ] || exit 0"));
+        assert!(CURRENT_RELEASE_SCRIPT.contains("current_path=\"$1/current\""));
+        assert!(CURRENT_RELEASE_SCRIPT.contains("[ -f \"$2/config/host-info.json\" ]"));
+        assert!(!CURRENT_RELEASE_SCRIPT.contains(&values().aio_deploy_root));
     }
 }

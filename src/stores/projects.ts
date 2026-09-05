@@ -208,7 +208,7 @@ export const useProjectStore = defineStore("projects", () => {
           project.session = next.state === "missing" ? undefined : next;
           if (project.databaseState === "connected" && project.schemaState !== "ready") {
             project.connectionState = "schema_required";
-            project.statusMessage = "项目数据库结构尚未就绪，请在项目入口完成初始化或升级";
+            project.statusMessage = "项目数据库结构尚未就绪，请编辑项目并完成初始化或升级";
           } else if (next.state === "expired") {
             project.connectionState = "session_expired";
             project.statusMessage = "平台会话已失效，请重新登录";

@@ -1,8 +1,8 @@
 use crate::core::error::AppResult;
 use crate::domain::aio::deployment::DeploymentPlanInput;
 use crate::domain::aio::deployment_workflow::{
-    DeploymentPreflightReport, DeploymentTaskSubmission, DeploymentTaskView,
-    OperationHistoryDetail, OperationHistoryPage, OperationHistoryQuery,
+    DeploymentExecutionSnapshot, DeploymentPreflightReport, DeploymentTaskSubmission,
+    DeploymentTaskView, OperationHistoryDetail, OperationHistoryPage, OperationHistoryQuery,
 };
 
 #[allow(async_fn_in_trait)]
@@ -19,7 +19,8 @@ pub trait DeploymentSubmissionPort: Send + Sync {
     async fn submit(
         &self,
         project_id: &str,
-        input: &DeploymentPlanInput,
+        preflight_task_id: &str,
+        execution_snapshot: &DeploymentExecutionSnapshot,
     ) -> AppResult<DeploymentTaskSubmission>;
 }
 

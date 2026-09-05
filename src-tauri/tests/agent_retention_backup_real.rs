@@ -34,12 +34,10 @@ async fn agent_consistent_backup_and_retention_run_on_both_nodes_with_exact_clea
         let release_version = format!("{operation_id}-{index}");
         let backup_old = format!("/opt/data/backup/{operation_id}-{index}-expired");
         let backup_fresh = format!("/opt/data/backup/{operation_id}-{index}-fresh");
-        let upgrade_old = format!(
-            "/opt/data/deploy/inxvision-edge/service-upgrades/{operation_id}-{index}-expired"
-        );
-        let upgrade_fresh = format!(
-            "/opt/data/deploy/inxvision-edge/service-upgrades/{operation_id}-{index}-fresh"
-        );
+        let upgrade_old =
+            format!("/opt/data/deploy/service-upgrades/{operation_id}-{index}-expired");
+        let upgrade_fresh =
+            format!("/opt/data/deploy/service-upgrades/{operation_id}-{index}-fresh");
         let staging_old = format!("/opt/data/.inxaiot-desk-buddy/{operation_id}-{index}-expired");
         let staging_fresh = format!("/opt/data/.inxaiot-desk-buddy/{operation_id}-{index}-fresh");
         let mut generated_backup = None;

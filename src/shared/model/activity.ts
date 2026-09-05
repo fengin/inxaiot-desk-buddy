@@ -47,8 +47,23 @@ export interface ActivityLogPage {
 }
 
 export interface TaskEventPayload {
+  eventId: string;
   localTaskId: string;
+  operationRecordId?: string | null;
   sequence: number;
+  localProjectId: string;
+  domainType: string;
+  resourceType?: string | null;
+  resourceKey?: string | null;
+  stage: string;
+  status: string;
+  progressCurrent?: number | null;
+  progressTotal?: number | null;
+  level: "info" | "warn" | "error";
+  messageCode: string;
+  messageParams: Record<string, string>;
+  message?: string | null;
+  timestamp: string;
 }
 
 export interface CommandErrorDto {
@@ -56,4 +71,5 @@ export interface CommandErrorDto {
   messageKey: string;
   params: Record<string, string>;
   traceId: string;
+  fieldErrors?: Record<string, string>;
 }

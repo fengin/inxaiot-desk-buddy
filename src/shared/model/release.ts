@@ -1,32 +1,7 @@
-export interface ReleaseImage {
-  service: string;
-  image: string;
-  archive: string;
-}
-
-export interface ReleaseManifest {
-  schemaVersion: number;
-  version: string;
-  composeFile: string;
-  images: ReleaseImage[];
-  templates: { env: string; hostInfo: string };
-  runtime: { os: string; arch: string; docker: string; compose: string };
-}
-
 export interface ImageArchiveInfo {
   path: string;
   size: number;
   repoTags: string[];
-}
-
-export interface ReleaseValidation {
-  valid: boolean;
-  packageDir: string;
-  manifest?: ReleaseManifest;
-  fingerprint?: string;
-  images: ImageArchiveInfo[];
-  errors: string[];
-  warnings: string[];
 }
 
 export interface ServiceImageInspection {
@@ -38,14 +13,22 @@ export interface ServiceImageInspection {
 export interface DeploymentPlanInput {
   mode: "first_deploy" | "full_upgrade" | "service_upgrade";
   targetMacs: string[];
-  artifactPath: string;
-  artifactName: string;
-  artifactVersion: string;
+  imageFiles: DeploymentImageInput[];
+  artifactPath?: string;
+  artifactName?: string;
+  artifactVersion?: string;
   serviceName?: string;
   imageName?: string;
+  serviceImageEnvironmentVariable?: string;
   images?: Record<string, string>;
   batchSize: number;
   concurrency: number;
+}
+
+export interface DeploymentImageInput {
+  serviceName: string;
+  filePath: string;
+  imageTag: string;
 }
 
 export interface DeploymentExecutionSummary {

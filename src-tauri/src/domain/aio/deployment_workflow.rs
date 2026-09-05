@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::core::error::{AppError, AppResult};
 use crate::domain::aio::deployment::DeploymentPlanInput;
 use crate::domain::aio::inventory::WorkbenchNodeSnapshot;
 
-pub const DEPLOYMENT_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const DEPLOYMENT_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +72,12 @@ impl DeploymentExecutionSnapshot {
             ));
         }
         Ok(())
+    }
+
+    pub fn integrity_sha256(&self) -> AppResult<String> {
+        let payload = serde_json::to_vec(self)
+            .map_err(|_| AppError::InvalidConfig("序列化部署检查快照失败".into()))?;
+        Ok(hex::encode(Sha256::digest(payload)))
     }
 }
 

@@ -80,7 +80,7 @@ fn safe_detail<T: Any>(value: &T) -> Option<String> {
 
 fn app_error_detail(error: &AppError) -> String {
     match error {
-        AppError::InvalidConfig(_) => "code=invalid_config".into(),
+        AppError::InvalidConfig(_) | AppError::InvalidFields(_) => "code=invalid_config".into(),
         AppError::Conflict(_) => "code=conflict".into(),
         AppError::NotFound(_) => "code=not_found".into(),
         AppError::Database { operation } => format!("code=database; operation={operation}"),

@@ -12,10 +12,11 @@ const nodes = [
 ];
 const plan: DeploymentPlanInput = {
   mode: "first_deploy", targetMacs: nodes.map((node) => node.macNormalized),
+  imageFiles: [{ serviceName: "device-edge", filePath: "D:/fixture/device-edge.tar", imageTag: "device-edge:fixture" }],
   artifactPath: "D:/fixture", artifactName: "Release", artifactVersion: "fixture",
   batchSize: 2, concurrency: 2
 };
-const report = (): Promise<DeploymentPreflightReport> => new FixtureOperationsAdapter().preflight("project", plan);
+const report = (): Promise<DeploymentPreflightReport> => new FixtureOperationsAdapter().preflight("project", "preflight-groups", plan);
 
 describe("部署检查业务分组", () => {
   it("通过分组默认收起，状态图标仅在组名前，展开后检查项为普通文字列表", async () => {
@@ -59,6 +60,9 @@ describe("部署检查业务分组", () => {
     expect(wrapper.findAll('.preflight-group-status-icon[data-state="failed"]')).toHaveLength(1);
     expect(wrapper.findAll('.preflight-item-row')).toHaveLength(2);
     expect(wrapper.text()).toContain("发布物与运行环境不匹配");
+    expect(wrapper.text()).not.toContain("请处理以下问题后重新检查");
+    const failedIssue = wrapper.get('.preflight-issue.failed');
+    expect(failedIssue.text()).toContain("发布物与运行环境不匹配");
     wrapper.unmount();
   });
 
@@ -71,6 +75,33 @@ describe("部署检查业务分组", () => {
     expect(groups[1]!.items[0]!.status).toBe("failed");
     expect(groups[1]!.items[1]!.status).toBe("pending");
     expect(preflightGroupPassed(groups[1]!)).toBe(false);
+  });
+
+  it("升级必须完成当前版本检查，并直接展示未首次部署的阻断原因", async () => {
+    const value = await report();
+    value.normalizedPlan.mode = "full_upgrade";
+    let groups = preflightGroups(value, nodes);
+    expect(groups[1]!.items[1]!.status).toBe("pending");
+    expect(preflightGroupPassed(groups[1]!)).toBe(false);
+
+    value.checks.push({
+      code: "remote_current_release",
+      label: "当前版本",
+      targetMac: nodes[0]!.macNormalized,
+      status: "failed",
+      blocking: true,
+      message: "当前一体机尚未完成首次部署，请选择首次部署"
+    });
+    value.ready = false;
+    groups = preflightGroups(value, nodes);
+    expect(groups[1]!.items[1]!.status).toBe("failed");
+    expect(groups[1]!.items[1]!.issues[0]!.message).toBe("当前一体机尚未完成首次部署，请选择首次部署");
+
+    const wrapper = mount(DeploymentPreflightGroups, { props: { report: value, nodes } });
+    const failedGroup = wrapper.get('[data-testid="preflight-group-' + nodes[0]!.macNormalized + '"]');
+    expect(failedGroup.get('.preflight-group-toggle').attributes('aria-expanded')).toBe('true');
+    expect(failedGroup.text()).toContain("当前一体机尚未完成首次部署，请选择首次部署");
+    wrapper.unmount();
   });
 
   it("指纹变化只提示不增加检查项，隐藏的互斥检查异常仍可操作", async () => {
@@ -113,7 +144,7 @@ describe("部署检查业务分组", () => {
 
   it("两百台全部通过时只渲染分组行，不挂载折叠的四百个检查项", async () => {
     const manyNodes = Array.from({ length: 200 }, (_, index) => ({ macNormalized: index.toString(16).padStart(12, '0'), name: '一体机' + index, ip: '192.0.2.' + (index + 1) }));
-    const value = await new FixtureOperationsAdapter().preflight('project', { ...plan, targetMacs: manyNodes.map((node) => node.macNormalized) });
+    const value = await new FixtureOperationsAdapter().preflight('project', 'preflight-many-groups', { ...plan, targetMacs: manyNodes.map((node) => node.macNormalized) });
     const wrapper = mount(DeploymentPreflightGroups, { props: { report: value, nodes: manyNodes } });
     expect(wrapper.findAll('.preflight-group-toggle')).toHaveLength(201);
     expect(wrapper.findAll('.preflight-group-details')).toHaveLength(0);

@@ -111,7 +111,7 @@ async fn service_upgrade_compose_and_health_failures_restore_env_image_and_runni
             format!("/opt/data/.inxaiot-desk-buddy-{operation_id}-{index}-compose.sh");
         let remote_image =
             format!("/opt/data/.inxaiot-desk-buddy-{operation_id}-{index}-device-edge.tar");
-        let current_dir = "/opt/data/deploy/inxvision-edge/current";
+        let current_dir = "/opt/data/deploy/current";
         let mut cleanup_directories = Vec::new();
         let mut state_files = Vec::new();
         let mut expected_env_hash = None;
@@ -213,8 +213,7 @@ async fn service_upgrade_compose_and_health_failures_restore_env_image_and_runni
             for (mode, expected_exit) in [("compose-fail", 84), ("health-fail", 86)] {
                 let task_id = format!("{operation_id}-{index}-{mode}");
                 let state_file = format!("/opt/data/.inxaiot-desk-buddy-{task_id}.state");
-                let upgrade_dir =
-                    format!("/opt/data/deploy/inxvision-edge/service-upgrades/{task_id}");
+                let upgrade_dir = format!("/opt/data/deploy/service-upgrades/{task_id}");
                 let backup_dir = format!("/opt/data/backup/{task_id}-before-service-upgrade");
                 state_files.push(state_file.clone());
                 cleanup_directories.push(upgrade_dir);

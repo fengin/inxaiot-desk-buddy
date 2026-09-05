@@ -8,6 +8,7 @@ use crate::domain::aio::assets::{
     PlatformRecordIssue, ServiceVersionRecord,
 };
 use crate::domain::aio::inventory::{FieldConflict, PlatformNodeSnapshot};
+use crate::domain::aio::service_check::NodeServiceCheckSnapshot;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,11 +44,13 @@ pub struct AioNodeListItem {
     pub service_state: String,
     pub service_label: String,
     pub last_operation: String,
+    pub last_operation_at: Option<String>,
     pub platform_id: Option<String>,
     pub source: String,
     pub version: u64,
     pub conflicts: Vec<FieldConflict>,
     pub versions: Vec<ServiceVersionRecord>,
+    pub service_check: Option<NodeServiceCheckSnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,7 +83,6 @@ pub struct AioNodeDetail {
     pub versions: Vec<ServiceVersionRecord>,
     pub last_operation: Option<OperationRecordSummary>,
     pub latest_ssh_check: Option<LocalCheckRecord>,
-    pub latest_service_check: Option<LocalCheckRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

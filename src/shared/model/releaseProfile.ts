@@ -1,6 +1,7 @@
 export interface ReleaseProfileValues {
   envTemplate: string;
   composeTemplate: string;
+  hostInfoTemplate: string;
   platformHost: string;
   platformApiPort: number;
   platformMqttHost: string;
@@ -9,6 +10,12 @@ export interface ReleaseProfileValues {
   sshTimeoutSeconds: number;
   aioDataRoot: string;
   aioDeployRoot: string;
+}
+
+export interface ReleaseComposeService {
+  name: string;
+  configuredImage: string;
+  imageEnvironmentVariable: string;
 }
 
 export interface ReleaseProfileCredentials {
@@ -28,10 +35,34 @@ export interface ReleaseProfileDraft {
   expectedVersion?: number;
 }
 
+export type ReleaseAgentScriptSource = "built_in" | "project";
+
+export interface ReleaseAgentScriptView {
+  fileName: string;
+  version: string;
+  protocolVersion: string;
+  sha256: string;
+  source: ReleaseAgentScriptSource;
+}
+
+export interface ReleaseAgentScriptReplaceRequest {
+  filePath: string;
+  expectedVersion: number;
+}
+
+export type ReleaseProfileField =
+  | `values.${keyof ReleaseProfileValues}`
+  | `credentials.${keyof ReleaseProfileCredentials}`;
+
+export type ReleaseProfileFieldErrors = Partial<Record<ReleaseProfileField, string>>;
+
 export interface ReleaseProfileView {
   profileKey: string;
   values: ReleaseProfileValues;
   credentials: ReleaseProfileCredentials;
+  credentialsResetRequired: boolean;
+  agentScript: ReleaseAgentScriptView;
+  composeServices: ReleaseComposeService[];
   version: number;
   updatedBy: string;
   updatedAt: string;
@@ -40,23 +71,23 @@ export interface ReleaseProfileView {
 export interface ReleaseProfileValidation {
   valid: boolean;
   recognizedPlaceholderCount: number;
+  composeServices: ReleaseComposeService[];
+  publishedPorts: number[];
   warnings: string[];
-}
-
-export interface ReleaseMasterKeyTransferRequest {
-  filePath: string;
-  passphrase: string;
-}
-
-export interface ReleaseMasterKeyOperationResult {
-  keyVersion: number;
-  message: string;
 }
 
 export const emptyReleaseProfileDraft = (): ReleaseProfileDraft => ({
   values: {
     envTemplate: "",
     composeTemplate: "services:\n",
+    hostInfoTemplate: [
+      "{",
+      '  "mac": "{{ node.mac }}",',
+      '  "ip": "{{ node.ip }}",',
+      '  "hostname": "{{ node.name }}",',
+      '  "authKey": "{{ authKey }}"',
+      "}"
+    ].join("\n"),
     platformHost: "",
     platformApiPort: 8055,
     platformMqttHost: "",
@@ -64,7 +95,7 @@ export const emptyReleaseProfileDraft = (): ReleaseProfileDraft => ({
     sshPort: 22,
     sshTimeoutSeconds: 15,
     aioDataRoot: "/opt/data",
-    aioDeployRoot: "/opt/data/inxaiot"
+    aioDeployRoot: "/opt/data/deploy"
   },
   credentials: {
     platformAuthKey: "",

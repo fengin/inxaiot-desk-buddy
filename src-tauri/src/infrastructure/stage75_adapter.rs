@@ -17,8 +17,9 @@ use crate::application::project_access::ProjectAccessRequirement;
 use crate::core::error::{AppError, AppResult};
 use crate::core::secret::SecretValue;
 use crate::domain::aio::release_profile::{
-    ReleaseMasterKeyOperationResult, ReleaseMasterKeyTransferRequest, ReleaseProfileCredentials,
-    ReleaseProfileDraft, ReleaseProfileValues, ReleaseProfileView,
+    ReleaseAgentScriptReplaceRequest, ReleaseAgentScriptSource, ReleaseAgentScriptView,
+    ReleaseProfileCredentials, ReleaseProfileDraft, ReleaseProfileValues, ReleaseProfileView,
+    inspect_compose_services,
 };
 use crate::domain::common::project::{
     ConfirmHostKeyRequest, DatabaseConnectionState, HostKeyCaptureRequest, HostKeyObservation,
@@ -33,14 +34,18 @@ use crate::formal::platform_auth::{PlatformAuthAdapter, PlatformLoginSpec};
 use crate::formal::project_repository::{
     CreateLocalProject, LocalProjectRecord, LocalProjectRepository, UpdateLocalProject,
 };
-use crate::formal::release_master_key::{ReleaseKeyProjectBinding, ReleaseMasterKeyManager};
 use crate::formal::release_profile_repository::{
-    ReleaseProfileRecord, ReleaseProfileRepository,
+    ReleaseAgentScriptWrite, ReleaseProfileRecord, ReleaseProfileRepository,
     ReleaseProfileValues as StoredReleaseProfileValues, ReleaseProfileWrite,
+    StoredReleaseAgentScript,
 };
 use crate::formal::runtime_registry::ConnectionHealth;
 use crate::formal::workbench_store::{WorkbenchSchemaStatus, WorkbenchStore};
-use crate::infrastructure::aio_assets_service::application_instance_id;
+use crate::infrastructure::agent_asset::{
+    AGENT_FILE_NAME, effective_agent_asset, load_agent_script_file, materialize_agent_for_view,
+    open_agent_in_system_editor,
+};
+use crate::infrastructure::client_instance::application_instance_id;
 use crate::infrastructure::database::{DatabaseTlsMode, DualMySqlPools, MySqlProjectConfig};
 use crate::infrastructure::local_sqlite::host_key_repository::{HostKeyRecord, HostKeyRepository};
 use crate::infrastructure::remote::{RusshConnector, validate_private_key_algorithm};
@@ -69,13 +74,6 @@ impl<'a> Stage75Adapter<'a> {
         LocalProjectRepository::new(
             self.state.local_store.pool().clone(),
             self.state.secret_store.clone(),
-        )
-    }
-
-    fn release_master_keys(&self) -> ReleaseMasterKeyManager {
-        ReleaseMasterKeyManager::with_local_registry(
-            self.state.secret_store.clone(),
-            self.state.local_store.pool().clone(),
         )
     }
 
@@ -620,18 +618,13 @@ impl ReleaseProfileManagementPort for Stage75Adapter<'_> {
     async fn get_release_profile(&self, project_id: &str) -> AppResult<Option<ReleaseProfileView>> {
         self.require_active_session(project_id).await?;
         let pools = self.ready_pools(project_id).await?;
-        match self
-            .release_master_keys()
-            .load_profile(
-                &ReleaseProfileRepository::new(pools.workbench.clone()),
-                project_id,
-                "default",
-            )
+        match ReleaseProfileRepository::new(pools.workbench.clone())
+            .get("default")
             .await
         {
             Ok(record) => {
                 self.register_secrets(stored_release_secret_values(&record.credentials));
-                Ok(Some(map_release_profile(record)))
+                Ok(Some(map_release_profile(record)?))
             }
             Err(FormalError::NotFound(_)) => Ok(None),
             Err(error) => Err(map_formal_error(error)),
@@ -649,7 +642,12 @@ impl ReleaseProfileManagementPort for Stage75Adapter<'_> {
             .as_deref()
             .filter(|value| !value.is_empty())
         {
-            validate_private_key_algorithm(private_key)?;
+            validate_private_key_algorithm(private_key).map_err(|_| {
+                AppError::InvalidFields(std::collections::BTreeMap::from([(
+                    "credentials.sshPrivateKey".into(),
+                    "SSH 私钥格式或算法不正确，请填写无口令的 RSA、Ed25519 或 ECDSA 私钥".into(),
+                )]))
+            })?;
         }
         self.register_secrets(profile_draft_secret_values(&draft.credentials));
         let session = self.require_active_session(project_id).await?;
@@ -657,105 +655,86 @@ impl ReleaseProfileManagementPort for Stage75Adapter<'_> {
             .username
             .ok_or_else(|| AppError::Authentication("平台会话缺少用户名".into()))?;
         let pools = self.ready_pools(project_id).await?;
-        let record = self
-            .release_master_keys()
-            .save_profile(
-                &ReleaseProfileRepository::new(pools.workbench.clone()),
-                project_id,
-                ReleaseProfileWrite {
-                    profile_key: "default".into(),
-                    values: StoredReleaseProfileValues {
-                        env_template: draft.values.env_template,
-                        compose_template: draft.values.compose_template,
-                        platform_host: draft.values.platform_host,
-                        platform_api_port: draft.values.platform_api_port,
-                        platform_mqtt_host: draft.values.platform_mqtt_host,
-                        platform_mqtt_port: draft.values.platform_mqtt_port,
-                        ssh_port: draft.values.ssh_port,
-                        ssh_timeout_seconds: draft.values.ssh_timeout_seconds,
-                        aio_data_root: draft.values.aio_data_root,
-                        aio_deploy_root: draft.values.aio_deploy_root,
-                    },
-                    credentials: ReleaseCredentials {
-                        platform_auth_key: draft.credentials.platform_auth_key,
-                        platform_mqtt_user: draft.credentials.platform_mqtt_user,
-                        platform_mqtt_password: draft.credentials.platform_mqtt_password,
-                        aio_mqtt_user: draft.credentials.aio_mqtt_user,
-                        aio_mqtt_password: draft.credentials.aio_mqtt_password,
-                        ssh_user: draft.credentials.ssh_user,
-                        ssh_password: draft.credentials.ssh_password,
-                        ssh_private_key: draft.credentials.ssh_private_key,
-                    },
-                    expected_version: draft.expected_version,
-                    operator_name,
-                    instance_id: application_instance_id().into(),
+        let record = ReleaseProfileRepository::new(pools.workbench.clone())
+            .save(ReleaseProfileWrite {
+                profile_key: "default".into(),
+                values: StoredReleaseProfileValues {
+                    env_template: draft.values.env_template,
+                    compose_template: draft.values.compose_template,
+                    host_info_template: draft.values.host_info_template,
+                    platform_host: draft.values.platform_host,
+                    platform_api_port: draft.values.platform_api_port,
+                    platform_mqtt_host: draft.values.platform_mqtt_host,
+                    platform_mqtt_port: draft.values.platform_mqtt_port,
+                    ssh_port: draft.values.ssh_port,
+                    ssh_timeout_seconds: draft.values.ssh_timeout_seconds,
+                    aio_data_root: draft.values.aio_data_root,
+                    aio_deploy_root: draft.values.aio_deploy_root,
                 },
-            )
+                credentials: ReleaseCredentials {
+                    platform_auth_key: draft.credentials.platform_auth_key,
+                    platform_mqtt_user: draft.credentials.platform_mqtt_user,
+                    platform_mqtt_password: draft.credentials.platform_mqtt_password,
+                    aio_mqtt_user: draft.credentials.aio_mqtt_user,
+                    aio_mqtt_password: draft.credentials.aio_mqtt_password,
+                    ssh_user: draft.credentials.ssh_user,
+                    ssh_password: draft
+                        .credentials
+                        .ssh_password
+                        .filter(|value| !value.is_empty()),
+                    ssh_private_key: draft
+                        .credentials
+                        .ssh_private_key
+                        .filter(|value| !value.is_empty()),
+                },
+                expected_version: draft.expected_version,
+                operator_name,
+                instance_id: application_instance_id().into(),
+            })
             .await
             .map_err(map_formal_error)?;
-        Ok(map_release_profile(record))
+        map_release_profile(record)
     }
 
-    async fn export_release_master_key(
+    async fn replace_release_agent_script(
         &self,
         project_id: &str,
-        request: ReleaseMasterKeyTransferRequest,
-    ) -> AppResult<ReleaseMasterKeyOperationResult> {
-        self.register_secrets([request.passphrase.clone()]);
-        self.require_active_session(project_id).await?;
+        request: ReleaseAgentScriptReplaceRequest,
+    ) -> AppResult<ReleaseProfileView> {
+        let session = self.require_active_session(project_id).await?;
+        let operator_name = session
+            .username
+            .ok_or_else(|| AppError::Authentication("平台会话缺少用户名".into()))?;
+        let asset = load_agent_script_file(Path::new(request.file_path.trim()))?;
         let pools = self.ready_pools(project_id).await?;
-        let project = self
-            .projects()
-            .get(project_id)
+        let record = ReleaseProfileRepository::new(pools.workbench.clone())
+            .replace_agent_script(ReleaseAgentScriptWrite {
+                profile_key: "default".into(),
+                script: StoredReleaseAgentScript {
+                    content: asset.content,
+                    version: asset.version,
+                    protocol_version: asset.protocol_version,
+                    sha256: asset.sha256,
+                },
+                expected_version: request.expected_version,
+                operator_name,
+                instance_id: application_instance_id().into(),
+            })
             .await
             .map_err(map_formal_error)?;
-        let key_version = self
-            .release_master_keys()
-            .export_key_package(
-                &ReleaseProfileRepository::new(pools.workbench.clone()),
-                project_id,
-                "default",
-                &release_key_binding(&project),
-                Path::new(request.file_path.trim()),
-                &request.passphrase,
-            )
-            .await
-            .map_err(map_formal_error)?;
-        Ok(ReleaseMasterKeyOperationResult {
-            key_version,
-            message: format!("项目主密钥v{key_version}已导出为口令保护密钥包"),
-        })
+        map_release_profile(record)
     }
 
-    async fn import_release_master_key(
-        &self,
-        project_id: &str,
-        request: ReleaseMasterKeyTransferRequest,
-    ) -> AppResult<ReleaseMasterKeyOperationResult> {
-        self.register_secrets([request.passphrase.clone()]);
+    async fn open_release_agent_script(&self, project_id: &str) -> AppResult<()> {
         self.require_active_session(project_id).await?;
         let pools = self.ready_pools(project_id).await?;
-        let project = self
-            .projects()
-            .get(project_id)
+        let record = ReleaseProfileRepository::new(pools.workbench.clone())
+            .get("default")
             .await
             .map_err(map_formal_error)?;
-        let key_version = self
-            .release_master_keys()
-            .import_key_package(
-                &ReleaseProfileRepository::new(pools.workbench.clone()),
-                project_id,
-                "default",
-                &release_key_binding(&project),
-                Path::new(request.file_path.trim()),
-                &request.passphrase,
-            )
-            .await
-            .map_err(map_formal_error)?;
-        Ok(ReleaseMasterKeyOperationResult {
-            key_version,
-            message: format!("项目主密钥v{key_version}已验证并保存到本机安全存储"),
-        })
+        let asset = effective_agent_asset(record.agent_script.as_ref())?;
+        let path = materialize_agent_for_view(&self.state.paths.runtime_agent_dir, &asset)?;
+        open_agent_in_system_editor(&path)
     }
 }
 
@@ -835,15 +814,15 @@ impl Stage75Adapter<'_> {
     ) -> AppResult<(RemoteTarget, HostKeyIdentity)> {
         self.require_active_session(project_id).await?;
         let pools = self.ready_pools(project_id).await?;
-        let profile = self
-            .release_master_keys()
-            .load_profile(
-                &ReleaseProfileRepository::new(pools.workbench.clone()),
-                project_id,
-                "default",
-            )
+        let profile = ReleaseProfileRepository::new(pools.workbench.clone())
+            .get("default")
             .await
             .map_err(map_formal_error)?;
+        if profile.credentials_reset_required {
+            return Err(AppError::InvalidConfig(
+                "发布凭据加密格式已更新，请重新填写发布参数".into(),
+            ));
+        }
         self.register_secrets(stored_release_secret_values(&profile.credentials));
         let target = RemoteTarget {
             host: request.host.trim().into(),
@@ -897,7 +876,9 @@ fn profile_draft_secret_values(
     values.into_iter()
 }
 
-fn stored_release_secret_values(credentials: &ReleaseCredentials) -> impl Iterator<Item = String> {
+pub(crate) fn stored_release_secret_values(
+    credentials: &ReleaseCredentials,
+) -> impl Iterator<Item = String> {
     let mut values = vec![
         credentials.platform_auth_key.clone(),
         credentials.platform_mqtt_user.clone(),
@@ -923,15 +904,6 @@ fn map_project(project: LocalProjectRecord) -> ProjectRecord {
         business_db: project.business_db,
         workbench_db: project.workbench_db,
         last_opened_at: project.last_opened_at,
-    }
-}
-
-fn release_key_binding(project: &LocalProjectRecord) -> ReleaseKeyProjectBinding {
-    ReleaseKeyProjectBinding {
-        platform_url: project.platform_url.clone(),
-        db_host: project.db_host.clone(),
-        db_port: project.db_port,
-        workbench_db: project.workbench_db.clone(),
     }
 }
 
@@ -977,12 +949,20 @@ fn mysql_config(
     })
 }
 
-fn map_release_profile(record: ReleaseProfileRecord) -> ReleaseProfileView {
-    ReleaseProfileView {
+fn map_release_profile(record: ReleaseProfileRecord) -> AppResult<ReleaseProfileView> {
+    let agent = effective_agent_asset(record.agent_script.as_ref())?;
+    let compose_services = inspect_compose_services(&record.values.compose_template)?;
+    let source = if record.agent_script.is_some() {
+        ReleaseAgentScriptSource::Project
+    } else {
+        ReleaseAgentScriptSource::BuiltIn
+    };
+    Ok(ReleaseProfileView {
         profile_key: record.profile_key,
         values: ReleaseProfileValues {
             env_template: record.values.env_template,
             compose_template: record.values.compose_template,
+            host_info_template: record.values.host_info_template,
             platform_host: record.values.platform_host,
             platform_api_port: record.values.platform_api_port,
             platform_mqtt_host: record.values.platform_mqtt_host,
@@ -1002,10 +982,19 @@ fn map_release_profile(record: ReleaseProfileRecord) -> ReleaseProfileView {
             ssh_password: record.credentials.ssh_password,
             ssh_private_key: record.credentials.ssh_private_key,
         },
+        credentials_reset_required: record.credentials_reset_required,
+        agent_script: ReleaseAgentScriptView {
+            file_name: AGENT_FILE_NAME.into(),
+            version: agent.version,
+            protocol_version: agent.protocol_version,
+            sha256: agent.sha256,
+            source,
+        },
+        compose_services,
         version: record.version,
         updated_by: record.updated_by,
         updated_at: record.updated_at.to_string(),
-    }
+    })
 }
 
 fn map_host_key(record: HostKeyRecord) -> HostKeyObservation {

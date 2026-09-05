@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  DeploymentExecutionSnapshot,
   DeploymentPreflightReport,
   DeploymentTaskSubmission,
   DeploymentTaskView,
@@ -12,21 +13,25 @@ import type { DeploymentPlanInput } from "@/shared/model/release";
 
 export function preflightDeployment(
   localProjectId: string,
+  preflightTaskId: string,
   input: DeploymentPlanInput
 ) {
   return invoke<DeploymentPreflightReport>("preflight_deployment", {
     localProjectId,
+    preflightTaskId,
     input
   });
 }
 
 export function submitDeployment(
   localProjectId: string,
-  input: DeploymentPlanInput
+  preflightTaskId: string,
+  executionSnapshot: DeploymentExecutionSnapshot
 ) {
   return invoke<DeploymentTaskSubmission>("submit_deployment", {
     localProjectId,
-    input
+    preflightTaskId,
+    executionSnapshot
   });
 }
 

@@ -156,11 +156,12 @@ pub async fn finalize_deployment_atomically(
                 "INSERT INTO aio_node_service_version ",
                 "(mac_normalized, service_name, expected_image_name, expected_version, ",
                 "observed_image_name, observed_version, observed_at, source_operation_id) ",
-                "VALUES (?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(6), ?) ",
+                "VALUES (?, ?, ?, ?, ?, ?, IF(? IS NULL, NULL, UTC_TIMESTAMP(6)), ?) ",
                 "ON DUPLICATE KEY UPDATE expected_image_name = VALUES(expected_image_name), ",
                 "expected_version = VALUES(expected_version), ",
-                "observed_image_name = VALUES(observed_image_name), ",
-                "observed_version = VALUES(observed_version), observed_at = VALUES(observed_at), ",
+                "observed_image_name = COALESCE(VALUES(observed_image_name), observed_image_name), ",
+                "observed_version = COALESCE(VALUES(observed_version), observed_version), ",
+                "observed_at = COALESCE(VALUES(observed_at), observed_at), ",
                 "source_operation_id = VALUES(source_operation_id)"
             ))
             .bind(&service.mac)
@@ -169,6 +170,7 @@ pub async fn finalize_deployment_atomically(
             .bind(&service.expected_version)
             .bind(&service.observed_image_name)
             .bind(&service.observed_version)
+            .bind(&service.observed_image_name)
             .bind(&service.source_operation_id)
             .execute(&mut *transaction)
             .await

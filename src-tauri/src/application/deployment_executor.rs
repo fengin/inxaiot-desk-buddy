@@ -144,11 +144,17 @@ mod tests {
         DeploymentPlan::build(DeploymentPlanInput {
             mode: DeploymentMode::FullUpgrade,
             target_macs: vec!["A".into(), "B".into()],
+            image_files: vec![crate::domain::aio::deployment::DeploymentImageInput {
+                service_name: "device-edge".into(),
+                file_path: "C:/device-edge.tar".into(),
+                image_tag: "device-edge:1".into(),
+            }],
             artifact_path: "C:/release".into(),
             artifact_name: "Release".into(),
             artifact_version: "1".into(),
             service_name: None,
             image_name: None,
+            service_image_environment_variable: None,
             images: std::collections::BTreeMap::new(),
             batch_size: 2,
             concurrency: 2,

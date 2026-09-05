@@ -12,16 +12,16 @@ import type {
   WorkbenchSchemaStatus
 } from "@/shared/model/project";
 import type {
-  ReleaseMasterKeyOperationResult,
+  ReleaseAgentScriptReplaceRequest,
   ReleaseProfileDraft,
   ReleaseProfileView
 } from "@/shared/model/releaseProfile";
 
 const readySchema = (): WorkbenchSchemaStatus => ({
   state: "ready",
-  currentVersion: 2,
-  latestAvailableVersion: 2,
-  appliedMigrationCount: 2,
+  currentVersion: 4,
+  latestAvailableVersion: 4,
+  appliedMigrationCount: 4,
   failedMigrationCount: 0,
   missingTables: [],
   forbiddenTables: [],
@@ -70,6 +70,7 @@ function fixtureRelease(): ReleaseProfileView {
     values: {
       envTemplate: demoReleaseProfile.envTemplate,
       composeTemplate: demoReleaseProfile.composeTemplate,
+      hostInfoTemplate: '{"mac":"{{ node.mac }}","ip":"{{ node.ip }}","hostname":"{{ node.name }}","authKey":"{{ authKey }}"}',
       platformHost: demoReleaseProfile.platformHost,
       platformApiPort: Number(new URL(demoReleaseProfile.platformApi).port || 80),
       platformMqttHost: demoReleaseProfile.platformMqttHost,
@@ -77,7 +78,7 @@ function fixtureRelease(): ReleaseProfileView {
       sshPort: 22,
       sshTimeoutSeconds: 15,
       aioDataRoot: "/opt/data",
-      aioDeployRoot: "/opt/data/inxaiot"
+      aioDeployRoot: "/opt/data/deploy"
     },
     credentials: {
       platformAuthKey: demoReleaseProfile.platformAuthKey,
@@ -88,7 +89,20 @@ function fixtureRelease(): ReleaseProfileView {
       sshUser: demoReleaseProfile.sshUsername,
       sshPassword: demoReleaseProfile.sshPassword,
       sshPrivateKey: demoReleaseProfile.sshPrivateKey
-    }
+    },
+    credentialsResetRequired: false,
+    agentScript: {
+      fileName: "edge-node-agent.sh",
+      version: "0.1.9",
+      protocolVersion: "1",
+      sha256: "a".repeat(64),
+      source: "built_in"
+    },
+    composeServices: ["device-edge", "rule-engine"].map((name) => ({
+      name,
+      configuredImage: `\${${name.replaceAll("-", "_").toUpperCase()}_IMAGE}`,
+      imageEnvironmentVariable: `${name.replaceAll("-", "_").toUpperCase()}_IMAGE`
+    }))
   };
 }
 
@@ -96,7 +110,6 @@ export class FixtureWorkbenchAdapter implements WorkbenchAdapter {
   private projects = demoProjects.map((_, index) => fixtureProject(index));
   private profiles = new Map<string, ReleaseProfileView>([[this.projects[0]!.id, fixtureRelease()]]);
   private hostKeys = new Map<string, HostKeyObservation[]>();
-  private keyVersions = new Map<string, number>();
   private idCounter = 0;
 
   async listProjects() { return structuredClone(this.projects); }
@@ -116,7 +129,7 @@ export class FixtureWorkbenchAdapter implements WorkbenchAdapter {
       connectionState: "disconnected",
       databaseState: "disconnected",
       connectionEncrypted: input.dbTlsEnabled,
-      statusMessage: "项目入口已创建"
+      statusMessage: "项目已创建"
     };
     this.projects.unshift(project);
     return structuredClone(project);
@@ -137,7 +150,7 @@ export class FixtureWorkbenchAdapter implements WorkbenchAdapter {
       databaseState: "disconnected",
       session: undefined,
       connectionEncrypted: input.dbTlsEnabled,
-      statusMessage: "项目入口已更新，请重新连接"
+      statusMessage: "项目已更新，请重新连接"
     });
     return structuredClone(project);
   }
@@ -214,17 +227,35 @@ export class FixtureWorkbenchAdapter implements WorkbenchAdapter {
   }
   async validateReleaseProfile(draft: ReleaseProfileDraft) {
     const count = draft.values.envTemplate.match(/\{\{[^{}]+\}\}/g)?.length ?? 0;
-    return { valid: true, recognizedPlaceholderCount: count, warnings: [] };
+    const composeServices = ["device-edge", "rule-engine"].map((name) => ({
+      name,
+      configuredImage: `\${${name.replaceAll("-", "_").toUpperCase()}_IMAGE}`,
+      imageEnvironmentVariable: `${name.replaceAll("-", "_").toUpperCase()}_IMAGE`
+    }));
+    return { valid: true, recognizedPlaceholderCount: count, composeServices, publishedPorts: [], warnings: [] };
   }
   async saveReleaseProfile(projectId: string, draft: ReleaseProfileDraft) {
     const previous = this.profiles.get(projectId);
     if (previous && draft.expectedVersion !== previous.version) {
-      throw { code: "CONFIG_VERSION_CONFLICT", params: { summary: "发布配置已被其他实例更新" } };
+      throw { code: "CONFIG_VERSION_CONFLICT", params: { summary: "发布配置已在其他电脑上更新" } };
     }
     const profile: ReleaseProfileView = {
       profileKey: "default",
       values: { ...draft.values },
       credentials: { ...draft.credentials },
+      credentialsResetRequired: false,
+      agentScript: previous?.agentScript ?? {
+        fileName: "edge-node-agent.sh",
+        version: "0.1.9",
+        protocolVersion: "1",
+        sha256: "a".repeat(64),
+        source: "built_in"
+      },
+      composeServices: previous?.composeServices ?? ["device-edge", "rule-engine"].map((name) => ({
+        name,
+        configuredImage: `\${${name.replaceAll("-", "_").toUpperCase()}_IMAGE}`,
+        imageEnvironmentVariable: `${name.replaceAll("-", "_").toUpperCase()}_IMAGE`
+      })),
       version: (previous?.version ?? 0) + 1,
       updatedBy: this.requiredProject(projectId).session?.username ?? "Fixture 用户",
       updatedAt: new Date().toISOString()
@@ -233,16 +264,32 @@ export class FixtureWorkbenchAdapter implements WorkbenchAdapter {
     return structuredClone(profile);
   }
 
-  async exportReleaseMasterKey(projectId: string): Promise<ReleaseMasterKeyOperationResult> {
-    this.requiredProject(projectId);
-    const keyVersion = this.keyVersions.get(projectId) ?? 1;
-    return { keyVersion, message: `Fixture 项目主密钥v${keyVersion}已导出` };
+  async replaceReleaseAgentScript(
+    projectId: string,
+    request: ReleaseAgentScriptReplaceRequest
+  ) {
+    const previous = this.profiles.get(projectId);
+    if (!previous || request.expectedVersion !== previous.version) {
+      throw { code: "CONFIG_VERSION_CONFLICT", params: { summary: "发布配置已在其他电脑上更新" } };
+    }
+    const profile: ReleaseProfileView = {
+      ...previous,
+      agentScript: {
+        fileName: "edge-node-agent.sh",
+        version: "0.1.9",
+        protocolVersion: "1",
+        sha256: "b".repeat(64),
+        source: "project"
+      },
+      version: previous.version + 1,
+      updatedAt: new Date().toISOString()
+    };
+    this.profiles.set(projectId, profile);
+    return structuredClone(profile);
   }
-  async importReleaseMasterKey(projectId: string): Promise<ReleaseMasterKeyOperationResult> {
-    this.requiredProject(projectId);
-    const keyVersion = this.keyVersions.get(projectId) ?? 1;
-    return { keyVersion, message: `Fixture 项目主密钥v${keyVersion}已导入` };
-  }
+
+  async openReleaseAgentScript() {}
+
   async listHostKeys(projectId: string) { return structuredClone(this.hostKeys.get(projectId) ?? []); }
   async captureHostKey(projectId: string, request: HostKeyCaptureRequest) {
     const port = request.port ?? 22;

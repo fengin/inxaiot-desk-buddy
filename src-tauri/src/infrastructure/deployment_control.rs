@@ -19,6 +19,9 @@ use crate::infrastructure::deployment_finalization::{
     AtomicDeploymentFinalization, AtomicTargetFinalization, PendingLocalFinalization,
     finalize_deployment_atomically, shared_operation_state, write_pending_local_finalization,
 };
+use crate::infrastructure::deployment_progress::{
+    DEPLOYMENT_PROGRESS_TOTAL, DEPLOYMENT_REMOTE_PROGRESS_START,
+};
 use crate::infrastructure::local_sqlite::task_repository::{
     CreateTask, TargetUpdate, TaskStepWrite,
 };
@@ -179,7 +182,11 @@ pub async fn start_deployment_control(
     plan: DeploymentPlan,
     operator_name: &str,
     instance_id: &str,
+    cancellation: &CancellationToken,
 ) -> AppResult<DeploymentControlHandle> {
+    if cancellation.is_cancelled() {
+        return Err(AppError::Cancelled);
+    }
     let pools = project_database(state, local_project_id).await?;
     let operations = OperationRepository::new(pools.workbench.clone());
     let operation_type = mode_code(plan.mode);
@@ -208,6 +215,17 @@ pub async fn start_deployment_control(
         })
         .await
         .map_err(map_formal_error)?;
+    if cancellation.is_cancelled() {
+        finalize_started_operation(
+            &operations,
+            &record,
+            &plan.target_macs,
+            "用户在共享操作创建期间取消了任务",
+            true,
+        )
+        .await;
+        return Err(AppError::Cancelled);
+    }
     let lease_repository = ResourceLeaseRepository::new(pools.workbench.clone());
     let leases = match lease_repository
         .acquire_many(
@@ -229,14 +247,43 @@ pub async fn start_deployment_control(
         Ok(leases) => leases,
         Err(error) => {
             let summary = error.to_string();
-            fail_started_operation(&operations, &record, &plan.target_macs, &summary).await;
+            let cancelled = cancellation.is_cancelled()
+                || deployment_start_was_cancelled(state, local_task_id).await;
+            finalize_started_operation(
+                &operations,
+                &record,
+                &plan.target_macs,
+                &summary,
+                cancelled,
+            )
+            .await;
             return Err(map_formal_error(error));
         }
     };
+    if cancellation.is_cancelled() {
+        let error = AppError::Cancelled;
+        rollback_started_control(
+            StartedControlRollback {
+                state,
+                local_task_id,
+                lease_repository: &lease_repository,
+                leases: &leases,
+                operations: &operations,
+                record: &record,
+                targets: &plan.target_macs,
+                cancellation_requested: true,
+            },
+            &error,
+        )
+        .await;
+        return Err(error);
+    }
     let task_result = match state.task_repository.get(local_task_id).await {
         Ok(task) => {
-            if !matches!(task.state, TaskState::Draft | TaskState::Queued)
-                || task.local_project_id != local_project_id
+            if !matches!(
+                task.state,
+                TaskState::Draft | TaskState::Queued | TaskState::Running
+            ) || task.local_project_id != local_project_id
                 || task.domain_type != "aio"
                 || task.operation_type != operation_type
                 || task.remote_operation_record_id.is_some()
@@ -247,7 +294,7 @@ pub async fn start_deployment_control(
             } else {
                 state
                     .task_repository
-                    .link_operation(local_task_id, &record.id)
+                    .link_operation_in_state(local_task_id, &record.id, task.state)
                     .await
             }
         }
@@ -266,67 +313,104 @@ pub async fn start_deployment_control(
     let task = match task_result {
         Ok(task) => task,
         Err(error) => {
-            for lease in &leases {
-                let _ = lease_repository.release(lease).await;
-            }
-            fail_started_operation(&operations, &record, &plan.target_macs, &error.to_string())
-                .await;
+            rollback_started_control(
+                StartedControlRollback {
+                    state,
+                    local_task_id,
+                    lease_repository: &lease_repository,
+                    leases: &leases,
+                    operations: &operations,
+                    record: &record,
+                    targets: &plan.target_macs,
+                    cancellation_requested: cancellation.is_cancelled(),
+                },
+                &error,
+            )
+            .await;
             return Err(error);
         }
     };
-    let mut current = task.state;
-    let transitions = if current == TaskState::Queued {
-        vec![TaskState::Running]
-    } else {
-        vec![
-            TaskState::Checking,
-            TaskState::Ready,
-            TaskState::Queued,
-            TaskState::Running,
-        ]
-    };
-    for next in transitions {
-        state
-            .task_repository
-            .transition(local_task_id, current, next, None, None)
-            .await?;
-        current = next;
-    }
-    for lease in &leases {
-        state
-            .task_repository
-            .update_target(
-                local_task_id,
-                TargetUpdate {
-                    resource_type: "aio".into(),
-                    resource_key: lease.resource_key.clone(),
-                    state: TargetState::Running,
-                    stage: "lease_acquired".into(),
-                    progress_current: 0,
-                    progress_total: 100,
-                    fencing_token: Some(lease.fencing_token),
-                    message_code: None,
-                    message_params_json: None,
-                },
-            )
-            .await?;
-        for step in &plan.steps {
+    let local_setup = async {
+        let mut current = task.state;
+        let transitions = match current {
+            TaskState::Running => Vec::new(),
+            TaskState::Queued => vec![TaskState::Running],
+            _ => vec![
+                TaskState::Checking,
+                TaskState::Ready,
+                TaskState::Queued,
+                TaskState::Running,
+            ],
+        };
+        for next in transitions {
             state
                 .task_repository
-                .save_step(
+                .transition(local_task_id, current, next, None, None)
+                .await?;
+            current = next;
+        }
+        let latest = state.task_repository.get(local_task_id).await?;
+        if latest.state != TaskState::Running {
+            return Err(AppError::Conflict(format!(
+                "部署任务已不再执行，停止创建控制面：{}",
+                latest.state.as_str()
+            )));
+        }
+        for lease in &leases {
+            state
+                .task_repository
+                .update_target(
                     local_task_id,
-                    TaskStepWrite {
-                        id: step_id(local_task_id, &lease.resource_key, &step.code),
-                        resource_type: Some("aio".into()),
-                        resource_key: Some(lease.resource_key.clone()),
-                        step_code: step.code.clone(),
-                        state: StepState::Pending,
-                        error_code: None,
-                        message: Some(step.label.clone()),
+                    TargetUpdate {
+                        resource_type: "aio".into(),
+                        resource_key: lease.resource_key.clone(),
+                        state: TargetState::Running,
+                        stage: "lease_acquired".into(),
+                        progress_current: DEPLOYMENT_REMOTE_PROGRESS_START,
+                        progress_total: DEPLOYMENT_PROGRESS_TOTAL,
+                        fencing_token: Some(lease.fencing_token),
+                        message_code: None,
+                        message_params_json: None,
                     },
                 )
                 .await?;
+            for step in &plan.steps {
+                state
+                    .task_repository
+                    .save_step(
+                        local_task_id,
+                        TaskStepWrite {
+                            id: step_id(local_task_id, &lease.resource_key, &step.code),
+                            resource_type: Some("aio".into()),
+                            resource_key: Some(lease.resource_key.clone()),
+                            step_code: step.code.clone(),
+                            state: StepState::Pending,
+                            error_code: None,
+                            message: Some(step.label.clone()),
+                        },
+                    )
+                    .await?;
+            }
         }
+        AppResult::Ok(())
+    }
+    .await;
+    if let Err(error) = local_setup {
+        rollback_started_control(
+            StartedControlRollback {
+                state,
+                local_task_id,
+                lease_repository: &lease_repository,
+                leases: &leases,
+                operations: &operations,
+                record: &record,
+                targets: &plan.target_macs,
+                cancellation_requested: cancellation.is_cancelled(),
+            },
+            &error,
+        )
+        .await;
+        return Err(error);
     }
     Ok(DeploymentControlHandle {
         local_task_id: local_task_id.to_string(),
@@ -337,23 +421,70 @@ pub async fn start_deployment_control(
     })
 }
 
-async fn fail_started_operation(
+struct StartedControlRollback<'a> {
+    state: &'a FormalAppState,
+    local_task_id: &'a str,
+    lease_repository: &'a ResourceLeaseRepository,
+    leases: &'a [LeaseGrant],
+    operations: &'a OperationRepository,
+    record: &'a crate::formal::operation_repository::OperationRecord,
+    targets: &'a [String],
+    cancellation_requested: bool,
+}
+
+async fn rollback_started_control(context: StartedControlRollback<'_>, error: &AppError) {
+    for lease in context.leases {
+        let _ = context.lease_repository.release(lease).await;
+    }
+    let cancelled = context.cancellation_requested
+        || deployment_start_was_cancelled(context.state, context.local_task_id).await;
+    finalize_started_operation(
+        context.operations,
+        context.record,
+        context.targets,
+        &error.to_string(),
+        cancelled,
+    )
+    .await;
+}
+
+async fn deployment_start_was_cancelled(state: &FormalAppState, local_task_id: &str) -> bool {
+    state
+        .task_repository
+        .get(local_task_id)
+        .await
+        .is_ok_and(|task| matches!(task.state, TaskState::Cancelling | TaskState::Cancelled))
+}
+
+async fn finalize_started_operation(
     operations: &OperationRepository,
     record: &crate::formal::operation_repository::OperationRecord,
     targets: &[String],
     summary: &str,
+    cancelled: bool,
 ) {
+    let result_state = if cancelled { "cancelled" } else { "failed" };
+    let result_summary = if cancelled {
+        "部署启动已取消"
+    } else {
+        "部署启动失败"
+    };
+    let error_code = if cancelled {
+        "CANCELLED"
+    } else {
+        "DEPLOYMENT_START_FAILED"
+    };
     for mac in targets {
         let _ = operations
             .finalize_target(TargetFinalResult {
                 operation_id: record.id.clone(),
                 resource_type: "aio".into(),
                 resource_key: mac.clone(),
-                result_state: "failed".into(),
+                result_state: result_state.into(),
                 before_version: None,
                 after_version: None,
-                result_summary: Some("部署启动失败".into()),
-                error_code: Some("DEPLOYMENT_START_FAILED".into()),
+                result_summary: Some(result_summary.into()),
+                error_code: Some(error_code.into()),
                 error_summary: Some(summary.into()),
             })
             .await;
@@ -362,9 +493,9 @@ async fn fail_started_operation(
         .finalize(OperationFinalResult {
             operation_id: record.id.clone(),
             expected_version: record.version,
-            state: "failed".into(),
-            result_summary: Some("部署启动失败".into()),
-            error_code: Some("DEPLOYMENT_START_FAILED".into()),
+            state: result_state.into(),
+            result_summary: Some(result_summary.into()),
+            error_code: Some(error_code.into()),
             error_summary: Some(summary.into()),
         })
         .await;
@@ -414,8 +545,8 @@ pub async fn finalize_deployment_control(
                     service_name: service.clone(),
                     expected_image_name: Some(image_name.clone()),
                     expected_version: Some(version.clone()),
-                    observed_image_name: Some(image_name),
-                    observed_version: Some(version),
+                    observed_image_name: None,
+                    observed_version: None,
                     source_operation_id: Some(handle.operation_id.clone()),
                 });
             }
@@ -448,26 +579,13 @@ pub async fn finalize_deployment_control(
     let mut local_targets = Vec::with_capacity(summary.targets.len());
     let mut local_steps = Vec::with_capacity(summary.targets.len() * handle.plan.steps.len());
     for target in &summary.targets {
-        let (target_state, step_state, error_code) = match target.state {
-            DeploymentTargetState::Succeeded => {
-                (TargetState::Succeeded, StepState::Succeeded, None)
-            }
-            DeploymentTargetState::Failed | DeploymentTargetState::Panicked => (
-                TargetState::Failed,
-                StepState::Failed,
-                Some("DEPLOYMENT_FAILED".to_string()),
-            ),
-            DeploymentTargetState::Cancelled => (
-                TargetState::Cancelled,
-                StepState::Cancelled,
-                Some("CANCELLED".to_string()),
-            ),
-        };
+        let (target_state, step_state, error_code, terminal_stage) =
+            local_target_terminal_projection(&target.state);
         local_targets.push(TargetUpdate {
             resource_type: "aio".into(),
             resource_key: target.mac.clone(),
             state: target_state,
-            stage: "completed".into(),
+            stage: terminal_stage.into(),
             progress_current: 100,
             progress_total: 100,
             fencing_token: None,
@@ -573,13 +691,55 @@ pub async fn finalize_deployment_control(
     Err(last_error.unwrap_or_else(|| AppError::Conflict("本地最终化投影失败".into())))
 }
 
+fn local_target_terminal_projection(
+    state: &DeploymentTargetState,
+) -> (TargetState, StepState, Option<String>, &'static str) {
+    match state {
+        DeploymentTargetState::Succeeded => (
+            TargetState::Succeeded,
+            StepState::Succeeded,
+            None,
+            "completed",
+        ),
+        DeploymentTargetState::Failed | DeploymentTargetState::Panicked => (
+            TargetState::Failed,
+            StepState::Failed,
+            Some("DEPLOYMENT_FAILED".to_string()),
+            "failed",
+        ),
+        DeploymentTargetState::Cancelled => (
+            TargetState::Cancelled,
+            StepState::Cancelled,
+            Some("CANCELLED".to_string()),
+            "cancelled",
+        ),
+    }
+}
+
 pub async fn mark_deployment_interrupted(
     state: &FormalAppState,
     handle: &DeploymentControlHandle,
     error_code: &str,
     summary: &str,
 ) -> AppResult<()> {
+    let current_progress = state
+        .task_repository
+        .targets(&handle.local_task_id)
+        .await?
+        .into_iter()
+        .map(|target| {
+            (
+                (target.resource_type, target.resource_key),
+                (target.progress_current, target.progress_total),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     for lease in &handle.leases {
+        let (progress_current, progress_total) = current_progress
+            .get(&(lease.resource_type.clone(), lease.resource_key.clone()))
+            .copied()
+            .unwrap_or((DEPLOYMENT_REMOTE_PROGRESS_START, DEPLOYMENT_PROGRESS_TOTAL));
+        let progress_total = progress_total.max(DEPLOYMENT_PROGRESS_TOTAL);
         state
             .task_repository
             .update_target(
@@ -589,8 +749,8 @@ pub async fn mark_deployment_interrupted(
                     resource_key: lease.resource_key.clone(),
                     state: TargetState::Interrupted,
                     stage: "needs_reconcile".into(),
-                    progress_current: 0,
-                    progress_total: 100,
+                    progress_current: progress_current.min(progress_total),
+                    progress_total,
                     fencing_token: Some(lease.fencing_token),
                     message_code: Some(error_code.into()),
                     message_params_json: None,
@@ -635,7 +795,7 @@ pub async fn mark_deployment_finalizing_failed(
     Ok(())
 }
 
-fn mode_code(mode: DeploymentMode) -> &'static str {
+pub(crate) fn mode_code(mode: DeploymentMode) -> &'static str {
     match mode {
         DeploymentMode::FirstDeploy => "first_deploy",
         DeploymentMode::FullUpgrade => "full_upgrade",
@@ -643,7 +803,7 @@ fn mode_code(mode: DeploymentMode) -> &'static str {
     }
 }
 
-fn mode_label(mode: DeploymentMode) -> &'static str {
+pub(crate) fn mode_label(mode: DeploymentMode) -> &'static str {
     match mode {
         DeploymentMode::FirstDeploy => "首次部署",
         DeploymentMode::FullUpgrade => "整包升级",
@@ -653,4 +813,51 @@ fn mode_label(mode: DeploymentMode) -> &'static str {
 
 fn step_id(task_id: &str, mac: &str, code: &str) -> String {
     format!("{task_id}:{mac}:{code}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_target_terminal_stage_matches_its_result() {
+        let cases = [
+            (
+                DeploymentTargetState::Succeeded,
+                TargetState::Succeeded,
+                StepState::Succeeded,
+                None,
+                "completed",
+            ),
+            (
+                DeploymentTargetState::Failed,
+                TargetState::Failed,
+                StepState::Failed,
+                Some("DEPLOYMENT_FAILED"),
+                "failed",
+            ),
+            (
+                DeploymentTargetState::Panicked,
+                TargetState::Failed,
+                StepState::Failed,
+                Some("DEPLOYMENT_FAILED"),
+                "failed",
+            ),
+            (
+                DeploymentTargetState::Cancelled,
+                TargetState::Cancelled,
+                StepState::Cancelled,
+                Some("CANCELLED"),
+                "cancelled",
+            ),
+        ];
+
+        for (input, expected_target, expected_step, expected_error, expected_stage) in cases {
+            let (target, step, error, stage) = local_target_terminal_projection(&input);
+            assert_eq!(target, expected_target);
+            assert_eq!(step, expected_step);
+            assert_eq!(error.as_deref(), expected_error);
+            assert_eq!(stage, expected_stage);
+        }
+    }
 }

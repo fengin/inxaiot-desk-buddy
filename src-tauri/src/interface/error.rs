@@ -13,6 +13,8 @@ pub struct CommandErrorDto {
     pub message_key: String,
     pub params: BTreeMap<String, String>,
     pub trace_id: String,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub field_errors: BTreeMap<String, String>,
 }
 
 impl From<AppError> for CommandErrorDto {
@@ -22,7 +24,9 @@ impl From<AppError> for CommandErrorDto {
         let summary = redactor.redact_text(&error.to_string());
         tracing::error!(trace_id, error = %summary, "tauri command failed");
         let (code, message_key) = match &error {
-            AppError::InvalidConfig(_) => ("CONFIG_VALIDATION_FAILED", "error.invalid_config"),
+            AppError::InvalidConfig(_) | AppError::InvalidFields(_) => {
+                ("CONFIG_VALIDATION_FAILED", "error.invalid_config")
+            }
             AppError::Conflict(message) if message.contains("发布配置") => {
                 ("CONFIG_VERSION_CONFLICT", "error.config_version_conflict")
             }
@@ -41,11 +45,19 @@ impl From<AppError> for CommandErrorDto {
         };
         let mut params = BTreeMap::new();
         params.insert("summary".into(), summary);
+        let field_errors = match error {
+            AppError::InvalidFields(fields) => fields
+                .into_iter()
+                .map(|(field, message)| (field, redactor.redact_text(&message)))
+                .collect(),
+            _ => BTreeMap::new(),
+        };
         Self {
             code: code.into(),
             message_key: message_key.into(),
             params,
             trace_id,
+            field_errors,
         }
     }
 }

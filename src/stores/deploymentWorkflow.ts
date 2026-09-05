@@ -4,6 +4,7 @@ import { ref } from "vue";
 import { commandErrorText } from "@/shared/api/errors";
 import { useOperationsAdapter } from "@/shared/api/operationsAdapter";
 import type {
+  DeploymentExecutionSnapshot,
   DeploymentPreflightReport,
   DeploymentTaskSubmission,
   DeploymentTaskView,
@@ -25,6 +26,7 @@ export const useDeploymentWorkflowStore = defineStore("deployment-workflow", () 
   const currentTaskProjectId = ref<string>();
   const preflight = ref<DeploymentPreflightReport>();
   const preflightProjectId = ref<string>();
+  const preflightTaskId = ref<string>();
   const submission = ref<DeploymentTaskSubmission>();
   const history = ref<OperationHistoryPage>(emptyHistory());
   const historyDetail = ref<OperationHistoryDetail>();
@@ -64,20 +66,28 @@ export const useDeploymentWorkflowStore = defineStore("deployment-workflow", () 
     historyDetailRequest += 1;
     preflight.value = undefined;
     preflightProjectId.value = projectId;
+    preflightTaskId.value = undefined;
     history.value = emptyHistory();
     historyDetail.value = undefined;
     error.value = "";
   }
 
-  async function runPreflight(projectId: string, plan: DeploymentPlanInput) {
+  async function runPreflight(
+    projectId: string,
+    taskId: string,
+    plan: DeploymentPlanInput
+  ) {
     const request = ++preflightRequest;
+    preflight.value = undefined;
+    preflightTaskId.value = undefined;
     startTaskLoading();
     error.value = "";
     try {
-      const result = await useOperationsAdapter().preflight(projectId, plan);
+      const result = await useOperationsAdapter().preflight(projectId, taskId, plan);
       if (request === preflightRequest) {
         preflight.value = result;
         preflightProjectId.value = projectId;
+        preflightTaskId.value = taskId;
       }
       return result;
     } catch (cause) {
@@ -90,20 +100,36 @@ export const useDeploymentWorkflowStore = defineStore("deployment-workflow", () 
     }
   }
 
-  async function submit(projectId: string, plan: DeploymentPlanInput) {
+  async function submit(
+    projectId: string,
+    checkedTaskId: string,
+    executionSnapshot: DeploymentExecutionSnapshot
+  ) {
     const request = ++taskRequest;
     startTaskLoading();
     error.value = "";
     try {
-      const submitted = await useOperationsAdapter().submit(projectId, plan);
-      const task = await useOperationsAdapter().getTask(
+      const submitted = await useOperationsAdapter().submit(
         projectId,
-        submitted.taskId
+        checkedTaskId,
+        executionSnapshot
       );
       if (request === taskRequest) {
         submission.value = submitted;
-        currentTask.value = task;
-        currentTaskProjectId.value = projectId;
+      }
+      try {
+        const task = await useOperationsAdapter().getTask(
+          projectId,
+          submitted.taskId
+        );
+        if (request === taskRequest) {
+          currentTask.value = task;
+          currentTaskProjectId.value = projectId;
+        }
+      } catch (cause) {
+        if (request === taskRequest) {
+          error.value = commandErrorText(cause, "部署任务已提交，但任务详情读取失败");
+        }
       }
       return submitted;
     } catch (cause) {
@@ -190,6 +216,7 @@ export const useDeploymentWorkflowStore = defineStore("deployment-workflow", () 
     preflightRequest += 1;
     preflight.value = undefined;
     preflightProjectId.value = undefined;
+    preflightTaskId.value = undefined;
   }
 
   function clearHistoryDetail() {
@@ -202,6 +229,7 @@ export const useDeploymentWorkflowStore = defineStore("deployment-workflow", () 
     currentTaskProjectId,
     preflight,
     preflightProjectId,
+    preflightTaskId,
     submission,
     history,
     historyDetail,

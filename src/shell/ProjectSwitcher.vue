@@ -26,7 +26,7 @@ import {
   Server,
   Trash2
 } from "lucide-vue-next";
-import { onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 
 import { commandErrorText } from "@/shared/api/errors";
 import type { ProjectInput, ProjectOverview } from "@/shared/model/project";
@@ -84,15 +84,21 @@ function projectInitials(project: ProjectOverview) {
   return project.name.trim().slice(0, 2).toUpperCase() || "IN";
 }
 
-function schemaTag() {
-  const schema = projects.schemaStatus;
-  if (!schema) return { type: "default" as const, label: "未检查" };
-  if (schema.state === "ready") return { type: "success" as const, label: "结构已就绪" };
-  if (["uninitialized", "upgrade_required"].includes(schema.state)) {
-    return { type: "warning" as const, label: "需要初始化/升级" };
+const schemaMaintenanceVisible = computed(() =>
+  Boolean(editingProjectId.value && projects.schemaStatus && projects.schemaStatus.state !== "ready")
+);
+const schemaUpgradeAvailable = computed(() =>
+  ["uninitialized", "upgrade_required"].includes(projects.schemaStatus?.state ?? "")
+);
+const schemaMaintenanceMessage = computed(() => {
+  if (projects.schemaStatus?.state === "uninitialized") {
+    return "工作台数据库尚未准备好，请初始化后继续。";
   }
-  return { type: "error" as const, label: "结构不兼容" };
-}
+  if (projects.schemaStatus?.state === "incompatible") {
+    return "请联系管理员处理后重新进入项目。";
+  }
+  return "请初始化或升级工作台数据库后继续。";
+});
 
 async function chooseProject(project: ProjectOverview) {
   popoverOpen.value = false;
@@ -208,7 +214,7 @@ async function testConnection() {
       existingProjectId: editingProjectId.value,
       project: { ...projectForm }
     });
-    if (result.successful) message.success("双数据库连接与平台 Schema 探测通过");
+    if (result.successful) message.success("项目连接检查通过");
     else message.error(result.message);
     return result;
   } catch (cause) {
@@ -231,12 +237,12 @@ async function saveProject() {
       : await projects.createProject(input);
     projectDialogOpen.value = false;
     const opened = await projects.switchProject(project.id);
-    message.success(editingProjectId.value ? "项目入口已更新" : "项目入口已创建");
+    message.success(editingProjectId.value ? "项目已更新" : "项目已创建");
     if (opened.connectionState === "schema_required") {
       editingProjectId.value = project.id;
       projectDialogOpen.value = true;
       await loadSchemaStatus(project.id);
-      message.warning("数据库连接通过；请显式初始化/升级工作台 Schema 后继续登录");
+      message.warning("项目连接成功；请先初始化或升级工作台数据后再登录");
     } else if (["login_required", "session_expired"].includes(opened.connectionState)) {
       await openLogin(project.id);
     }
@@ -252,7 +258,7 @@ async function deleteCurrentProject() {
   try {
     await projects.deleteProject(projects.activeProjectId);
     projectDialogOpen.value = false;
-    message.success("本地项目入口已删除，远端数据库数据未删除");
+    message.success("此电脑中保存的项目已删除，项目数据库数据未删除");
   } catch (cause) {
     message.error(commandErrorText(cause, "删除项目失败"));
   }
@@ -264,7 +270,7 @@ async function loadSchemaStatus(projectId = editingProjectId.value) {
   try {
     await projects.loadSchemaStatus(projectId);
   } catch (cause) {
-    message.error(commandErrorText(cause, "数据库结构检查失败"));
+    message.error(commandErrorText(cause, "暂时无法检查项目兼容性"));
   } finally {
     schemaLoading.value = false;
   }
@@ -303,7 +309,7 @@ async function upgradeSchema() {
 
     <div class="project-popover">
       <div class="popover-heading">
-        <div><strong>切换项目</strong><small>每个项目使用独立连接和登录会话</small></div>
+        <div><strong>切换项目</strong></div>
         <n-button size="tiny" quaternary @click="openCreateProject"><template #icon><Plus /></template>新增</n-button>
       </div>
       <div v-if="projects.loading" class="project-empty">正在读取本地项目…</div>
@@ -311,7 +317,7 @@ async function upgradeSchema() {
         <span>{{ projects.error }}</span>
         <n-button size="tiny" text type="primary" data-testid="project-initialize-retry" @click="retryInitialize">重新读取</n-button>
       </div>
-      <div v-else-if="!projects.projects.length" class="project-empty">还没有项目，请先新增项目入口</div>
+      <div v-else-if="!projects.projects.length" class="project-empty">还没有项目，请先新增项目</div>
       <button
         v-for="project in projects.projects"
         :key="project.id"
@@ -363,8 +369,7 @@ async function upgradeSchema() {
     </template>
   </n-modal>
 
-  <n-modal v-model:show="projectDialogOpen" preset="card" :title="editingProjectId ? '编辑项目入口' : '新增项目入口'" class="project-editor-modal" :bordered="false">
-    <p class="modal-description">本地只保存项目连接入口；共享配置和最终资产位于项目侧工作台数据库。</p>
+  <n-modal v-model:show="projectDialogOpen" preset="card" :title="editingProjectId ? '编辑项目' : '新增项目'" class="project-editor-modal" :bordered="false">
     <n-form label-placement="left" label-width="108" size="small">
       <n-form-item label="项目名称"><n-input v-model:value="projectForm.name" data-testid="project-name" placeholder="例如：深圳湾智慧园区" /></n-form-item>
       <n-form-item label="平台访问地址"><n-input v-model:value="projectForm.platformUrl" data-testid="project-platform-url" placeholder="http://192.168.3.6:8055" /></n-form-item>
@@ -380,18 +385,16 @@ async function upgradeSchema() {
     </n-form>
     <div class="connection-preview"><Server :size="16" /><span>连接测试只读探测平台库；TLS关闭时连接未加密，建议仅用于可信内网</span></div>
     <n-alert v-if="projects.lastConnectionTest" :type="projects.lastConnectionTest.successful ? 'success' : 'error'" :show-icon="false">
-      {{ projects.lastConnectionTest.message }} · MySQL {{ projects.lastConnectionTest.mysqlVersion }} · {{ projects.lastConnectionTest.connectionEncrypted ? '连接已加密' : '连接未加密' }}
+      {{ projects.lastConnectionTest.message }} · {{ projects.lastConnectionTest.connectionEncrypted ? '连接已加密' : '连接未加密' }}
     </n-alert>
-    <div v-if="editingProjectId" class="schema-maintenance">
+    <div v-if="schemaMaintenanceVisible" class="schema-maintenance" data-testid="schema-maintenance">
       <div class="schema-maintenance__copy">
-        <strong>工作台数据库结构</strong>
-        <span>{{ projects.schemaStatus?.message ?? "尚未检查" }}</span>
-        <small v-if="projects.schemaStatus">当前版本 {{ projects.schemaStatus.currentVersion ?? 0 }} · 可用版本 {{ projects.schemaStatus.latestAvailableVersion }}</small>
+        <strong>工作台版本和平台表结构不兼容</strong>
+        <span>{{ schemaMaintenanceMessage }}</span>
       </div>
-      <n-tag size="small" :bordered="false" :type="schemaTag().type">{{ schemaTag().label }}</n-tag>
-      <n-button size="small" secondary :loading="schemaLoading" @click="loadSchemaStatus()">检查结构</n-button>
+      <n-button size="small" secondary :loading="schemaLoading" @click="loadSchemaStatus()">重新检查</n-button>
       <n-popconfirm
-        v-if="projects.schemaStatus && ['uninitialized', 'upgrade_required'].includes(projects.schemaStatus.state)"
+        v-if="schemaUpgradeAvailable"
         positive-text="确认执行"
         negative-text="取消"
         @positive-click="upgradeSchema"
@@ -404,7 +407,7 @@ async function upgradeSchema() {
       <div class="project-editor-actions">
         <n-popconfirm v-if="editingProjectId" positive-text="仅删除本地入口" negative-text="取消" @positive-click="deleteCurrentProject">
           <template #trigger><n-button size="small" type="error" secondary data-action-owner="popconfirm"><template #icon><Trash2 /></template>删除项目</n-button></template>
-          只删除当前电脑上的项目入口和会话，不删除任何远端数据库数据。继续？
+          只删除此电脑中保存的项目和登录会话，不删除项目数据库中的任何数据。继续？
         </n-popconfirm>
         <n-space justify="end">
           <n-button size="small" @click="projectDialogOpen = false">取消</n-button>

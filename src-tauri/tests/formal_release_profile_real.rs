@@ -1,17 +1,14 @@
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
-use inxaiot_desk_buddy_lib::formal::credential_crypto::{ProjectMasterKey, ReleaseCredentials};
+use inxaiot_desk_buddy_lib::formal::credential_crypto::{
+    INXVISION_CREDENTIAL_SCHEME, ReleaseCredentials,
+};
 use inxaiot_desk_buddy_lib::formal::error::FormalError;
 use inxaiot_desk_buddy_lib::formal::mysql::{MySqlConnectionSpec, MySqlTlsMode, ProjectMySqlPools};
-use inxaiot_desk_buddy_lib::formal::release_master_key::{
-    ReleaseKeyProjectBinding, ReleaseMasterKeyManager,
-};
 use inxaiot_desk_buddy_lib::formal::release_profile_repository::{
     ReleaseProfileRepository, ReleaseProfileValues, ReleaseProfileWrite,
 };
-use inxaiot_desk_buddy_lib::formal::secret_store::MemorySecretStore;
 use inxaiot_desk_buddy_lib::formal::workbench_store::WorkbenchStore;
 use sqlx::Row;
 use uuid::Uuid;
@@ -55,7 +52,8 @@ fn config() -> MySqlConnectionSpec {
 fn values() -> ReleaseProfileValues {
     ReleaseProfileValues {
         env_template: "PLATFORM_HOST={{ platform.host }}".into(),
-        compose_template: "services: {}".into(),
+        compose_template: "services:\n  app:\n    image: ${APP_IMAGE}".into(),
+        host_info_template: r#"{"mac":"{{ node.mac }}","ip":"{{ node.ip }}","hostname":"{{ node.name }}","authKey":"{{ authKey }}"}"#.into(),
         platform_host: "platform.test".into(),
         platform_api_port: 8055,
         platform_mqtt_host: "mqtt.test".into(),
@@ -63,7 +61,7 @@ fn values() -> ReleaseProfileValues {
         ssh_port: 22,
         ssh_timeout_seconds: 15,
         aio_data_root: "/opt/data".into(),
-        aio_deploy_root: "/opt/data/deploy/inxvision-edge".into(),
+        aio_deploy_root: "/opt/data/deploy".into(),
     }
 }
 
@@ -92,52 +90,41 @@ async fn encrypted_profile_version_audit_and_exact_cleanup() {
     let repository = ReleaseProfileRepository::new(pools.workbench().clone());
     let profile_key = format!("poc-{}", &Uuid::now_v7().simple().to_string()[..20]);
     let credentials = credentials();
-    let key = ProjectMasterKey::generate(1).expect("project master key");
-
     let first = repository
-        .save(
-            &key,
-            ReleaseProfileWrite {
-                profile_key: profile_key.clone(),
-                values: values(),
-                credentials: credentials.clone(),
-                expected_version: None,
-                operator_name: "phase3-test".into(),
-                instance_id: "instance-a".into(),
-            },
-        )
+        .save(ReleaseProfileWrite {
+            profile_key: profile_key.clone(),
+            values: values(),
+            credentials: credentials.clone(),
+            expected_version: None,
+            operator_name: "phase3-test".into(),
+            instance_id: "instance-a".into(),
+        })
         .await
         .expect("create profile");
     assert_eq!(first.version, 1);
     assert_eq!(first.credentials, credentials);
 
     let stale = repository
-        .save(
-            &key,
-            ReleaseProfileWrite {
-                profile_key: profile_key.clone(),
-                values: values(),
-                credentials: credentials.clone(),
-                expected_version: Some(0),
-                operator_name: "phase3-test".into(),
-                instance_id: "instance-b".into(),
-            },
-        )
+        .save(ReleaseProfileWrite {
+            profile_key: profile_key.clone(),
+            values: values(),
+            credentials: credentials.clone(),
+            expected_version: Some(0),
+            operator_name: "phase3-test".into(),
+            instance_id: "instance-b".into(),
+        })
         .await;
     assert!(matches!(stale, Err(FormalError::Conflict(_))));
 
     let second = repository
-        .save(
-            &key,
-            ReleaseProfileWrite {
-                profile_key: profile_key.clone(),
-                values: values(),
-                credentials: credentials.clone(),
-                expected_version: Some(1),
-                operator_name: "phase3-test".into(),
-                instance_id: "instance-b".into(),
-            },
-        )
+        .save(ReleaseProfileWrite {
+            profile_key: profile_key.clone(),
+            values: values(),
+            credentials: credentials.clone(),
+            expected_version: Some(1),
+            operator_name: "phase3-test".into(),
+            instance_id: "instance-b".into(),
+        })
         .await
         .expect("update profile");
     assert_eq!(second.version, 2);
@@ -153,6 +140,14 @@ async fn encrypted_profile_version_audit_and_exact_cleanup() {
     assert!(!ciphertext_text.contains(&credentials.platform_auth_key));
     assert!(!ciphertext_text.contains(&credentials.platform_mqtt_password));
     assert!(!ciphertext_text.contains("isolated-private-key"));
+    let scheme: String = sqlx::query_scalar(
+        "SELECT credential_scheme FROM aio_release_profile WHERE profile_key = ?",
+    )
+    .bind(&profile_key)
+    .fetch_one(pools.workbench())
+    .await
+    .expect("credential scheme");
+    assert_eq!(scheme, INXVISION_CREDENTIAL_SCHEME);
 
     let audit_rows = sqlx::query(
         "SELECT CAST(changed_fields_json AS CHAR) AS changed_fields_text FROM audit_event \
@@ -187,8 +182,8 @@ async fn encrypted_profile_version_audit_and_exact_cleanup() {
 }
 
 #[tokio::test]
-#[ignore = "transfers and exactly removes one isolated release profile"]
-async fn project_master_key_cross_machine_transfer() {
+#[ignore = "reads and exactly removes one isolated fixed-key release profile"]
+async fn fixed_credential_profile_reads_from_an_independent_client() {
     let config = config();
     let pools = ProjectMySqlPools::connect(&config)
         .await
@@ -199,82 +194,29 @@ async fn project_master_key_cross_machine_transfer() {
         .expect("workbench migration");
     let repository = ReleaseProfileRepository::new(pools.workbench().clone());
     let suffix = &Uuid::now_v7().simple().to_string()[..20];
-    let profile_key = format!("key-poc-{suffix}");
-    let first_project_id = format!("project-{suffix}");
-    let second_project_id = format!("project-copy-{suffix}");
+    let profile_key = format!("fixed-key-poc-{suffix}");
     let credentials = credentials();
-    let first_store = Arc::new(MemorySecretStore::default());
-    let first_manager = ReleaseMasterKeyManager::new(first_store);
-    let created = first_manager
-        .save_profile(
-            &repository,
-            &first_project_id,
-            ReleaseProfileWrite {
-                profile_key: profile_key.clone(),
-                values: values(),
-                credentials: credentials.clone(),
-                expected_version: None,
-                operator_name: "key-transfer-test".into(),
-                instance_id: "instance-create".into(),
-            },
-        )
+    let created = repository
+        .save(ReleaseProfileWrite {
+            profile_key: profile_key.clone(),
+            values: values(),
+            credentials: credentials.clone(),
+            expected_version: None,
+            operator_name: "fixed-key-test".into(),
+            instance_id: "instance-create".into(),
+        })
         .await
-        .expect("create current encrypted profile");
+        .expect("create fixed-key encrypted profile");
     assert_eq!(created.credentials, credentials);
-    let metadata = repository
-        .credential_metadata(&profile_key)
+    let second_pools = ProjectMySqlPools::connect(&config)
         .await
-        .expect("metadata")
-        .expect("profile metadata");
-    assert!(metadata.is_project_key());
-    assert_eq!(metadata.key_version, 1);
-
-    let binding = ReleaseKeyProjectBinding {
-        platform_url: "http://isolated-platform.example:8055".into(),
-        db_host: config.host.clone(),
-        db_port: config.port,
-        workbench_db: config.workbench_schema.clone(),
-    };
-    let temporary = tempfile::tempdir().expect("transfer directory");
-    let package_path = temporary.path().join("project-key.inxkey");
-    first_manager
-        .export_key_package(
-            &repository,
-            &first_project_id,
-            &profile_key,
-            &binding,
-            &package_path,
-            "isolated-strong-passphrase",
-        )
-        .await
-        .expect("export key package");
-    let package_text = std::fs::read_to_string(&package_path).expect("read package");
-    assert!(
-        !package_text.contains(&hex::encode(
-            first_manager
-                .load_key(&first_project_id, 1)
-                .expect("current key")
-                .material()
-        ))
-    );
-
-    let second_manager = ReleaseMasterKeyManager::new(Arc::new(MemorySecretStore::default()));
-    second_manager
-        .import_key_package(
-            &repository,
-            &second_project_id,
-            &profile_key,
-            &binding,
-            &package_path,
-            "isolated-strong-passphrase",
-        )
-        .await
-        .expect("import key package on another machine");
+        .expect("connect independent client mysql");
+    let second_repository = ReleaseProfileRepository::new(second_pools.workbench().clone());
     assert_eq!(
-        second_manager
-            .load_profile(&repository, &second_project_id, &profile_key,)
+        second_repository
+            .get(&profile_key)
             .await
-            .expect("second machine decrypts profile")
+            .expect("independent client decrypts profile")
             .credentials,
         credentials
     );
@@ -293,5 +235,6 @@ async fn project_master_key_cross_machine_transfer() {
     .await
     .expect("verify cleanup");
     assert_eq!(remaining, 0);
+    second_pools.close().await;
     pools.close().await;
 }

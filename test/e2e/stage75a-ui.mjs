@@ -409,7 +409,7 @@ try {
   await setInput("release-ssh-private-key", privateKey);
   if (stage75b) {
     await setInput("release-data-root", "/opt/data");
-    await setInput("release-deploy-root", "/opt/data/deploy/inxvision-edge");
+    await setInput("release-deploy-root", "/opt/data/deploy");
   }
   await setInput("release-env-template", envTemplate);
   await clickRoleText("tab", "docker-compose.yml");

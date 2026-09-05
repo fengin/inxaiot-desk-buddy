@@ -7,6 +7,8 @@ import type {
   ImportSelection
 } from "@/shared/model/aio";
 import type { EdgeNode } from "@/shared/model/demo";
+import type { NodeServiceCheckSnapshot, ServiceCheckReport, ServiceObservation } from "@/shared/model/aio";
+import { publishFixtureTaskEvent } from "@/dev-fixtures/activityFixtureAdapter";
 
 function mapNode(node: EdgeNode): AioNodeListItem {
   const macNormalized = node.mac.replaceAll(":", "");
@@ -20,9 +22,10 @@ function mapNode(node: EdgeNode): AioNodeListItem {
     deployLabel: node.deployLabel,
     platformState: node.platformState,
     platformUpdatedAt: node.platformUpdatedAt,
-    serviceState: node.serviceState,
-    serviceLabel: node.serviceLabel,
+    serviceState: "unknown",
+    serviceLabel: "无检查记录",
     lastOperation: node.lastOperation,
+    lastOperationAt: undefined,
     platformId: node.platformId,
     source: node.platformId ? "merged" : "import",
     version: 1,
@@ -38,8 +41,8 @@ function mapNode(node: EdgeNode): AioNodeListItem {
       serviceName: version.service,
       expectedImageName: version.image,
       expectedVersion: version.expectedVersion === "—" ? undefined : version.expectedVersion,
-      observedVersion: version.observedVersion === "—" ? undefined : version.observedVersion,
-      observedAt: version.observedAt
+      observedVersion: undefined,
+      observedAt: undefined
     }))
   };
 }
@@ -77,9 +80,16 @@ export class FixtureAioAdapter implements AioAdapter {
   readonly real = false;
   private nodes = structuredClone(demoNodes);
   private sessions = new Map<string, AioImportSession>();
+  private serviceChecks = new Map<string, NodeServiceCheckSnapshot>();
+
+  private mappedNode(projectId: string, node: EdgeNode) {
+    const mapped = mapNode(node);
+    mapped.serviceCheck = this.serviceChecks.get(`${projectId}:${mapped.macNormalized}`);
+    return mapped;
+  }
 
   async listNodes(_projectId: string, query: Parameters<AioAdapter["listNodes"]>[1]) {
-    const all = this.nodes.map(mapNode);
+    const all = this.nodes.map((node) => this.mappedNode(_projectId, node));
     const keyword = query.search?.toLocaleLowerCase();
     const filtered = all.filter((node) =>
       (!keyword || [node.name, node.ip, node.mac, node.location].some((value) => value.toLocaleLowerCase().includes(keyword)))
@@ -100,8 +110,37 @@ export class FixtureAioAdapter implements AioAdapter {
   async getNodeDetail(_projectId: string, mac: string) {
     const node = this.nodes.find((item) => item.mac === mac);
     if (!node) throw new Error(`Fixture 一体机不存在：${mac}`);
-    const mapped = mapNode(node);
+    const mapped = this.mappedNode(_projectId, node);
     return { node: mapped, versions: mapped.versions };
+  }
+  async checkServices(projectId: string, mac: string) {
+    const node = this.nodes.find((item) => item.mac.replaceAll(":", "").toUpperCase() === mac.replaceAll(":", "").toUpperCase());
+    if (!node) throw new Error(`Fixture 一体机不存在：${mac}`);
+    const taskId = `fixture-service-inspection-${crypto.randomUUID()}`;
+    const startedAt = new Date().toISOString();
+    const emit = (status: "running" | "succeeded", stage: string, sequence: number, message: string) => publishFixtureTaskEvent({
+      eventId: `${taskId}-${sequence}`, localTaskId: taskId, sequence, localProjectId: projectId,
+      domainType: "aio", resourceType: "aio", resourceKey: node.mac.replaceAll(":", ""),
+      stage, status, progressCurrent: status === "succeeded" ? 1 : 0, progressTotal: 1,
+      level: "info", messageCode: status === "succeeded" ? "SERVICE_INSPECTION_COMPLETED" : "SERVICE_INSPECTION_STARTED",
+      messageParams: { operationType: "service_inspection", taskName: `检查服务 · ${node.name}`, targetCount: "1" },
+      message, timestamp: new Date().toISOString()
+    });
+    emit("running", "service_inspection", 1, "正在读取服务和镜像（演示数据）");
+    window.setTimeout(() => {
+      const checkedAt = new Date().toISOString();
+      const services: ServiceObservation[] = node.versions.map((version) => ({
+        serviceName: version.service, state: "normal", runtimeState: "running", healthStatus: "healthy",
+        expectedImage: `${version.image}:${version.expectedVersion}`,
+        actualImage: `${version.image}:${version.expectedVersion}`,
+        checkedAt, source: "manual", message: "演示服务运行正常"
+      }));
+      const expectedServices = services.map((service) => service.serviceName);
+      const report: ServiceCheckReport = { startedAt, checkedAt, source: "manual", scope: "all", expectedServices, services, state: "succeeded" };
+      this.serviceChecks.set(`${projectId}:${node.mac.replaceAll(":", "")}`, { expectedServices, services, lastFullCheckAt: checkedAt, lastAttempt: report });
+      emit("succeeded", "completed", 2, "服务检查完成，结果已保存在本机（演示数据）");
+    }, 350);
+    return { taskId };
   }
   async previewImport(projectId: string, filePath: string) {
     const session = previewSession(projectId, filePath);
@@ -131,7 +170,7 @@ export class FixtureAioAdapter implements AioAdapter {
         mac: selectedNew.displayMac!, name: selectedNew.values.name, ip: selectedNew.values.ip,
         location: selectedNew.values.location ?? "", managementState: "pending", deployLabel: "待实施",
         platformState: "unknown", platformUpdatedAt: "尚未注册", serviceState: "unknown",
-        serviceLabel: "待检查", lastOperation: "导入清单 · 刚刚", versions: []
+        serviceLabel: "无检查记录", lastOperation: "导入清单 · 刚刚", versions: []
       });
     }
     return { result: { operationId: "fixture-operation", appliedCount }, localSessionFinalized: true };

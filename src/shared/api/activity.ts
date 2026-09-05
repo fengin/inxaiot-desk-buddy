@@ -35,6 +35,14 @@ export async function cancelLocalTask(taskId: string) {
   return invoke<ActivityTask>("cancel_local_task", { taskId });
 }
 
+export async function clearFinishedLocalTasks(localProjectId: string) {
+  return invoke<number>("clear_finished_local_tasks", { localProjectId });
+}
+
+export async function clearTaskLogs(taskId: string) {
+  return invoke<void>("clear_task_logs", { taskId });
+}
+
 export async function listenTaskEvents(
   handler: (payload: TaskEventPayload) => void
 ): Promise<UnlistenFn> {

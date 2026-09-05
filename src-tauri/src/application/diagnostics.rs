@@ -3,6 +3,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemDiagnostics {
+    pub client_instance_id: String,
     pub application_version: String,
     pub source_commit: String,
     pub local_schema_version: String,
@@ -22,6 +23,7 @@ pub struct SystemDiagnostics {
 
 #[derive(Clone, Debug)]
 pub struct SystemDiagnosticsInput {
+    pub client_instance_id: String,
     pub application_version: String,
     pub source_commit: String,
     pub local_schema_version: String,
@@ -41,6 +43,7 @@ pub struct SystemDiagnosticsInput {
 
 pub fn build_system_diagnostics(input: SystemDiagnosticsInput) -> SystemDiagnostics {
     SystemDiagnostics {
+        client_instance_id: input.client_instance_id,
         application_version: input.application_version,
         source_commit: input.source_commit,
         local_schema_version: input.local_schema_version,

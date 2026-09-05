@@ -52,16 +52,16 @@ use crate::interface::commands::project_database::{
 };
 use crate::interface::commands::project_management::{
     capture_host_key, check_project_session, confirm_host_key, create_local_project,
-    create_project_login_challenge, delete_local_project, export_release_master_key,
-    get_project_session, get_release_profile, import_release_master_key, list_host_keys,
-    list_local_projects, login_project, logout_project, save_release_profile, switch_project,
-    test_project_connection, update_local_project, validate_release_profile,
+    create_project_login_challenge, delete_local_project, get_project_session, get_release_profile,
+    list_host_keys, list_local_projects, login_project, logout_project, open_release_agent_script,
+    replace_release_agent_script, save_release_profile, switch_project, test_project_connection,
+    update_local_project, validate_release_profile,
 };
-use crate::interface::commands::release_artifacts::{
-    build_deployment_plan, inspect_service_image, render_release_preview, validate_release_package,
-};
+use crate::interface::commands::release_artifacts::inspect_service_image;
+use crate::interface::commands::service_inspection::check_edge_node_services;
 use crate::interface::commands::task_activity::{
-    cancel_local_task, list_local_tasks, list_task_logs,
+    cancel_local_task, clear_finished_local_tasks, clear_task_logs, list_local_tasks,
+    list_task_logs,
 };
 use crate::runtime::event_bus::TaskEventBus;
 use crate::runtime::task_queue::{TaskHandlerRegistry, TaskQueue};
@@ -108,6 +108,10 @@ pub fn run() {
                 DataDirectoryProcessLock::acquire(&paths.process_lock)?;
             verify_embedded_agent()?;
             let logging_guard = init_file_logging(&paths.logs_dir)?;
+            tracing::info!(
+                instance_id = crate::infrastructure::client_instance::application_instance_id(),
+                "workbench client instance initialized"
+            );
             let task_event_bus = TaskEventBus::new(512)?;
             let setup_app_handle = app.handle().clone();
             let state = tauri::async_runtime::block_on(async {
@@ -246,13 +250,14 @@ pub fn run() {
             get_release_profile,
             validate_release_profile,
             save_release_profile,
-            export_release_master_key,
-            import_release_master_key,
+            replace_release_agent_script,
+            open_release_agent_script,
             list_host_keys,
             capture_host_key,
             confirm_host_key,
             list_edge_nodes,
             get_edge_node_detail,
+            check_edge_node_services,
             preview_inventory_import,
             get_latest_inventory_import,
             update_inventory_import_selection,
@@ -260,10 +265,7 @@ pub fn run() {
             discard_inventory_import,
             get_workbench_schema_status,
             initialize_or_upgrade_workbench_schema,
-            validate_release_package,
             inspect_service_image,
-            render_release_preview,
-            build_deployment_plan,
             preflight_deployment,
             submit_deployment,
             get_deployment_task,
@@ -272,6 +274,8 @@ pub fn run() {
             list_local_tasks,
             list_task_logs,
             cancel_local_task,
+            clear_finished_local_tasks,
+            clear_task_logs,
             confirm_application_exit,
             get_data_directory_status,
             schedule_data_directory_switch,

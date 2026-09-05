@@ -10,8 +10,4 @@ export class FixtureSystemDialogAdapter implements SystemDialogAdapter {
   async selectFile() {
     return null;
   }
-
-  async saveFile() {
-    return "D:\\INX\\DeskBuddy-Fixture\\release-master-key.inxkey";
-  }
 }

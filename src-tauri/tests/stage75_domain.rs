@@ -9,6 +9,7 @@ fn release_draft() -> ReleaseProfileDraft {
             env_template:
                 "PLATFORM_HOST={{platform.host}}\nDEVICE_EDGE_IMAGE={{image.device-edge}}\n".into(),
             compose_template: "services:\n  device-edge:\n    image: ${DEVICE_EDGE_IMAGE}\n".into(),
+            host_info_template: r#"{"mac":"{{ node.mac }}","ip":"{{ node.ip }}","hostname":"{{ node.name }}","authKey":"{{ authKey }}"}"#.into(),
             platform_host: "192.168.3.6".into(),
             platform_api_port: 8055,
             platform_mqtt_host: "192.168.3.6".into(),
@@ -16,7 +17,7 @@ fn release_draft() -> ReleaseProfileDraft {
             ssh_port: 22,
             ssh_timeout_seconds: 15,
             aio_data_root: "/opt/data".into(),
-            aio_deploy_root: "/opt/data/deploy/inxvision-edge".into(),
+            aio_deploy_root: "/opt/data/deploy".into(),
         },
         credentials: ReleaseProfileCredentials {
             platform_auth_key: "auth-key".into(),
@@ -36,7 +37,7 @@ fn release_draft() -> ReleaseProfileDraft {
 fn release_profile_validation_blocks_unknown_templates_and_unsafe_remote_roots() {
     let valid = release_draft().validate().expect("valid profile");
     assert!(valid.valid);
-    assert_eq!(valid.recognized_placeholder_count, 2);
+    assert_eq!(valid.recognized_placeholder_count, 6);
 
     let mut unknown = release_draft();
     unknown
@@ -48,6 +49,66 @@ fn release_profile_validation_blocks_unknown_templates_and_unsafe_remote_roots()
     let mut unsafe_root = release_draft();
     unsafe_root.values.aio_data_root = "/".into();
     assert!(unsafe_root.validate().is_err());
+}
+
+#[test]
+fn release_profile_reports_all_invalid_fields_without_credential_values() {
+    let mut draft = release_draft();
+    draft.credentials.platform_auth_key.clear();
+    draft.credentials.platform_mqtt_password = "ab".into();
+    draft.values.platform_api_port = 0;
+    draft.values.aio_data_root = "/".into();
+    let error = draft.validate().unwrap_err();
+    let dto = inxaiot_desk_buddy_lib::interface::error::CommandErrorDto::from(error);
+    assert_eq!(dto.code, "CONFIG_VALIDATION_FAILED");
+    assert_eq!(dto.field_errors.len(), 4);
+    for field in [
+        "credentials.platformAuthKey",
+        "credentials.platformMqttPassword",
+        "values.platformApiPort",
+        "values.aioDataRoot",
+    ] {
+        assert!(dto.field_errors.contains_key(field), "{field}");
+    }
+    let json = serde_json::to_value(dto).unwrap();
+    assert!(json["fieldErrors"]["credentials.platformAuthKey"].is_string());
+    assert!(!json.to_string().contains("ssh-password"));
+}
+
+#[test]
+fn release_profile_associates_alternative_ssh_credentials_and_template_errors() {
+    use inxaiot_desk_buddy_lib::core::error::AppError;
+    let mut draft = release_draft();
+    draft.credentials.ssh_password = None;
+    let AppError::InvalidFields(fields) = draft.validate().unwrap_err() else {
+        panic!("应返回字段错误");
+    };
+    assert_eq!(fields.len(), 2);
+    assert_eq!(
+        fields["credentials.sshPassword"],
+        fields["credentials.sshPrivateKey"]
+    );
+    draft.credentials.ssh_password = Some("ssh-password".into());
+    assert!(draft.validate().is_ok());
+
+    draft
+        .values
+        .env_template
+        .push_str("BAD={{unknown.value}}\n");
+    let AppError::InvalidFields(fields) = draft.validate().unwrap_err() else {
+        panic!("应返回字段错误");
+    };
+    assert!(fields.contains_key("values.envTemplate"));
+    assert!(!fields.contains_key("values.composeTemplate"));
+    draft.values.env_template = release_draft().values.env_template;
+    draft
+        .values
+        .compose_template
+        .push_str("    user: ${MISSING_USER}\n");
+    let AppError::InvalidFields(fields) = draft.validate().unwrap_err() else {
+        panic!("应返回字段错误");
+    };
+    assert!(fields.contains_key("values.composeTemplate"));
 }
 
 #[test]
@@ -110,11 +171,19 @@ fn deployment_snapshot_binds_project_plan_nodes_and_host_keys() {
         plan: DeploymentPlanInput {
             mode: DeploymentMode::FullUpgrade,
             target_macs: vec![node.mac_normalized.clone()],
+            image_files: vec![
+                inxaiot_desk_buddy_lib::domain::aio::deployment::DeploymentImageInput {
+                    service_name: "device-edge".into(),
+                    file_path: "C:/device-edge.tar".into(),
+                    image_tag: "device-edge:1".into(),
+                },
+            ],
             artifact_path: "C:/release".into(),
             artifact_name: "Release".into(),
             artifact_version: "1.0.0".into(),
             service_name: None,
             image_name: None,
+            service_image_environment_variable: None,
             images: BTreeMap::new(),
             batch_size: 1,
             concurrency: 1,

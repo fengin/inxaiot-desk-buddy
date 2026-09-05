@@ -31,7 +31,7 @@ async fn unsafe_release_version_and_existing_release_are_rejected_before_compose
         let remote_agent = format!("/opt/data/.inxaiot-desk-buddy-{operation_id}-{index}.sh");
         let fixture_dir = format!("/opt/data/.inxaiot-desk-buddy-{operation_id}-{index}");
         let package = format!("{fixture_dir}/same-version.tar");
-        let current = "/opt/data/deploy/inxvision-edge/current";
+        let current = "/opt/data/deploy/current";
         let result: Result<(), Box<dyn std::error::Error>> = async {
             session
                 .upload(
@@ -72,7 +72,7 @@ async fn unsafe_release_version_and_existing_release_are_rejected_before_compose
             ensure(current_target.exit_status == 0, current_target.stderr)?;
             let current_target = current_target.stdout.trim().to_string();
             ensure(
-                current_target.starts_with("/opt/data/deploy/inxvision-edge/releases/"),
+                current_target.starts_with("/opt/data/deploy/releases/"),
                 "current release is outside releases root",
             )?;
             let version = run(
@@ -107,7 +107,7 @@ async fn unsafe_release_version_and_existing_release_are_rejected_before_compose
                 !traversal.stdout.contains(r#""step":"compose""#),
                 "unsafe version reached Compose",
             )?;
-            let escaped = format!("/opt/data/deploy/inxvision-edge/escape-{operation_id}-{index}");
+            let escaped = format!("/opt/data/deploy/escape-{operation_id}-{index}");
             ensure(
                 run(
                     &session,

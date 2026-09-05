@@ -97,6 +97,38 @@ pub async fn list_task_logs(
     .await
 }
 
+#[tauri::command]
+pub async fn clear_finished_local_tasks(
+    state: State<'_, FormalAppState>,
+    local_project_id: String,
+) -> Result<u32, CommandErrorDto> {
+    state
+        .task_repository
+        .clear_terminal_for_project(&local_project_id)
+        .await
+        .map_err(CommandErrorDto::from)
+}
+
+#[tauri::command]
+pub async fn clear_task_logs(
+    state: State<'_, FormalAppState>,
+    task_id: String,
+) -> Result<(), CommandErrorDto> {
+    let task = state
+        .task_repository
+        .get(&task_id)
+        .await
+        .map_err(CommandErrorDto::from)?;
+    if !task.state.is_terminal() {
+        return Err(CommandErrorDto::from(
+            crate::core::error::AppError::Conflict("只能清空已结束任务的日志".into()),
+        ));
+    }
+    TaskDataLifecycle::new(&state.paths)
+        .clear_task_log(&task.local_project_id, &task.id)
+        .map_err(CommandErrorDto::from)
+}
+
 pub async fn query_task_logs(
     state: &FormalAppState,
     task_id: &str,
@@ -285,9 +317,16 @@ async fn activity_task(
         .targets(&task.id)
         .await
         .map_err(CommandErrorDto::from)?;
-    let target_count = u32::try_from(targets.len()).unwrap_or(u32::MAX);
+    let visible_targets = targets
+        .iter()
+        .filter(|target| {
+            task.operation_type != "deployment_preflight"
+                || target.resource_type != "preflight_internal"
+        })
+        .collect::<Vec<_>>();
+    let target_count = u32::try_from(visible_targets.len()).unwrap_or(u32::MAX);
     let completed_count = u32::try_from(
-        targets
+        visible_targets
             .iter()
             .filter(|target| {
                 matches!(
@@ -315,12 +354,22 @@ async fn activity_task(
             .unwrap_or(100)
             .min(100)
     });
-    let stage = targets
-        .iter()
-        .find(|target| target.state == TargetState::Running && !target.stage.is_empty())
-        .or_else(|| targets.iter().find(|target| !target.stage.is_empty()))
-        .map(|target| target.stage.clone())
-        .unwrap_or_else(|| task.state.as_str().into());
+    let stage = if task.operation_type == "deployment_preflight" {
+        match task.state {
+            TaskState::Checking => "正在检查".into(),
+            TaskState::Succeeded => "检查完成".into(),
+            TaskState::Failed => "检查失败".into(),
+            TaskState::Interrupted => "检查中断".into(),
+            _ => "等待检查".into(),
+        }
+    } else {
+        targets
+            .iter()
+            .find(|target| target.state == TargetState::Running && !target.stage.is_empty())
+            .or_else(|| targets.iter().find(|target| !target.stage.is_empty()))
+            .map(|target| target.stage.clone())
+            .unwrap_or_else(|| task.state.as_str().into())
+    };
     Ok(ActivityTaskDto {
         id: task.id,
         project_id: task.local_project_id,

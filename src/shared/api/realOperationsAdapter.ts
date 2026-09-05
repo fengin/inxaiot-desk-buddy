@@ -1,9 +1,5 @@
-import {
-  inspectServiceImage,
-  validateReleasePackage
-} from "@/shared/api/release";
+import { inspectServiceImage } from "@/shared/api/release";
 import type { OperationsAdapter } from "@/shared/api/operationsAdapter";
-import type { OperationMode } from "@/shared/model/demo";
 import {
   getDeploymentTask,
   getOperationHistoryDetail,
@@ -14,16 +10,22 @@ import {
 
 export class RealOperationsAdapter implements OperationsAdapter {
   readonly real = true;
-  async inspectArtifact(mode: OperationMode, path: string) {
-    return mode === "service_upgrade"
-      ? { imageInspection: await inspectServiceImage(path) }
-      : { releaseValidation: await validateReleasePackage(path) };
+  inspectImage(path: string, expectedImage?: string) {
+    return inspectServiceImage(path, expectedImage);
   }
-  preflight(projectId: string, plan: Parameters<OperationsAdapter["preflight"]>[1]) {
-    return preflightDeployment(projectId, plan);
+  preflight(
+    projectId: string,
+    preflightTaskId: string,
+    plan: Parameters<OperationsAdapter["preflight"]>[2]
+  ) {
+    return preflightDeployment(projectId, preflightTaskId, plan);
   }
-  submit(projectId: string, plan: Parameters<OperationsAdapter["submit"]>[1]) {
-    return submitDeployment(projectId, plan);
+  submit(
+    projectId: string,
+    preflightTaskId: Parameters<OperationsAdapter["submit"]>[1],
+    executionSnapshot: Parameters<OperationsAdapter["submit"]>[2]
+  ) {
+    return submitDeployment(projectId, preflightTaskId, executionSnapshot);
   }
   getTask(projectId: string, taskId: string) {
     return getDeploymentTask(projectId, taskId);

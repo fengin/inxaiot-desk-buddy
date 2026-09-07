@@ -12,6 +12,26 @@ class CredentialsResetRequiredAdapter extends FixtureWorkbenchAdapter {
   }
 }
 
+class DelayedSaveAdapter extends FixtureWorkbenchAdapter {
+  private releaseSave!: () => void;
+  private markStarted!: () => void;
+  readonly started = new Promise<void>((resolve) => { this.markStarted = resolve; });
+  private readonly gate = new Promise<void>((resolve) => { this.releaseSave = resolve; });
+
+  release() {
+    this.releaseSave();
+  }
+
+  override async saveReleaseProfile(
+    projectId: string,
+    draft: Parameters<FixtureWorkbenchAdapter["saveReleaseProfile"]>[1]
+  ) {
+    this.markStarted();
+    await this.gate;
+    return super.saveReleaseProfile(projectId, draft);
+  }
+}
+
 describe("release profile store", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
@@ -152,5 +172,25 @@ describe("release profile store", () => {
     await pending;
     expect(store.fieldErrors).toEqual({});
     expect(store.error).toBe("");
+  });
+
+  it("clears the previous project mutation state when the project changes", async () => {
+    const adapter = new DelayedSaveAdapter();
+    configureWorkbenchAdapter(adapter);
+    const store = useReleaseProfileStore();
+    await store.load("project-shenzhen-bay");
+
+    const pending = store.save();
+    await adapter.started;
+    expect(store.saving).toBe(true);
+
+    await store.load("project-chengdu-center");
+    expect(store.projectId).toBe("project-chengdu-center");
+    expect(store.saving).toBe(false);
+
+    adapter.release();
+    await pending;
+    expect(store.projectId).toBe("project-chengdu-center");
+    expect(store.saving).toBe(false);
   });
 });

@@ -10,6 +10,9 @@ use crate::domain::common::task::{TargetState, TaskEvent, TaskEventLevel, TaskRe
 use crate::formal::app_state::FormalAppState;
 use crate::infrastructure::local_sqlite::task_repository::TargetUpdate;
 use crate::infrastructure::task_data_lifecycle::TaskDataLifecycle;
+use crate::infrastructure::task_runtime::{
+    FinalizationRetryOutcome, retry_pending_local_finalization,
+};
 use crate::interface::error::CommandErrorDto;
 
 #[derive(Clone, Debug, Serialize)]
@@ -47,6 +50,14 @@ pub struct ActivityLogPageDto {
     pub items: Vec<ActivityLogDto>,
     pub next_offset: u64,
     pub has_more: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinalizationRetryDto {
+    pub task: ActivityTaskDto,
+    pub takeover_required: bool,
+    pub message: String,
 }
 
 #[tauri::command]
@@ -175,6 +186,53 @@ pub async fn cancel_local_task(
     task_id: String,
 ) -> Result<ActivityTaskDto, CommandErrorDto> {
     request_task_cancel(&state, &task_id).await
+}
+
+#[tauri::command]
+pub async fn retry_local_task_finalization(
+    state: State<'_, FormalAppState>,
+    task_id: String,
+    force_takeover: bool,
+) -> Result<FinalizationRetryDto, CommandErrorDto> {
+    let outcome = retry_pending_local_finalization(&state, &task_id, force_takeover)
+        .await
+        .map_err(CommandErrorDto::from)?;
+    let task = state
+        .task_repository
+        .get(&task_id)
+        .await
+        .map_err(CommandErrorDto::from)?;
+    let task = activity_task(&state, task).await?;
+    match outcome {
+        FinalizationRetryOutcome::Completed => Ok(FinalizationRetryDto {
+            task,
+            takeover_required: false,
+            message: if force_takeover {
+                "已强制接管并补写部署结果；原占用任务后续写入会被租约拒绝".into()
+            } else {
+                "部署结果已补写完成".into()
+            },
+        }),
+        FinalizationRetryOutcome::TakeoverRequired(conflicts) => {
+            let details = conflicts
+                .iter()
+                .map(|conflict| {
+                    format!(
+                        "{}（电脑={}，任务={}）",
+                        conflict.resource_key, conflict.owner_instance_id, conflict.operation_id
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("；");
+            Ok(FinalizationRetryDto {
+                task,
+                takeover_required: true,
+                message: format!(
+                    "检测到其他电脑或任务已经占用目标：{details}。请先线下确认对方没有继续操作，再强制接管并补写结果。"
+                ),
+            })
+        }
+    }
 }
 
 pub async fn request_task_cancel(

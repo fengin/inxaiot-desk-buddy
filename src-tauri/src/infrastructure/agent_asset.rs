@@ -8,9 +8,9 @@ use crate::formal::release_profile_repository::StoredReleaseAgentScript;
 
 pub const AGENT_SOURCE: &str = include_str!("../../resources/agent/edge-node-agent.sh");
 pub const AGENT_FILE_NAME: &str = "edge-node-agent.sh";
-pub const AGENT_VERSION: &str = "0.1.10";
+pub const AGENT_VERSION: &str = "0.1.13";
 pub const AGENT_PROTOCOL_VERSION: &str = "1";
-pub const AGENT_SHA256: &str = "0eb72df8858e7418f8cd75f28de13858d517732e470da6c97a6e33b8d4b56154";
+pub const AGENT_SHA256: &str = "fb7ad58c72dbbbbc3660401ecec38a840965b5596bb78929c42a64f0c7fe377c";
 pub const MAX_AGENT_SCRIPT_BYTES: usize = 1024 * 1024;
 pub const AGENT_COMPATIBILITY: &[&str] = &[
     "Linux x86_64",
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn embedded_agent_has_version_hash_protocol_and_compatibility() {
         verify_embedded_agent().expect("embedded agent");
-        assert_eq!(AGENT_VERSION, "0.1.10");
+        assert_eq!(AGENT_VERSION, "0.1.13");
         assert_eq!(AGENT_PROTOCOL_VERSION, "1");
         assert_eq!(AGENT_SHA256.len(), 64);
         assert!(!AGENT_COMPATIBILITY.is_empty());

@@ -72,7 +72,7 @@ function taskStageLabel(task: ActivityTask) {
   if (task.state === "cancelled") return "已取消";
   if (task.state === "interrupted") return "已中断";
   if (task.state === "succeeded" || task.state === "partially_succeeded") return "已完成";
-  if (task.state === "finalizing_failed") return "正在补写结果";
+  if (task.state === "finalizing_failed") return "等待补写结果";
   const labels: Record<string, string> = {
     draft: "准备任务",
     checking: "检查中",
@@ -143,6 +143,22 @@ async function clearCurrentPanel() {
   }
 }
 
+async function retryFinalization() {
+  try {
+    const result = await activity.retrySelectedFinalization(false);
+    if (!result) return;
+    if (!result.takeoverRequired) {
+      message.success(result.message);
+      return;
+    }
+    if (!window.confirm(`${result.message}\n\n确认强制接管并补写结果？`)) return;
+    const forced = await activity.retrySelectedFinalization(true);
+    if (forced) message.success(forced.message);
+  } catch (cause) {
+    message.error(activity.error || (cause instanceof Error ? cause.message : "补写部署结果失败"));
+  }
+}
+
 onMounted(async () => {
   await projects.initialize();
   if (projects.activeProjectId) await activity.start(projects.activeProjectId);
@@ -194,7 +210,7 @@ watch(
         <n-empty v-else :description="activity.error || '暂无任务'" />
       </template>
       <div v-else ref="logLines" class="log-view" @scroll="handleLogScroll">
-          <div class="log-scope"><strong>{{ activity.selectedTask?.name ?? '未选择任务' }}</strong><span>完整过程仅保存在当前电脑</span><n-button v-if="!followLatest" size="tiny" quaternary @click="returnToLatest">回到最新</n-button><n-select v-model:value="activity.logLevels" class="log-filter-level" size="tiny" multiple clearable :options="levelOptions" placeholder="级别" @update:value="activity.refreshLogs" /><n-input v-model:value="activity.logKeyword" class="log-filter-keyword" size="tiny" clearable placeholder="筛选日志" @update:value="activity.refreshLogs" /><n-button v-if="activity.selectedTask?.cancellable" size="tiny" type="warning" secondary @click="activity.cancelSelectedTask">取消任务</n-button></div>
+          <div class="log-scope"><strong>{{ activity.selectedTask?.name ?? '未选择任务' }}</strong><span>完整过程仅保存在当前电脑</span><n-button v-if="!followLatest" size="tiny" quaternary @click="returnToLatest">回到最新</n-button><n-select v-model:value="activity.logLevels" class="log-filter-level" size="tiny" multiple clearable :options="levelOptions" placeholder="级别" @update:value="activity.refreshLogs" /><n-input v-model:value="activity.logKeyword" class="log-filter-keyword" size="tiny" clearable placeholder="筛选日志" @update:value="activity.refreshLogs" /><n-button v-if="activity.selectedTask?.state === 'finalizing_failed'" size="tiny" type="warning" secondary :loading="activity.finalizationRetrying" @click="retryFinalization">补写结果</n-button><n-button v-if="activity.selectedTask?.cancellable" size="tiny" type="warning" secondary @click="activity.cancelSelectedTask">取消任务</n-button></div>
           <div v-if="activity.logs.length" class="log-lines" role="log">
             <n-button v-if="activity.logHasMore" class="log-load-older" size="tiny" quaternary @click="activity.loadOlderLogs">加载更早日志</n-button>
             <div v-for="entry in activity.logs" :key="entry.id" class="log-line" :class="entry.level.toLowerCase()">

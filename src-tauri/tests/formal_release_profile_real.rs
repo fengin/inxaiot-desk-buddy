@@ -1,15 +1,18 @@
 use std::path::Path;
 use std::time::Duration;
 
+use inxaiot_desk_buddy_lib::core::secret::SecretValue;
 use inxaiot_desk_buddy_lib::formal::credential_crypto::{
     INXVISION_CREDENTIAL_SCHEME, ReleaseCredentials,
 };
 use inxaiot_desk_buddy_lib::formal::error::FormalError;
-use inxaiot_desk_buddy_lib::formal::mysql::{MySqlConnectionSpec, MySqlTlsMode, ProjectMySqlPools};
 use inxaiot_desk_buddy_lib::formal::release_profile_repository::{
     ReleaseProfileRepository, ReleaseProfileValues, ReleaseProfileWrite,
 };
 use inxaiot_desk_buddy_lib::formal::workbench_store::WorkbenchStore;
+use inxaiot_desk_buddy_lib::infrastructure::database::{
+    DatabaseTlsMode, DualMySqlPools, MySqlProjectConfig,
+};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -26,7 +29,7 @@ fn default<'a>(text: &'a str, key: &str) -> &'a str {
     &rest[..rest.find('}').expect("config default end")]
 }
 
-fn config() -> MySqlConnectionSpec {
+fn config() -> MySqlProjectConfig {
     let project = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("project");
@@ -37,14 +40,14 @@ fn config() -> MySqlConnectionSpec {
         "inxvision-platform/inxaiot-starter-platform/src/main/resources/application-dev.yml",
     ))
     .expect("platform config");
-    MySqlConnectionSpec {
+    MySqlProjectConfig {
         host: default(&yaml, "MYSQL_HOST").into(),
         port: default(&yaml, "MYSQL_PORT").parse().expect("mysql port"),
         username: default(&yaml, "MYSQL_USER").into(),
-        password: default(&yaml, "MYSQL_PASSWORD").into(),
+        password: SecretValue::new(default(&yaml, "MYSQL_PASSWORD")),
         platform_schema: line(&description, "平台业务数据库名：").into(),
         workbench_schema: line(&description, "工作台数据库：").into(),
-        tls_mode: MySqlTlsMode::Disabled,
+        tls_mode: DatabaseTlsMode::Disabled,
         connect_timeout: Duration::from_secs(10),
     }
 }
@@ -82,12 +85,12 @@ fn credentials() -> ReleaseCredentials {
 #[ignore = "writes and removes exactly one isolated release profile"]
 async fn encrypted_profile_version_audit_and_exact_cleanup() {
     let config = config();
-    let pools = ProjectMySqlPools::connect(&config)
+    let pools = DualMySqlPools::connect(&config)
         .await
         .expect("connect project mysql");
-    let store = WorkbenchStore::new(pools.workbench().clone());
+    let store = WorkbenchStore::new(pools.workbench.clone());
     store.migrate().await.expect("workbench migration");
-    let repository = ReleaseProfileRepository::new(pools.workbench().clone());
+    let repository = ReleaseProfileRepository::new(pools.workbench.clone());
     let profile_key = format!("poc-{}", &Uuid::now_v7().simple().to_string()[..20]);
     let credentials = credentials();
     let first = repository
@@ -133,7 +136,7 @@ async fn encrypted_profile_version_audit_and_exact_cleanup() {
         "SELECT credential_ciphertext FROM aio_release_profile WHERE profile_key = ?",
     )
     .bind(&profile_key)
-    .fetch_one(pools.workbench())
+    .fetch_one(&pools.workbench)
     .await
     .expect("ciphertext");
     let ciphertext_text = String::from_utf8_lossy(&ciphertext);
@@ -144,7 +147,7 @@ async fn encrypted_profile_version_audit_and_exact_cleanup() {
         "SELECT credential_scheme FROM aio_release_profile WHERE profile_key = ?",
     )
     .bind(&profile_key)
-    .fetch_one(pools.workbench())
+    .fetch_one(&pools.workbench)
     .await
     .expect("credential scheme");
     assert_eq!(scheme, INXVISION_CREDENTIAL_SCHEME);
@@ -154,7 +157,7 @@ async fn encrypted_profile_version_audit_and_exact_cleanup() {
          WHERE object_type = 'aio_release_profile' AND object_key = ?",
     )
     .bind(&profile_key)
-    .fetch_all(pools.workbench())
+    .fetch_all(&pools.workbench)
     .await
     .expect("audit rows");
     assert_eq!(audit_rows.len(), 2);
@@ -174,7 +177,7 @@ async fn encrypted_profile_version_audit_and_exact_cleanup() {
     )
     .bind(&profile_key)
     .bind(&profile_key)
-    .fetch_one(pools.workbench())
+    .fetch_one(&pools.workbench)
     .await
     .expect("verify cleanup");
     assert_eq!(remaining, 0);
@@ -185,14 +188,14 @@ async fn encrypted_profile_version_audit_and_exact_cleanup() {
 #[ignore = "reads and exactly removes one isolated fixed-key release profile"]
 async fn fixed_credential_profile_reads_from_an_independent_client() {
     let config = config();
-    let pools = ProjectMySqlPools::connect(&config)
+    let pools = DualMySqlPools::connect(&config)
         .await
         .expect("connect project mysql");
-    WorkbenchStore::new(pools.workbench().clone())
+    WorkbenchStore::new(pools.workbench.clone())
         .migrate()
         .await
         .expect("workbench migration");
-    let repository = ReleaseProfileRepository::new(pools.workbench().clone());
+    let repository = ReleaseProfileRepository::new(pools.workbench.clone());
     let suffix = &Uuid::now_v7().simple().to_string()[..20];
     let profile_key = format!("fixed-key-poc-{suffix}");
     let credentials = credentials();
@@ -208,10 +211,10 @@ async fn fixed_credential_profile_reads_from_an_independent_client() {
         .await
         .expect("create fixed-key encrypted profile");
     assert_eq!(created.credentials, credentials);
-    let second_pools = ProjectMySqlPools::connect(&config)
+    let second_pools = DualMySqlPools::connect(&config)
         .await
         .expect("connect independent client mysql");
-    let second_repository = ReleaseProfileRepository::new(second_pools.workbench().clone());
+    let second_repository = ReleaseProfileRepository::new(second_pools.workbench.clone());
     assert_eq!(
         second_repository
             .get(&profile_key)
@@ -231,7 +234,7 @@ async fn fixed_credential_profile_reads_from_an_independent_client() {
     )
     .bind(&profile_key)
     .bind(&profile_key)
-    .fetch_one(pools.workbench())
+    .fetch_one(&pools.workbench)
     .await
     .expect("verify cleanup");
     assert_eq!(remaining, 0);

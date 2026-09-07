@@ -1,13 +1,16 @@
 use std::path::Path;
 use std::time::Duration;
 
+use inxaiot_desk_buddy_lib::core::secret::SecretValue;
 use inxaiot_desk_buddy_lib::formal::aio_node_repository::{
     AioNodeRepository, AioNodeValues, AioNodeWrite, ServiceVersionWrite,
 };
 use inxaiot_desk_buddy_lib::formal::error::FormalError;
 use inxaiot_desk_buddy_lib::formal::mac;
-use inxaiot_desk_buddy_lib::formal::mysql::{MySqlConnectionSpec, MySqlTlsMode, ProjectMySqlPools};
 use inxaiot_desk_buddy_lib::formal::workbench_store::WorkbenchStore;
+use inxaiot_desk_buddy_lib::infrastructure::database::{
+    DatabaseTlsMode, DualMySqlPools, MySqlProjectConfig,
+};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -24,7 +27,7 @@ fn default<'a>(text: &'a str, key: &str) -> &'a str {
     &rest[..rest.find('}').expect("config default end")]
 }
 
-fn config() -> MySqlConnectionSpec {
+fn config() -> MySqlProjectConfig {
     let project = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("project");
@@ -35,14 +38,14 @@ fn config() -> MySqlConnectionSpec {
         "inxvision-platform/inxaiot-starter-platform/src/main/resources/application-dev.yml",
     ))
     .expect("platform config");
-    MySqlConnectionSpec {
+    MySqlProjectConfig {
         host: default(&yaml, "MYSQL_HOST").into(),
         port: default(&yaml, "MYSQL_PORT").parse().expect("mysql port"),
         username: default(&yaml, "MYSQL_USER").into(),
-        password: default(&yaml, "MYSQL_PASSWORD").into(),
+        password: SecretValue::new(default(&yaml, "MYSQL_PASSWORD")),
         platform_schema: line(&description, "平台业务数据库名：").into(),
         workbench_schema: line(&description, "工作台数据库：").into(),
-        tls_mode: MySqlTlsMode::Disabled,
+        tls_mode: DatabaseTlsMode::Disabled,
         connect_timeout: Duration::from_secs(10),
     }
 }
@@ -80,14 +83,14 @@ fn mac_normalization_is_the_only_asset_identity() {
 #[ignore = "writes and removes one isolated aio node"]
 async fn aio_asset_optimistic_lock_service_version_audit_and_cleanup() {
     let config = config();
-    let pools = ProjectMySqlPools::connect(&config)
+    let pools = DualMySqlPools::connect(&config)
         .await
         .expect("connect project mysql");
-    WorkbenchStore::new(pools.workbench().clone())
+    WorkbenchStore::new(pools.workbench.clone())
         .migrate()
         .await
         .expect("workbench migration");
-    let repository = AioNodeRepository::new(pools.workbench().clone());
+    let repository = AioNodeRepository::new(pools.workbench.clone());
     let mac = Uuid::now_v7().simple().to_string()[..12].to_uppercase();
 
     let first = repository
@@ -143,7 +146,7 @@ async fn aio_asset_optimistic_lock_service_version_audit_and_cleanup() {
         "SELECT COUNT(*) FROM aio_node_service_version WHERE mac_normalized = ?",
     )
     .bind(&mac)
-    .fetch_one(pools.workbench())
+    .fetch_one(&pools.workbench)
     .await
     .expect("service version count");
     assert_eq!(service_count, 1);
@@ -153,7 +156,7 @@ async fn aio_asset_optimistic_lock_service_version_audit_and_cleanup() {
          WHERE object_type = 'aio_node' AND object_key = ?",
     )
     .bind(&mac)
-    .fetch_all(pools.workbench())
+    .fetch_all(&pools.workbench)
     .await
     .expect("aio node audit");
     assert_eq!(audit_rows.len(), 2);
@@ -173,7 +176,7 @@ async fn aio_asset_optimistic_lock_service_version_audit_and_cleanup() {
     )
     .bind(&mac)
     .bind(&mac)
-    .fetch_one(pools.workbench())
+    .fetch_one(&pools.workbench)
     .await
     .expect("verify aio cleanup");
     assert_eq!(remaining, 0);

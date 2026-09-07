@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ActivityLogPage,
   ActivityTask,
+  FinalizationRetryResult,
   TaskEventPayload
 } from "@/shared/model/activity";
 
@@ -33,6 +34,13 @@ export async function listTaskLogs(
 
 export async function cancelLocalTask(taskId: string) {
   return invoke<ActivityTask>("cancel_local_task", { taskId });
+}
+
+export async function retryLocalTaskFinalization(taskId: string, forceTakeover = false) {
+  return invoke<FinalizationRetryResult>("retry_local_task_finalization", {
+    taskId,
+    forceTakeover
+  });
 }
 
 export async function clearFinishedLocalTasks(localProjectId: string) {

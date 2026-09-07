@@ -108,22 +108,28 @@ function cancelEdit() {
 }
 
 async function validate() {
+  const expectedProjectId = release.projectId;
   try {
     const result = await release.validate();
+    if (release.projectId !== expectedProjectId || projects.activeProjectId !== expectedProjectId) return;
     if (release.validation?.valid) {
       message.success(`配置校验通过，识别 ${result.recognizedPlaceholderCount} 个模板变量`);
     }
   } catch (cause) {
+    if (release.projectId !== expectedProjectId || projects.activeProjectId !== expectedProjectId) return;
     message.error(commandErrorText(cause, "配置校验失败"));
   }
 }
 
 async function save() {
+  const expectedProjectId = release.projectId;
   try {
     const profile = await release.save();
+    if (release.projectId !== expectedProjectId || projects.activeProjectId !== expectedProjectId) return;
     editing.value = false;
     message.success(`发布参数已保存为版本 ${profile.version}`);
   } catch (cause) {
+    if (release.projectId !== expectedProjectId || projects.activeProjectId !== expectedProjectId) return;
     if (release.conflict) {
       message.error("配置已在其他电脑上更新，请刷新后重新编辑");
       return;
@@ -150,6 +156,7 @@ async function chooseAgentScript() {
 }
 
 async function selectAndReplaceAgentScript() {
+  const expectedProjectId = release.projectId;
   let selected: string | null;
   try {
     selected = await dialogs.selectFile("选择经过验证的一体机脚本", [
@@ -159,11 +166,13 @@ async function selectAndReplaceAgentScript() {
     message.error(commandErrorText(cause, "选择一体机脚本失败"));
     return;
   }
-  if (!selected) return;
+  if (!selected || release.projectId !== expectedProjectId || projects.activeProjectId !== expectedProjectId) return;
   try {
     const profile = await release.replaceAgentScript(selected);
+    if (release.projectId !== expectedProjectId || projects.activeProjectId !== expectedProjectId) return;
     message.success(`一体机脚本已更换为 v${profile.agentScript.version}`);
   } catch (cause) {
+    if (release.projectId !== expectedProjectId || projects.activeProjectId !== expectedProjectId) return;
     message.error(commandErrorText(cause, "更换一体机脚本失败"));
   }
 }

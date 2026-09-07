@@ -84,7 +84,7 @@ fn ssh_rsa_signing_uses_aws_lc_without_russh_rsa_feature_or_yanked_chacha20() {
 }
 
 #[test]
-fn distribution_defaults_to_windows_portable_and_macos_app() {
+fn distribution_has_explicit_windows_macos_and_linux_entries() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap();
@@ -99,6 +99,25 @@ fn distribution_defaults_to_windows_portable_and_macos_app() {
     let macos: serde_json::Value =
         serde_json::from_str(include_str!("../tauri.macos.conf.json")).unwrap();
     assert_eq!(macos["bundle"]["targets"], serde_json::json!(["app"]));
+    assert_eq!(
+        macos["bundle"]["icon"],
+        serde_json::json!(["icons/icon.png", "icons/icon.icns"])
+    );
+    let package: serde_json::Value =
+        serde_json::from_str(include_str!("../../package.json")).unwrap();
+    assert_eq!(
+        package["scripts"]["build:linux"],
+        "node scripts/build-linux.mjs"
+    );
+    assert!(root.join("scripts/build-linux.mjs").is_file());
+    let main = std::fs::read_to_string(root.join("src-tauri/src/main.rs")).unwrap();
+    assert!(main.contains("windows_subsystem = \"windows\""));
+    let png = std::fs::read(root.join("src-tauri/icons/icon.png")).unwrap();
+    assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 256);
+    assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 256);
+    let icns = std::fs::read(root.join("src-tauri/icons/icon.icns")).unwrap();
+    assert_eq!(&icns[..4], b"icns");
 }
 
 #[test]

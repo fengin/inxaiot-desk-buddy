@@ -522,21 +522,36 @@ where
             {
                 Ok(output) => output,
                 Err(error) => {
+                    let cancelled = matches!(&error, AppError::Cancelled);
                     let _ = emit_progress(
                         progress,
                         config,
                         &step_code,
                         Some(&step_code),
-                        Some(StepState::Failed),
-                        TargetState::Failed,
+                        Some(if cancelled {
+                            StepState::Cancelled
+                        } else {
+                            StepState::Failed
+                        }),
+                        if cancelled {
+                            TargetState::Cancelled
+                        } else {
+                            TargetState::Failed
+                        },
                         action_start,
-                        TaskEventLevel::Error,
-                        "AGENT_ACTION_FAILED",
+                        if cancelled {
+                            TaskEventLevel::Warn
+                        } else {
+                            TaskEventLevel::Error
+                        },
+                        if cancelled {
+                            "AGENT_ACTION_CANCELLED"
+                        } else {
+                            "AGENT_ACTION_FAILED"
+                        },
                         Some(error.to_string()),
                     );
-                    return Err(AppError::Conflict(format!(
-                        "Agent action {action} 失败：{error}"
-                    )));
+                    return Err(agent_action_error(&action, error));
                 }
             };
             let events = match parse_agent_events(&output) {
@@ -1049,6 +1064,13 @@ fn localized_agent_failure(message: &str) -> String {
     message.into()
 }
 
+fn agent_action_error(action: &str, error: AppError) -> AppError {
+    match error {
+        AppError::Cancelled => AppError::Cancelled,
+        error => AppError::Conflict(format!("Agent action {action} 失败：{error}")),
+    }
+}
+
 fn local_file_size(path: &Path) -> AppResult<u64> {
     std::fs::metadata(path)
         .map(|metadata| metadata.len())
@@ -1079,7 +1101,13 @@ fn validate_files(mode: DeploymentMode, files: &RemoteDeploymentFiles) -> AppRes
 
 #[cfg(test)]
 mod tests {
-    use super::remote_command_exit_error;
+    use super::{agent_action_error, remote_command_exit_error};
+
+    #[test]
+    fn agent_action_cancellation_is_not_converted_to_failure() {
+        let error = agent_action_error("service-check", super::AppError::Cancelled);
+        assert!(matches!(error, super::AppError::Cancelled));
+    }
 
     #[tokio::test]
     async fn observation_parse_cache_and_notice_failures_do_not_change_command_outcome() {

@@ -2,7 +2,7 @@
 set -eu
 
 ACTION="${1:-}"
-AGENT_VERSION="0.1.10"
+AGENT_VERSION="0.1.13"
 AGENT_PROTOCOL_VERSION="1"
 DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/data/deploy}"
 DATA_ROOT="${DATA_ROOT:-/opt/data}"
@@ -344,6 +344,92 @@ load_image_archive_with_tag() {
   docker image inspect "$expected_image" >/dev/null 2>&1
 }
 
+image_id_for_reference() {
+  reference="$1"
+  image_id="$(docker image inspect -f '{{.Id}}' "$reference" 2>/dev/null || true)"
+  printf '%s' "$image_id" | grep -Eq '^sha256:[0-9a-f]{64}$' || return 1
+  printf '%s' "$image_id"
+}
+
+service_runtime_container_id() {
+  release_dir="$1"
+  service="$2"
+  container_ids="$(cd "$release_dir" && compose -f docker-compose.yml ps -q "$service" 2>/dev/null || true)"
+  [ "$(printf '%s\n' "$container_ids" | awk 'NF {count++} END {print count+0}')" = "1" ] || return 1
+  printf '%s' "$container_ids"
+}
+
+service_runtime_image_id() {
+  container_id="$(service_runtime_container_id "$1" "$2")" || return 1
+  image_id="$(docker inspect -f '{{.Image}}' "$container_id" 2>/dev/null || true)"
+  printf '%s' "$image_id" | grep -Eq '^sha256:[0-9a-f]{64}$' || return 1
+  printf '%s' "$image_id"
+}
+
+service_runtime_image_reference() {
+  container_id="$(service_runtime_container_id "$1" "$2")" || return 1
+  reference="$(docker inspect -f '{{.Config.Image}}' "$container_id" 2>/dev/null || true)"
+  [ -n "$reference" ] || return 1
+  printf '%s' "$reference"
+}
+
+restore_image_reference() {
+  reference="$1"
+  image_id="$2"
+  [ -n "$reference" ] || return 1
+  printf '%s' "$image_id" | grep -Eq '^sha256:[0-9a-f]{64}$' || return 1
+  docker image tag "$image_id" "$reference" || return 1
+  restored_id="$(image_id_for_reference "$reference")" || return 1
+  [ "$restored_id" = "$image_id" ]
+}
+
+snapshot_release_images() {
+  release_dir="$1"
+  snapshot_dir="$2"
+  mkdir -p "$snapshot_dir" || return 1
+  [ -n "$release_dir" ] || return 0
+  [ -f "$release_dir/docker-compose.yml" ] || return 1
+  services="$(cd "$release_dir" && compose -f docker-compose.yml config --services 2>/dev/null)" || return 1
+  [ -n "$services" ] || return 1
+  index=0
+  for service in $services; do
+    reference="$(service_runtime_image_reference "$release_dir" "$service")" || return 1
+    image_id="$(service_runtime_image_id "$release_dir" "$service")" || return 1
+    index=$((index + 1))
+    printf '%s\n' "$service" > "$snapshot_dir/$index.service" || return 1
+    printf '%s\n' "$reference" > "$snapshot_dir/$index.reference" || return 1
+    printf '%s\n' "$image_id" > "$snapshot_dir/$index.id" || return 1
+  done
+}
+
+restore_release_image_snapshot() {
+  snapshot_dir="$1"
+  [ -d "$snapshot_dir" ] || return 0
+  for id_file in "$snapshot_dir"/*.id; do
+    [ -f "$id_file" ] || continue
+    base="${id_file%.id}"
+    [ -f "$base.reference" ] || return 1
+    reference="$(tr -d '\r\n' < "$base.reference")"
+    image_id="$(tr -d '\r\n' < "$id_file")"
+    restore_image_reference "$reference" "$image_id" || return 1
+  done
+}
+
+verify_release_image_snapshot() {
+  release_dir="$1"
+  snapshot_dir="$2"
+  [ -d "$snapshot_dir" ] || return 0
+  for id_file in "$snapshot_dir"/*.id; do
+    [ -f "$id_file" ] || continue
+    base="${id_file%.id}"
+    [ -f "$base.service" ] || return 1
+    service="$(tr -d '\r\n' < "$base.service")"
+    expected_id="$(tr -d '\r\n' < "$id_file")"
+    actual_id="$(service_runtime_image_id "$release_dir" "$service")" || return 1
+    [ "$actual_id" = "$expected_id" ] || return 1
+  done
+}
+
 find_release_src() {
   extract_dir="$1"
   if [ -f "$extract_dir/manifest.json" ]; then
@@ -406,12 +492,30 @@ verify_runtime_containers() {
   services="$(cd "$release_dir" && compose -f docker-compose.yml config --services 2>/dev/null || true)"
   OBSERVATION_SERVICES="$services"
   [ -n "$services" ] || return 1
+  ready="true"
   for service in $services; do
     observe_runtime_service "$release_dir" "$service" "verification"
-    [ "$OBSERVATION_RESULT" = "ok" ] || return 1
+    if [ "$OBSERVATION_RESULT" != "ok" ]; then
+      ready="false"
+      continue
+    fi
     status="$(printf '%s\n' "$OBSERVATION_FACTS" | awk -F'|' '{print $1}')"
-    [ "$status" = "running" ] || return 1
+    health_status="$(printf '%s\n' "$OBSERVATION_FACTS" | awk -F'|' '{print $2}')"
+    [ "$status" = "running" ] || ready="false"
+    [ -z "$health_status" ] || [ "$health_status" = "healthy" ] || ready="false"
   done
+  [ "$ready" = "true" ]
+}
+
+wait_for_runtime_containers() {
+  release_dir="$1"
+  attempt=0
+  while [ "$attempt" -lt 30 ]; do
+    verify_runtime_containers "$release_dir" && return 0
+    attempt=$((attempt + 1))
+    sleep 2
+  done
+  return 1
 }
 
 rollback_release() {
@@ -419,9 +523,16 @@ rollback_release() {
   previous_release="$2"
   host_info_backup="$3"
   had_host_info="$4"
+  image_snapshot_dir="${5:-}"
   event "rollback" "running" "restoring previous release"
   if [ -f "$new_release_dir/docker-compose.yml" ]; then
     (cd "$new_release_dir" && compose -f docker-compose.yml down --remove-orphans) >/dev/null 2>&1 || true
+  fi
+  restore_release_image_snapshot "$image_snapshot_dir" || return 1
+  if [ "$had_host_info" = "true" ]; then
+    cp "$host_info_backup" "$DATA_ROOT/config/host-info.json" || return 1
+  else
+    rm -f "$DATA_ROOT/config/host-info.json"
   fi
   if [ -n "$previous_release" ] && [ -f "$previous_release/docker-compose.yml" ]; then
     (cd "$previous_release" && compose -f docker-compose.yml up -d --force-recreate --remove-orphans) || return 1
@@ -429,10 +540,9 @@ rollback_release() {
   else
     rm -f "$DEPLOY_ROOT/current"
   fi
-  if [ "$had_host_info" = "true" ]; then
-    cp "$host_info_backup" "$DATA_ROOT/config/host-info.json" || return 1
-  else
-    rm -f "$DATA_ROOT/config/host-info.json"
+  if [ -n "$previous_release" ] && [ -f "$previous_release/docker-compose.yml" ]; then
+    wait_for_runtime_containers "$previous_release" || return 1
+    verify_release_image_snapshot "$previous_release" "$image_snapshot_dir" || return 1
   fi
   case "$new_release_dir" in
     "$DEPLOY_ROOT"/releases/*) rm -rf "$new_release_dir" ;;
@@ -453,7 +563,8 @@ install_release() {
   prepare_dirs
 
   tmp_dir="$(mktemp -d)"
-  trap 'rm -rf "$tmp_dir"' EXIT
+  host_info_candidate=""
+  trap 'rm -rf "$tmp_dir"; [ -z "$host_info_candidate" ] || rm -f "$host_info_candidate"' EXIT
   mkdir -p "$tmp_dir/extract"
 
   case "$REMOTE_PACKAGE" in
@@ -483,11 +594,17 @@ install_release() {
     cp "$DATA_ROOT/config/host-info.json" "$host_info_backup"
     had_host_info="true"
   fi
+  image_snapshot_dir="$tmp_dir/images.before"
+  snapshot_release_images "$previous_release" "$image_snapshot_dir" ||
+    fail "rollback_prepare" "failed to record current runtime image IDs" 38
+  host_info_candidate="$(mktemp "$DATA_ROOT/config/.host-info.json.XXXXXX")" ||
+    fail "host_info" "failed to create host-info candidate" 34
+  cp "$REMOTE_HOST_INFO" "$host_info_candidate" ||
+    fail "host_info" "failed to prepare host-info candidate" 34
   mkdir -p "$new_release_dir"
   cp -a "$release_src/." "$new_release_dir/"
   cp "$REMOTE_ENV" "$new_release_dir/.env"
   cp "$REMOTE_COMPOSE" "$new_release_dir/docker-compose.yml"
-  cp "$REMOTE_HOST_INFO" "$DATA_ROOT/config/host-info.json"
   if [ -n "$RELEASE_FINGERPRINT" ]; then
     printf '%s\n' "$RELEASE_FINGERPRINT" > "$new_release_dir/release-fingerprint.txt"
   fi
@@ -499,22 +616,36 @@ install_release() {
       [ -f "$tag_file" ] || fail "load_images" "image tag metadata is missing: ${tag_file}" 36
       expected_image="$(tr -d '\r\n' < "$tag_file")"
       event "load_images" "running" "$image_tar"
-      load_image_archive_with_tag "$image_tar" "$expected_image" ||
+      if ! load_image_archive_with_tag "$image_tar" "$expected_image"; then
+        restore_release_image_snapshot "$image_snapshot_dir" ||
+          fail "rollback" "image load failed and previous image tags could not be restored" 38
         fail "load_images" "loaded image cannot be assigned expected tag: ${expected_image}" 36
+      fi
     done
   fi
 
-  stop_current_release "$new_release_dir"
+  if ! stop_current_release "$new_release_dir"; then
+    restore_release_image_snapshot "$image_snapshot_dir" ||
+      fail "rollback" "current release stop failed and previous image tags could not be restored" 38
+    fail "compose" "failed to stop current release; previous image tags restored" 38
+  fi
+  if ! mv -f "$host_info_candidate" "$DATA_ROOT/config/host-info.json"; then
+    if ! rollback_release "$new_release_dir" "$previous_release" "$host_info_backup" "$had_host_info" "$image_snapshot_dir"; then
+      fail "rollback" "host-info publish failed and previous release rollback failed" 38
+    fi
+    fail "install" "host-info publish failed; previous release restored" 39
+  fi
+  host_info_candidate=""
   event "compose" "running" "docker-compose up -d --force-recreate"
   if ! (cd "$new_release_dir" && compose -f docker-compose.yml up -d --force-recreate --remove-orphans); then
-    if ! rollback_release "$new_release_dir" "$previous_release" "$host_info_backup" "$had_host_info"; then
+    if ! rollback_release "$new_release_dir" "$previous_release" "$host_info_backup" "$had_host_info" "$image_snapshot_dir"; then
       fail "rollback" "new release failed and previous release rollback failed" 38
     fi
     fail "install" "new release compose start failed; previous release restored" 39
   fi
   ln -sfn "$new_release_dir" "$DEPLOY_ROOT/current"
   if ! wait_for_release "$new_release_dir"; then
-    if ! rollback_release "$new_release_dir" "$previous_release" "$host_info_backup" "$had_host_info"; then
+    if ! rollback_release "$new_release_dir" "$previous_release" "$host_info_backup" "$had_host_info" "$image_snapshot_dir"; then
       fail "rollback" "new release health failed and previous release rollback failed" 40
     fi
     fail "install" "new release health failed; previous release restored" 41
@@ -596,15 +727,38 @@ service_check() {
 verify_service_state() {
   service_dir="$1"
   expected_image="$2"
+  expected_image_id="${3:-}"
   reset_runtime_observation "$service_dir"
   observe_runtime_service "$service_dir" "$SERVICE_NAME" "verification"
   [ "$OBSERVATION_RESULT" = "ok" ] || return 1
   status="$(printf '%s\n' "$OBSERVATION_FACTS" | awk -F'|' '{print $1}')"
+  health_status="$(printf '%s\n' "$OBSERVATION_FACTS" | awk -F'|' '{print $2}')"
   [ "$status" = "running" ] || return 1
+  [ -z "$health_status" ] || [ "$health_status" = "healthy" ] || return 1
   if [ -n "$expected_image" ]; then
     actual_image="$(printf '%s\n' "$OBSERVATION_FACTS" | awk -F'|' '{print $3}')"
     [ "$actual_image" = "$expected_image" ] || return 1
   fi
+  if [ -n "$expected_image_id" ]; then
+    actual_image_id="$(printf '%s\n' "$OBSERVATION_FACTS" | awk -F'|' '{print $4}')"
+    [ "$actual_image_id" = "$expected_image_id" ] || return 1
+  fi
+}
+
+wait_for_service_state() {
+  service_dir="$1"
+  expected_image="$2"
+  expected_image_id="${3:-}"
+  attempt=0
+  while [ "$attempt" -lt 30 ]; do
+    verify_service_state "$service_dir" "$expected_image" "$expected_image_id" && return 0
+    attempt=$((attempt + 1))
+    if [ $((attempt % 5)) -eq 0 ]; then
+      event "health_wait" "running" "waiting for service ${SERVICE_NAME} (${attempt}/30)"
+    fi
+    sleep 2
+  done
+  return 1
 }
 
 # 只兼容转换目标服务的普通块映射镜像行；不重写整份YAML，也不猜测别名/流式结构。
@@ -670,11 +824,13 @@ rollback_service_upgrade() {
   service_dir="$1"
   backup_env="$2"
   previous_image="$3"
+  previous_image_id="$4"
   event "rollback" "running" "restoring previous service configuration"
   cp "$backup_env" "$service_dir/.env" || return 1
   cp "${backup_env%/*}/docker-compose.yml" "$service_dir/docker-compose.yml" || return 1
+  restore_image_reference "$previous_image" "$previous_image_id" || return 1
   (cd "$service_dir" && compose -f docker-compose.yml up -d --no-deps --force-recreate "$SERVICE_NAME") || return 1
-  verify_service_state "$service_dir" "$previous_image" || return 1
+  wait_for_service_state "$service_dir" "$previous_image" "$previous_image_id" || return 1
   event "rollback" "success" "previous service image restored"
 }
 
@@ -686,6 +842,8 @@ service_upgrade() {
   image_key="$(service_image_env_key)"
   current_image="$(env_value "$current_dir/.env" "$image_key" 2>/dev/null || true)"
   [ -n "$current_image" ] || fail "service_upgrade" "image variable ${image_key} is missing in current .env" 72
+  previous_image_id="$(service_runtime_image_id "$current_dir" "$SERVICE_NAME")" ||
+    fail "service_check" "failed to record current service image ID before upgrade" 65
 
   upgrade_dir="$(service_upgrade_dir)"
   backup_dir="$DATA_ROOT/backup/$(basename "$upgrade_dir")-before-service-upgrade"
@@ -703,13 +861,19 @@ service_upgrade() {
   cp -a "$REMOTE_IMAGE" "$upgrade_dir/$(basename "$REMOTE_IMAGE")" || fail "service_upgrade" "failed to snapshot image" 79
 
   event "load_image" "running" "$SERVICE_IMAGE"
-  load_image_archive_with_tag "$REMOTE_IMAGE" "$SERVICE_IMAGE" ||
+  if ! load_image_archive_with_tag "$REMOTE_IMAGE" "$SERVICE_IMAGE"; then
+    restore_image_reference "$current_image" "$previous_image_id" ||
+      fail "rollback" "image load failed and previous image tag could not be restored" 83
     fail "load_image" "loaded image cannot be assigned expected tag: ${SERVICE_IMAGE}" 73
+  fi
+  target_image_id="$(image_id_for_reference "$SERVICE_IMAGE")" ||
+    fail "load_image" "loaded image ID cannot be determined: ${SERVICE_IMAGE}" 73
 
   if ! replace_env_value "$current_dir/.env" "$image_key" "$SERVICE_IMAGE" ||
     ! cp "$candidate_compose" "$current_dir/docker-compose.yml"; then
     cp "$backup_dir/.env.before" "$current_dir/.env" &&
-      cp "$backup_dir/docker-compose.yml" "$current_dir/docker-compose.yml" ||
+      cp "$backup_dir/docker-compose.yml" "$current_dir/docker-compose.yml" &&
+      restore_image_reference "$current_image" "$previous_image_id" ||
       fail "rollback" "failed to restore configuration before service start" 83
     fail "service_upgrade" "failed to update service configuration; original configuration restored" 84
   fi
@@ -726,13 +890,13 @@ service_upgrade() {
 
   event "compose" "running" "recreating ${SERVICE_NAME}"
   if ! (cd "$current_dir" && compose -f docker-compose.yml up -d --no-deps --force-recreate "$SERVICE_NAME"); then
-    if ! rollback_service_upgrade "$current_dir" "$backup_dir/.env.before" "$current_image"; then
+    if ! rollback_service_upgrade "$current_dir" "$backup_dir/.env.before" "$current_image" "$previous_image_id"; then
       fail "rollback" "service start failed and rollback failed" 83
     fi
     fail "service_upgrade" "service start failed; previous image restored" 84
   fi
-  if ! verify_service_state "$current_dir" "$SERVICE_IMAGE"; then
-    if ! rollback_service_upgrade "$current_dir" "$backup_dir/.env.before" "$current_image"; then
+  if ! wait_for_service_state "$current_dir" "$SERVICE_IMAGE" "$target_image_id"; then
+    if ! rollback_service_upgrade "$current_dir" "$backup_dir/.env.before" "$current_image" "$previous_image_id"; then
       fail "rollback" "service health failed and rollback failed" 85
     fi
     fail "service_upgrade" "service health failed; previous image restored" 86
@@ -900,7 +1064,7 @@ service_health() {
   if [ -z "$expected_image" ]; then
     expected_image="$(env_value "$current_dir/.env" "$image_key" 2>/dev/null || true)"
   fi
-  verify_service_state "$current_dir" "$expected_image" || fail "service_health" "service state or image mismatch" 80
+  wait_for_service_state "$current_dir" "$expected_image" || fail "service_health" "service state, health or image mismatch" 80
   (cd "$current_dir" && compose -f docker-compose.yml ps "$SERVICE_NAME")
   inspect_services
   event "service_health" "success" "service=${SERVICE_NAME}; image=${expected_image}"

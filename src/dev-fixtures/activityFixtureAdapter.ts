@@ -55,6 +55,15 @@ export class FixtureActivityAdapter implements ActivityAdapter {
     if (!task) throw new Error(`Fixture 任务不存在：${taskId}`);
     return structuredClone(task);
   }
+  async retryFinalization(taskId: string) {
+    const task = this.tasks.find((item) => item.id === taskId);
+    if (!task) throw new Error(`Fixture 任务不存在：${taskId}`);
+    return {
+      task: structuredClone(task),
+      takeoverRequired: false,
+      message: "Fixture 部署结果已补写完成"
+    };
+  }
   async clearFinishedTasks(projectId: string) {
     const terminal = new Set(["cancelled", "succeeded", "partially_succeeded", "failed", "interrupted"]);
     const clearedIds = new Set(

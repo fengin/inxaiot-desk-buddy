@@ -1,6 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { flushPromises, mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { NMessageProvider } from "naive-ui";
 import { h } from "vue";
 
@@ -143,6 +143,58 @@ describe("activity panel", () => {
       expect(wrapper.text()).toContain(label);
       expect(wrapper.text()).not.toContain(stage);
     }
+    wrapper.unmount();
+  });
+
+  it("asks the user before a finalization retry forcefully takes over another task", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const activity = useActivityStore();
+    activity.openPanel("logs");
+    const wrapper = mount(
+      { render: () => h(NMessageProvider, () => h(ActivityPanel)) },
+      { global: { plugins: [pinia] } }
+    );
+    await flushPromises();
+    const task: ActivityTask = {
+      id: "finalization-task",
+      projectId: "project",
+      domainType: "aio",
+      operationType: "full_upgrade",
+      name: "整包升级",
+      state: "finalizing_failed",
+      stage: "finalizing",
+      progress: 100,
+      targetCount: 1,
+      completedCount: 1,
+      updatedAt: "2026-09-06 15:00:00",
+      cancellable: false
+    };
+    activity.tasks = [task];
+    activity.selectedTaskId = task.id;
+    const retry = vi
+      .spyOn(activity, "retrySelectedFinalization")
+      .mockResolvedValueOnce({
+        task,
+        takeoverRequired: true,
+        message: "检测到其他电脑占用：电脑=现场电脑，任务=operation-b"
+      })
+      .mockResolvedValueOnce({
+        task: { ...task, state: "succeeded" },
+        takeoverRequired: false,
+        message: "已强制接管并补写部署结果"
+      });
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    await flushPromises();
+
+    await wrapper.get(".log-scope .n-button").trigger("click");
+    await flushPromises();
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("现场电脑"));
+    expect(retry).toHaveBeenNthCalledWith(1, false);
+    expect(retry).toHaveBeenNthCalledWith(2, true);
+    vi.unstubAllGlobals();
     wrapper.unmount();
   });
 });

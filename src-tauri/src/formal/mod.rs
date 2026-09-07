@@ -7,7 +7,6 @@ pub mod job_supervisor;
 pub mod local_store;
 pub mod logging;
 pub mod mac;
-pub mod mysql;
 pub mod operation_repository;
 pub mod platform_auth;
 pub mod project_repository;

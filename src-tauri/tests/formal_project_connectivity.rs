@@ -1,12 +1,15 @@
 use std::path::Path;
 use std::time::Duration;
 
-use inxaiot_desk_buddy_lib::formal::mysql::{MySqlConnectionSpec, MySqlTlsMode, ProjectMySqlPools};
+use inxaiot_desk_buddy_lib::core::secret::SecretValue;
 use inxaiot_desk_buddy_lib::formal::platform_auth::{PlatformAuthAdapter, PlatformLoginSpec};
+use inxaiot_desk_buddy_lib::infrastructure::database::{
+    DatabaseTlsMode, DualMySqlPools, MySqlProjectConfig,
+};
 use serde_json::Value;
 
 struct TestConfig {
-    mysql: MySqlConnectionSpec,
+    mysql: MySqlProjectConfig,
     login: PlatformLoginSpec,
 }
 
@@ -38,14 +41,14 @@ fn config() -> TestConfig {
     ))
     .expect("platform config");
     TestConfig {
-        mysql: MySqlConnectionSpec {
+        mysql: MySqlProjectConfig {
             host: default(&yaml, "MYSQL_HOST").into(),
             port: default(&yaml, "MYSQL_PORT").parse().expect("mysql port"),
             username: default(&yaml, "MYSQL_USER").into(),
-            password: default(&yaml, "MYSQL_PASSWORD").into(),
+            password: SecretValue::new(default(&yaml, "MYSQL_PASSWORD")),
             platform_schema: line(&description, "平台业务数据库名：").into(),
             workbench_schema: line(&description, "工作台数据库：").into(),
-            tls_mode: MySqlTlsMode::Disabled,
+            tls_mode: DatabaseTlsMode::Disabled,
             connect_timeout: Duration::from_secs(10),
         },
         login: PlatformLoginSpec {
@@ -62,13 +65,13 @@ fn config() -> TestConfig {
 #[test]
 fn formal_connection_specs_never_debug_secrets() {
     let config = config();
-    assert!(!format!("{:?}", config.mysql).contains(&config.mysql.password));
+    assert!(!format!("{:?}", config.mysql).contains(config.mysql.password.expose()));
     assert!(!format!("{:?}", config.login).contains(&config.login.password));
 }
 
 #[tokio::test]
 #[ignore = "requires authorized project databases"]
-async fn formal_dual_pool_and_schema_capabilities() {
+async fn production_dual_pool_and_schema_capabilities() {
     async fn session_read_only(pool: &sqlx::MySqlPool) -> i64 {
         match sqlx::query_scalar("SELECT @@session.transaction_read_only")
             .fetch_one(pool)
@@ -92,7 +95,7 @@ async fn formal_dual_pool_and_schema_capabilities() {
     }
 
     let config = config();
-    let pools = ProjectMySqlPools::connect(&config.mysql)
+    let pools = DualMySqlPools::connect(&config.mysql)
         .await
         .expect("connect project mysql pools");
     let capabilities = pools
@@ -100,11 +103,11 @@ async fn formal_dual_pool_and_schema_capabilities() {
         .await
         .expect("schema capabilities");
     assert!(!capabilities.server_version.is_empty());
-    assert!(!capabilities.connection_encrypted);
-    assert!(capabilities.missing_platform_aio_columns.is_empty());
+    assert!(capabilities.tls_cipher.is_none());
+    assert!(capabilities.missing_required_columns.is_empty());
     assert!(capabilities.workbench_charset.is_some());
-    let platform_read_only = session_read_only(pools.platform()).await;
-    let workbench_read_only = session_read_only(pools.workbench()).await;
+    let platform_read_only = session_read_only(&pools.platform).await;
+    let workbench_read_only = session_read_only(&pools.workbench).await;
     assert_eq!(platform_read_only, 1);
     assert_eq!(workbench_read_only, 0);
     pools.close().await;

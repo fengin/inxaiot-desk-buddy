@@ -1,8 +1,10 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::core::error::{AppError, AppResult};
 use crate::core::secret::SecretValue;
+use crate::domain::common::task::TaskState;
 use crate::formal::app_state::FormalAppState;
 use crate::formal::error::FormalError;
 use crate::formal::operation_repository::OperationRepository;
@@ -15,6 +17,21 @@ pub async fn project_database(
     state: &FormalAppState,
     local_project_id: &str,
 ) -> AppResult<Arc<DualMySqlPools>> {
+    project_database_with_recovery(state, local_project_id, true).await
+}
+
+pub async fn project_database_for_finalization(
+    state: &FormalAppState,
+    local_project_id: &str,
+) -> AppResult<Arc<DualMySqlPools>> {
+    project_database_with_recovery(state, local_project_id, false).await
+}
+
+async fn project_database_with_recovery(
+    state: &FormalAppState,
+    local_project_id: &str,
+    recover_abandoned: bool,
+) -> AppResult<Arc<DualMySqlPools>> {
     let pools = project_pools(state, local_project_id).await?;
     let status = workbench_schema_status_with_pools(state, local_project_id, &pools).await?;
     let runtime = state
@@ -23,7 +40,20 @@ pub async fn project_database(
         .await
         .map_err(map_formal_error)?;
     if status.is_ready() {
-        recover_abandoned_operations(&pools).await?;
+        if recover_abandoned {
+            let protected_operations = state
+                .task_repository
+                .list_active()
+                .await?
+                .into_iter()
+                .filter(|task| {
+                    task.local_project_id == local_project_id
+                        && task.state == TaskState::FinalizingFailed
+                })
+                .filter_map(|task| task.remote_operation_record_id)
+                .collect::<BTreeSet<_>>();
+            recover_abandoned_operations(&pools, &protected_operations).await?;
+        }
         runtime.set_health(ConnectionHealth::Ready).await;
         return Ok(pools);
     }
@@ -34,7 +64,10 @@ pub async fn project_database(
     )))
 }
 
-async fn recover_abandoned_operations(pools: &DualMySqlPools) -> AppResult<()> {
+async fn recover_abandoned_operations(
+    pools: &DualMySqlPools,
+    protected_operations: &BTreeSet<String>,
+) -> AppResult<()> {
     let repository = OperationRepository::new(pools.workbench.clone());
     let stale_after = Duration::from_secs(120);
     let candidates = repository
@@ -42,6 +75,9 @@ async fn recover_abandoned_operations(pools: &DualMySqlPools) -> AppResult<()> {
         .await
         .map_err(map_formal_error)?;
     for candidate in candidates {
+        if protected_operations.contains(&candidate.id) {
+            continue;
+        }
         match repository
             .interrupt_stale(&candidate.id, candidate.version, stale_after)
             .await

@@ -45,7 +45,8 @@ pub struct AioNodeWrite {
     pub instance_id: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServiceVersionWrite {
     pub mac: String,
     pub service_name: String,

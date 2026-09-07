@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{MySqlPool, Row};
 use time::OffsetDateTime;
@@ -52,7 +53,8 @@ pub struct StaleOperationCandidate {
     pub target_count: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TargetFinalResult {
     pub operation_id: String,
     pub resource_type: String,
@@ -65,7 +67,8 @@ pub struct TargetFinalResult {
     pub error_summary: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OperationFinalResult {
     pub operation_id: String,
     pub expected_version: u64,

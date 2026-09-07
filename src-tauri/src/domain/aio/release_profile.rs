@@ -462,6 +462,7 @@ pub fn inspect_compose_services(content: &str) -> AppResult<Vec<ReleaseComposeSe
     let image_variable = Regex::new(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
         .expect("static compose image variable regex");
     let mut result = Vec::with_capacity(services.len());
+    let mut image_variable_owners = BTreeMap::new();
     for (name, config) in services {
         let name = name.as_str().ok_or_else(|| {
             AppError::InvalidConfig("docker-compose.yml服务名必须是字符串".into())
@@ -493,6 +494,11 @@ pub fn inspect_compose_services(content: &str) -> AppResult<Vec<ReleaseComposeSe
                     "Compose服务 {name} 的image必须使用${{变量名}}引用.env，部署时才能安全替换镜像"
                 ))
             })?;
+        if let Some(existing_service) = image_variable_owners.insert(variable.clone(), name) {
+            return Err(AppError::InvalidConfig(format!(
+                "Compose服务 {existing_service} 和 {name} 共用了镜像变量 {variable}；每个服务必须使用独立的镜像变量"
+            )));
+        }
         result.push(ReleaseComposeService {
             name: name.to_string(),
             configured_image: image.to_string(),
@@ -733,6 +739,16 @@ mod tests {
         let mut draft = valid_draft();
         draft.values.env_template.push_str("APP_PORT=9090\n");
         assert!(draft.validate().is_err());
+        let mut draft = valid_draft();
+        draft.values.compose_template = concat!(
+            "services:\n",
+            "  app:\n    image: ${APP_IMAGE}\n",
+            "  worker:\n    image: ${APP_IMAGE}\n"
+        )
+        .into();
+        let error = super::inspect_compose_services(&draft.values.compose_template)
+            .expect_err("shared image variable must be rejected");
+        assert!(error.to_string().contains("共用了镜像变量 APP_IMAGE"));
     }
 
     #[test]

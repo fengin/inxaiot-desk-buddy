@@ -19,6 +19,7 @@ export const useActivityStore = defineStore("activity", () => {
   const selectedTaskId = ref("");
   const projectId = ref("");
   const loading = ref(false);
+  const finalizationRetrying = ref(false);
   const error = ref("");
   const logLevels = ref<ActivityLogLevel[]>([]);
   const logKeyword = ref("");
@@ -154,6 +155,25 @@ export const useActivityStore = defineStore("activity", () => {
     }
   }
 
+  async function retrySelectedFinalization(forceTakeover = false) {
+    const task = selectedTask.value;
+    if (task?.state !== "finalizing_failed" || finalizationRetrying.value) return null;
+    finalizationRetrying.value = true;
+    error.value = "";
+    try {
+      const result = await useActivityAdapter().retryFinalization(task.id, forceTakeover);
+      const index = tasks.value.findIndex((item) => item.id === result.task.id);
+      if (index >= 0) tasks.value[index] = result.task;
+      await refreshLogs();
+      return result;
+    } catch (cause) {
+      error.value = commandErrorText(cause, "补写部署结果失败");
+      throw cause;
+    } finally {
+      finalizationRetrying.value = false;
+    }
+  }
+
   async function clearFinishedTasks() {
     if (!projectId.value || !canClearFinishedTasks.value) return 0;
     try {
@@ -218,6 +238,7 @@ export const useActivityStore = defineStore("activity", () => {
     canClearFinishedTasks,
     canClearSelectedTaskLogs,
     loading,
+    finalizationRetrying,
     error,
     logLevels,
     logKeyword,
@@ -233,6 +254,7 @@ export const useActivityStore = defineStore("activity", () => {
     loadOlderLogs,
     selectTask,
     cancelSelectedTask,
+    retrySelectedFinalization,
     clearFinishedTasks,
     clearSelectedTaskLogs
   };

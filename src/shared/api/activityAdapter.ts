@@ -2,6 +2,7 @@ import type {
   ActivityLogLevel,
   ActivityLogPage,
   ActivityTask,
+  FinalizationRetryResult,
   TaskEventPayload
 } from "@/shared/model/activity";
 
@@ -17,6 +18,7 @@ export interface ActivityAdapter {
     newestFirst: boolean
   ): Promise<ActivityLogPage>;
   cancelTask(taskId: string): Promise<ActivityTask>;
+  retryFinalization(taskId: string, forceTakeover: boolean): Promise<FinalizationRetryResult>;
   clearFinishedTasks(projectId: string): Promise<number>;
   clearTaskLogs(taskId: string): Promise<void>;
   listen(handler: (event: TaskEventPayload) => void): Promise<() => void>;

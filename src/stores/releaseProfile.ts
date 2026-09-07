@@ -101,6 +101,9 @@ export const useReleaseProfileStore = defineStore("release-profile", () => {
     const request = ++loadRequest;
     mutationRequest += 1;
     projectId.value = nextProjectId;
+    saving.value = false;
+    agentReplacing.value = false;
+    agentOpening.value = false;
     profile.value = undefined;
     draft.value = emptyReleaseProfileDraft();
     validation.value = undefined;

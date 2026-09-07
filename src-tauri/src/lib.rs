@@ -61,7 +61,7 @@ use crate::interface::commands::release_artifacts::inspect_service_image;
 use crate::interface::commands::service_inspection::check_edge_node_services;
 use crate::interface::commands::task_activity::{
     cancel_local_task, clear_finished_local_tasks, clear_task_logs, list_local_tasks,
-    list_task_logs,
+    list_task_logs, retry_local_task_finalization,
 };
 use crate::runtime::event_bus::TaskEventBus;
 use crate::runtime::task_queue::{TaskHandlerRegistry, TaskQueue};
@@ -274,6 +274,7 @@ pub fn run() {
             list_local_tasks,
             list_task_logs,
             cancel_local_task,
+            retry_local_task_finalization,
             clear_finished_local_tasks,
             clear_task_logs,
             confirm_application_exit,

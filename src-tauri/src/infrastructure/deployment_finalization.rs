@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sqlx::MySqlPool;
+use sqlx::{MySqlPool, Row};
 
 use crate::core::error::{AppError, AppResult};
 use crate::domain::common::task::TaskState;
@@ -20,6 +20,7 @@ pub struct PendingLocalFinalization {
     pub final_state: TaskState,
     pub targets: Vec<TargetUpdate>,
     pub steps: Vec<TaskStepWrite>,
+    pub shared: AtomicDeploymentFinalization,
 }
 
 pub fn write_pending_local_finalization(
@@ -29,6 +30,8 @@ pub fn write_pending_local_finalization(
     if projection.operation_id.trim().is_empty()
         || !projection.final_state.is_terminal()
         || projection.targets.is_empty()
+        || projection.shared.operation.operation_id != projection.operation_id
+        || projection.shared.operation.state != projection.final_state.as_str()
     {
         return Err(AppError::InvalidConfig("待重试本地最终化记录无效".into()));
     }
@@ -67,18 +70,87 @@ pub async fn shared_operation_state(
         .map_err(|error| AppError::database("读取共享最终化操作状态", &error))
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AtomicTargetFinalization {
     pub result: TargetFinalResult,
     pub service_versions: Vec<ServiceVersionWrite>,
+    pub replace_service_versions: bool,
     pub mark_operation_success: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AtomicDeploymentFinalization {
     pub operation: OperationFinalResult,
     pub targets: Vec<AtomicTargetFinalization>,
     pub leases: Vec<LeaseGrant>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FinalizationLeaseConflict {
+    pub resource_key: String,
+    pub owner_instance_id: String,
+    pub operation_id: String,
+    pub takeover_allowed: bool,
+}
+
+pub async fn finalization_lease_conflicts(
+    pool: &MySqlPool,
+    write: &AtomicDeploymentFinalization,
+) -> AppResult<Vec<FinalizationLeaseConflict>> {
+    let mut conflicts = Vec::new();
+    for expected in &write.leases {
+        let row = sqlx::query(concat!(
+            "SELECT owner_instance_id, operation_id, lease_token, fencing_token, lease_state ",
+            "FROM resource_lease WHERE resource_type = ? AND resource_key = ?"
+        ))
+        .bind(&expected.resource_type)
+        .bind(&expected.resource_key)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::database("读取最终化租约占用", &error))?;
+        let Some(row) = row else {
+            conflicts.push(FinalizationLeaseConflict {
+                resource_key: expected.resource_key.clone(),
+                owner_instance_id: "未知实例".into(),
+                operation_id: "未知任务".into(),
+                takeover_allowed: false,
+            });
+            continue;
+        };
+        let owner_instance_id = row
+            .try_get::<String, _>("owner_instance_id")
+            .map_err(|error| AppError::database("解析最终化租约实例", &error))?;
+        let operation_id = row
+            .try_get::<String, _>("operation_id")
+            .map_err(|error| AppError::database("解析最终化租约任务", &error))?;
+        let lease_token = row
+            .try_get::<String, _>("lease_token")
+            .map_err(|error| AppError::database("解析最终化租约令牌", &error))?;
+        let fencing_token = row
+            .try_get::<u64, _>("fencing_token")
+            .map_err(|error| AppError::database("解析最终化fencing令牌", &error))?;
+        let lease_state = row
+            .try_get::<String, _>("lease_state")
+            .map_err(|error| AppError::database("解析最终化租约状态", &error))?;
+        if lease_state != "active"
+            || owner_instance_id != expected.owner_instance_id
+            || operation_id != expected.operation_id
+            || lease_token != expected.lease_token
+            || fencing_token != expected.fencing_token
+        {
+            let operation_state = shared_operation_state(pool, &operation_id).await?;
+            conflicts.push(FinalizationLeaseConflict {
+                resource_key: expected.resource_key.clone(),
+                owner_instance_id,
+                operation_id,
+                takeover_allowed: lease_state == "active"
+                    && operation_state.as_deref() == Some("running"),
+            });
+        }
+    }
+    Ok(conflicts)
 }
 
 pub async fn finalize_deployment_atomically(
@@ -95,8 +167,7 @@ pub async fn finalize_deployment_atomically(
         let fencing = sqlx::query_scalar::<_, u64>(concat!(
             "SELECT fencing_token FROM resource_lease WHERE resource_type = ? ",
             "AND resource_key = ? AND operation_id = ? AND owner_instance_id = ? ",
-            "AND lease_token = ? AND lease_state = 'active' ",
-            "AND expires_at > UTC_TIMESTAMP(6) FOR UPDATE"
+            "AND lease_token = ? AND lease_state = 'active' FOR UPDATE"
         ))
         .bind(&lease.resource_type)
         .bind(&lease.resource_key)
@@ -151,6 +222,13 @@ pub async fn finalize_deployment_atomically(
             )));
         }
 
+        if target.replace_service_versions {
+            sqlx::query("DELETE FROM aio_node_service_version WHERE mac_normalized = ?")
+                .bind(&target.result.resource_key)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| AppError::database("替换整包部署服务版本", &error))?;
+        }
         for service in &target.service_versions {
             sqlx::query(concat!(
                 "INSERT INTO aio_node_service_version ",
@@ -272,6 +350,10 @@ fn validate_write(write: &AtomicDeploymentFinalization) -> AppResult<()> {
         || write.targets.iter().any(|target| {
             target.result.operation_id != write.operation.operation_id
                 || target.result.resource_type != "aio"
+                || (target.replace_service_versions
+                    && (!target.mark_operation_success
+                        || target.result.result_state != "succeeded"
+                        || target.service_versions.is_empty()))
                 || target.service_versions.iter().any(|service| {
                     service.mac != target.result.resource_key
                         || service.service_name.trim().is_empty()
@@ -289,4 +371,94 @@ fn validate_write(write: &AtomicDeploymentFinalization) -> AppResult<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::common::task::{StepState, TargetState};
+
+    #[test]
+    fn pending_file_keeps_everything_required_for_shared_retry() {
+        let directory = tempfile::tempdir().expect("temporary finalization directory");
+        let operation_id = "operation-retry".to_string();
+        let resource_key = "02AABBCCDDEE".to_string();
+        let projection = PendingLocalFinalization {
+            operation_id: operation_id.clone(),
+            final_state: TaskState::Succeeded,
+            targets: vec![TargetUpdate {
+                resource_type: "aio".into(),
+                resource_key: resource_key.clone(),
+                state: TargetState::Succeeded,
+                stage: "completed".into(),
+                progress_current: 100,
+                progress_total: 100,
+                fencing_token: Some(7),
+                message_code: None,
+                message_params_json: None,
+            }],
+            steps: vec![TaskStepWrite {
+                id: "step-retry".into(),
+                resource_type: Some("aio".into()),
+                resource_key: Some(resource_key.clone()),
+                step_code: "health".into(),
+                state: StepState::Succeeded,
+                error_code: None,
+                message: Some("服务健康".into()),
+            }],
+            shared: AtomicDeploymentFinalization {
+                operation: OperationFinalResult {
+                    operation_id: operation_id.clone(),
+                    expected_version: 3,
+                    state: "succeeded".into(),
+                    result_summary: Some("成功1，失败0，取消0".into()),
+                    error_code: None,
+                    error_summary: None,
+                },
+                targets: vec![AtomicTargetFinalization {
+                    result: TargetFinalResult {
+                        operation_id: operation_id.clone(),
+                        resource_type: "aio".into(),
+                        resource_key: resource_key.clone(),
+                        result_state: "succeeded".into(),
+                        before_version: Some("before".into()),
+                        after_version: Some("after".into()),
+                        result_summary: Some("部署成功".into()),
+                        error_code: None,
+                        error_summary: None,
+                    },
+                    service_versions: vec![ServiceVersionWrite {
+                        mac: resource_key.clone(),
+                        service_name: "device-edge".into(),
+                        expected_image_name: Some("device-edge:1.2.3".into()),
+                        expected_version: Some("1.2.3".into()),
+                        observed_image_name: Some("device-edge:1.2.3".into()),
+                        observed_version: Some("1.2.3".into()),
+                        source_operation_id: Some(operation_id.clone()),
+                    }],
+                    replace_service_versions: true,
+                    mark_operation_success: true,
+                }],
+                leases: vec![LeaseGrant {
+                    resource_type: "aio".into(),
+                    resource_key: resource_key.clone(),
+                    operation_id: operation_id.clone(),
+                    owner_instance_id: "instance-a".into(),
+                    lease_token: "lease-token".into(),
+                    fencing_token: 7,
+                }],
+            },
+        };
+
+        write_pending_local_finalization(directory.path(), &projection)
+            .expect("write pending file");
+        let restored =
+            read_pending_local_finalization(directory.path()).expect("read pending file");
+
+        assert_eq!(restored.operation_id, operation_id);
+        assert_eq!(restored.shared.operation.expected_version, 3);
+        assert_eq!(restored.shared.targets[0].service_versions.len(), 1);
+        assert_eq!(restored.shared.leases[0].fencing_token, 7);
+        assert_eq!(restored.targets[0].resource_key, resource_key);
+    }
 }

@@ -203,7 +203,11 @@ fn inspect_image_archive_with_limits(
     }
     let records = serde_json::from_slice::<Vec<DockerManifestEntry>>(&bytes)
         .map_err(|_| AppError::InvalidConfig("Docker镜像manifest.json格式无效".into()))?;
-    let image_count = records.len();
+    if records.len() != 1 {
+        return Err(AppError::InvalidConfig(
+            "只能选择单镜像Tar，请重新导出镜像".into(),
+        ));
+    }
     let repo_tags = records
         .into_iter()
         .flat_map(|record| record.repo_tags.unwrap_or_default())
@@ -212,11 +216,6 @@ fn inspect_image_archive_with_limits(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    if repo_tags.is_empty() && image_count != 1 {
-        return Err(AppError::InvalidConfig(
-            "Docker镜像归档包含多个无标签镜像，无法确定手工标签对应关系".into(),
-        ));
-    }
     Ok(ImageArchiveInfo {
         path: canonical.to_string_lossy().into_owned(),
         size: metadata.len(),
@@ -352,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn single_untagged_image_accepts_a_manual_tag_but_ambiguous_archive_is_rejected() {
+    fn single_image_accepts_multiple_or_manual_tags_but_multi_image_tar_is_rejected() {
         let temp = tempfile::tempdir().expect("temp");
         let single = temp.path().join("single.tar");
         image_tar_manifest(&single, serde_json::json!([{"RepoTags": null}]));
@@ -364,12 +363,47 @@ mod tests {
         .expect("manual tag");
         assert_eq!(inspected.image_files[0].image_tag, "registry.example/app:1");
 
-        let ambiguous = temp.path().join("ambiguous.tar");
+        let multiple_tags = temp.path().join("multiple-tags.tar");
         image_tar_manifest(
-            &ambiguous,
-            serde_json::json!([{"RepoTags": null}, {"RepoTags": ["<none>:<none>"]}]),
+            &multiple_tags,
+            serde_json::json!([{"RepoTags": ["registry.example/app:latest", "registry.example/app:1"]}]),
         );
-        assert!(inspect_image_archive_with_limits(&ambiguous, 1024 * 1024, 10, 1024).is_err());
+        let inspected = inspect_image_archive_with_limits(&multiple_tags, 1024 * 1024, 10, 1024)
+            .expect("one image may expose multiple tags");
+        assert_eq!(
+            inspected.repo_tags,
+            vec!["registry.example/app:1", "registry.example/app:latest"]
+        );
+
+        for (name, manifest) in [
+            (
+                "tagged",
+                serde_json::json!([
+                    {"RepoTags": ["registry.example/app:1"]},
+                    {"RepoTags": ["registry.example/worker:1"]}
+                ]),
+            ),
+            (
+                "mixed",
+                serde_json::json!([
+                    {"RepoTags": ["registry.example/app:1"]},
+                    {"RepoTags": null}
+                ]),
+            ),
+            (
+                "untagged",
+                serde_json::json!([{"RepoTags": null}, {"RepoTags": ["<none>:<none>"]}]),
+            ),
+        ] {
+            let path = temp.path().join(format!("multi-{name}.tar"));
+            image_tar_manifest(&path, manifest);
+            let error = inspect_image_archive_with_limits(&path, 1024 * 1024, 10, 1024)
+                .expect_err("multi-image tar must be rejected");
+            assert_eq!(
+                error.to_string(),
+                "配置无效：只能选择单镜像Tar，请重新导出镜像"
+            );
+        }
     }
 
     #[test]

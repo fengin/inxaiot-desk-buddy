@@ -25,7 +25,9 @@ use crate::infrastructure::deployment_progress::{
 use crate::infrastructure::local_sqlite::task_repository::{
     CreateTask, TargetUpdate, TaskStepWrite,
 };
-use crate::infrastructure::project_context::{map_formal_error, project_database};
+use crate::infrastructure::project_context::{
+    map_formal_error, project_database, project_database_for_finalization,
+};
 
 #[derive(Clone)]
 pub struct DeploymentControlHandle {
@@ -507,7 +509,6 @@ pub async fn finalize_deployment_control(
     handle: DeploymentControlHandle,
     summary: DeploymentExecutionSummary,
 ) -> AppResult<()> {
-    let pools = project_database(state, local_project_id).await?;
     let mut shared_targets = Vec::with_capacity(summary.targets.len());
     for target in &summary.targets {
         let (state_name, error_code) = match target.state {
@@ -554,6 +555,10 @@ pub async fn finalize_deployment_control(
         shared_targets.push(AtomicTargetFinalization {
             result: target_result,
             service_versions,
+            replace_service_versions: should_replace_service_versions(
+                handle.plan.mode,
+                state_name == "succeeded",
+            ),
             mark_operation_success: state_name == "succeeded",
         });
     }
@@ -602,19 +607,6 @@ pub async fn finalize_deployment_control(
             message: target.error.clone().or_else(|| Some(step.label.clone())),
         }));
     }
-    let task_dir = state
-        .paths
-        .project_task_dir(local_project_id, &handle.local_task_id)
-        .map_err(map_formal_error)?;
-    write_pending_local_finalization(
-        &task_dir,
-        &PendingLocalFinalization {
-            operation_id: handle.operation_id.clone(),
-            final_state: task_final,
-            targets: local_targets.clone(),
-            steps: local_steps.clone(),
-        },
-    )?;
     let atomic_finalization = AtomicDeploymentFinalization {
         operation: OperationFinalResult {
             operation_id: handle.operation_id.clone(),
@@ -630,6 +622,21 @@ pub async fn finalize_deployment_control(
         targets: shared_targets,
         leases: handle.leases.clone(),
     };
+    let task_dir = state
+        .paths
+        .project_task_dir(local_project_id, &handle.local_task_id)
+        .map_err(map_formal_error)?;
+    write_pending_local_finalization(
+        &task_dir,
+        &PendingLocalFinalization {
+            operation_id: handle.operation_id.clone(),
+            final_state: task_final,
+            targets: local_targets.clone(),
+            steps: local_steps.clone(),
+            shared: atomic_finalization.clone(),
+        },
+    )?;
+    let pools = project_database_for_finalization(state, local_project_id).await?;
     let mut shared_error = None;
     for attempt in 0..3 {
         match finalize_deployment_atomically(&pools.workbench, atomic_finalization.clone()).await {
@@ -815,6 +822,14 @@ fn step_id(task_id: &str, mac: &str, code: &str) -> String {
     format!("{task_id}:{mac}:{code}")
 }
 
+fn should_replace_service_versions(mode: DeploymentMode, succeeded: bool) -> bool {
+    succeeded
+        && matches!(
+            mode,
+            DeploymentMode::FirstDeploy | DeploymentMode::FullUpgrade
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,5 +874,25 @@ mod tests {
             assert_eq!(error.as_deref(), expected_error);
             assert_eq!(stage, expected_stage);
         }
+    }
+
+    #[test]
+    fn only_successful_full_release_replaces_the_shared_service_set() {
+        assert!(should_replace_service_versions(
+            DeploymentMode::FirstDeploy,
+            true
+        ));
+        assert!(should_replace_service_versions(
+            DeploymentMode::FullUpgrade,
+            true
+        ));
+        assert!(!should_replace_service_versions(
+            DeploymentMode::ServiceUpgrade,
+            true
+        ));
+        assert!(!should_replace_service_versions(
+            DeploymentMode::FullUpgrade,
+            false
+        ));
     }
 }

@@ -2,8 +2,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use inxaiot_desk_buddy_lib::core::secret::SecretValue;
 use inxaiot_desk_buddy_lib::formal::error::FormalError;
-use inxaiot_desk_buddy_lib::formal::mysql::{MySqlConnectionSpec, MySqlTlsMode, ProjectMySqlPools};
 use inxaiot_desk_buddy_lib::formal::operation_repository::{
     OperationRepository, OperationStart, TargetFinalResult,
 };
@@ -11,6 +11,9 @@ use inxaiot_desk_buddy_lib::formal::resource_lease_repository::{
     LeaseGrant, LeaseRequest, ResourceLeaseRepository,
 };
 use inxaiot_desk_buddy_lib::formal::workbench_store::WorkbenchStore;
+use inxaiot_desk_buddy_lib::infrastructure::database::{
+    DatabaseTlsMode, DualMySqlPools, MySqlProjectConfig,
+};
 use inxaiot_desk_buddy_lib::infrastructure::deployment_control::start_deployment_heartbeat_with_timing;
 use tokio::sync::Barrier;
 use tokio_util::sync::CancellationToken;
@@ -29,7 +32,7 @@ fn default<'a>(text: &'a str, key: &str) -> &'a str {
     &rest[..rest.find('}').expect("config default end")]
 }
 
-fn config() -> MySqlConnectionSpec {
+fn config() -> MySqlProjectConfig {
     let project = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("project");
@@ -40,14 +43,14 @@ fn config() -> MySqlConnectionSpec {
         "inxvision-platform/inxaiot-starter-platform/src/main/resources/application-dev.yml",
     ))
     .expect("platform config");
-    MySqlConnectionSpec {
+    MySqlProjectConfig {
         host: default(&yaml, "MYSQL_HOST").into(),
         port: default(&yaml, "MYSQL_PORT").parse().expect("mysql port"),
         username: default(&yaml, "MYSQL_USER").into(),
-        password: default(&yaml, "MYSQL_PASSWORD").into(),
+        password: SecretValue::new(default(&yaml, "MYSQL_PASSWORD")),
         platform_schema: line(&description, "平台业务数据库名：").into(),
         workbench_schema: line(&description, "工作台数据库：").into(),
-        tls_mode: MySqlTlsMode::Disabled,
+        tls_mode: DatabaseTlsMode::Disabled,
         connect_timeout: Duration::from_secs(10),
     }
 }
@@ -101,15 +104,15 @@ async fn start_operation(
 #[tokio::test]
 #[ignore = "writes one isolated operation, waits for exact leases to expire, then precisely cleans it"]
 async fn stale_operation_keeps_known_result_and_marks_pending_target_unknown() {
-    let pools = ProjectMySqlPools::connect(&config())
+    let pools = DualMySqlPools::connect(&config())
         .await
         .expect("connect project mysql");
-    WorkbenchStore::new(pools.workbench().clone())
+    WorkbenchStore::new(pools.workbench.clone())
         .migrate()
         .await
         .expect("workbench schema");
-    let operations = OperationRepository::new(pools.workbench().clone());
-    let leases = ResourceLeaseRepository::new(pools.workbench().clone());
+    let operations = OperationRepository::new(pools.workbench.clone());
+    let leases = ResourceLeaseRepository::new(pools.workbench.clone());
     let targets = vec![random_mac(), random_mac()];
     let started = start_operation(&operations, &targets).await;
     let operation_id = started.id.clone();
@@ -179,7 +182,7 @@ async fn stale_operation_keeps_known_result_and_marks_pending_target_unknown() {
     .bind(&operation_id)
     .bind(&operation_id)
     .bind(&operation_id)
-    .fetch_one(pools.workbench())
+    .fetch_one(&pools.workbench)
     .await
     .expect("verify stage7 recovery cleanup");
     assert_eq!(remaining, 0);
@@ -191,10 +194,10 @@ async fn stale_operation_keeps_known_result_and_marks_pending_target_unknown() {
 #[tokio::test]
 #[ignore = "runs two isolated owners against one random lease key and removes only that counter"]
 async fn concurrent_instances_allow_exactly_one_lease_owner() {
-    let pools = ProjectMySqlPools::connect(&config())
+    let pools = DualMySqlPools::connect(&config())
         .await
         .expect("connect project mysql");
-    let repository = ResourceLeaseRepository::new(pools.workbench().clone());
+    let repository = ResourceLeaseRepository::new(pools.workbench.clone());
     let resource_key = format!("phase7:lease:{}", Uuid::now_v7());
     let barrier = Arc::new(Barrier::new(3));
     let mut handles = Vec::new();
@@ -235,7 +238,7 @@ async fn concurrent_instances_allow_exactly_one_lease_owner() {
         "SELECT COUNT(*) FROM resource_lease WHERE resource_type = 'aio' AND resource_key = ?",
     )
     .bind(&resource_key)
-    .fetch_one(pools.workbench())
+    .fetch_one(&pools.workbench)
     .await
     .expect("verify lease cleanup");
     assert_eq!(remaining, 0);
@@ -247,11 +250,11 @@ async fn concurrent_instances_allow_exactly_one_lease_owner() {
 #[ignore = "closes one isolated workbench pool to verify heartbeat cancellation and exact cleanup"]
 async fn database_disconnect_cancels_execution_before_more_remote_steps() {
     let config = config();
-    let pools = ProjectMySqlPools::connect(&config)
+    let pools = DualMySqlPools::connect(&config)
         .await
         .expect("connect project mysql");
-    let operations = OperationRepository::new(pools.workbench().clone());
-    let leases = ResourceLeaseRepository::new(pools.workbench().clone());
+    let operations = OperationRepository::new(pools.workbench.clone());
+    let leases = ResourceLeaseRepository::new(pools.workbench.clone());
     let target = random_mac();
     let started = start_operation(&operations, std::slice::from_ref(&target)).await;
     let operation_id = started.id.clone();
@@ -266,7 +269,7 @@ async fn database_disconnect_cancels_execution_before_more_remote_steps() {
         .expect("acquire heartbeat lease");
     let execution_cancellation = CancellationToken::new();
     let heartbeat = start_deployment_heartbeat_with_timing(
-        pools.workbench().clone(),
+        pools.workbench.clone(),
         started.id,
         started.version,
         grants,
@@ -275,17 +278,17 @@ async fn database_disconnect_cancels_execution_before_more_remote_steps() {
         Duration::from_secs(2),
     );
     tokio::time::sleep(Duration::from_millis(140)).await;
-    pools.workbench().close().await;
+    pools.workbench.close().await;
     tokio::time::timeout(Duration::from_secs(3), execution_cancellation.cancelled())
         .await
         .expect("heartbeat should cancel execution after pool disconnect");
     assert!(heartbeat.stop().await.is_err());
     pools.close().await;
 
-    let cleanup_pools = ProjectMySqlPools::connect(&config)
+    let cleanup_pools = DualMySqlPools::connect(&config)
         .await
         .expect("reconnect project mysql");
-    OperationRepository::new(cleanup_pools.workbench().clone())
+    OperationRepository::new(cleanup_pools.workbench.clone())
         .delete_test_operation(&operation_id)
         .await
         .expect("precisely clean disconnect operation");
@@ -297,7 +300,7 @@ async fn database_disconnect_cancels_execution_before_more_remote_steps() {
     .bind(&operation_id)
     .bind(&operation_id)
     .bind(&operation_id)
-    .fetch_one(cleanup_pools.workbench())
+    .fetch_one(&cleanup_pools.workbench)
     .await
     .expect("verify disconnect cleanup");
     assert_eq!(remaining, 0);

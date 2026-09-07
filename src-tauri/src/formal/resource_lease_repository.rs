@@ -1,12 +1,14 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use sqlx::{MySql, MySqlPool, Row, Transaction};
 use uuid::Uuid;
 
 use super::error::{FormalError, FormalResult};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LeaseGrant {
     pub resource_type: String,
     pub resource_key: String,
@@ -94,6 +96,21 @@ impl ResourceLeaseRepository {
     }
 
     pub async fn acquire_many(&self, requests: Vec<LeaseRequest>) -> FormalResult<Vec<LeaseGrant>> {
+        self.acquire_many_with_policy(requests, false).await
+    }
+
+    pub async fn force_acquire_many(
+        &self,
+        requests: Vec<LeaseRequest>,
+    ) -> FormalResult<Vec<LeaseGrant>> {
+        self.acquire_many_with_policy(requests, true).await
+    }
+
+    async fn acquire_many_with_policy(
+        &self,
+        requests: Vec<LeaseRequest>,
+        force_takeover: bool,
+    ) -> FormalResult<Vec<LeaseGrant>> {
         if requests.is_empty() {
             return Err(FormalError::InvalidConfig("租约目标不能为空".into()));
         }
@@ -112,7 +129,7 @@ impl ResourceLeaseRepository {
         })?;
         let mut grants = Vec::with_capacity(unique.len());
         for (_, request) in unique {
-            match acquire_one(&mut transaction, &request).await? {
+            match acquire_one(&mut transaction, &request, force_takeover).await? {
                 LeaseOutcome::Acquired(grant) => grants.push(grant),
                 LeaseOutcome::Busy {
                     resource_type,
@@ -214,6 +231,7 @@ impl ResourceLeaseRepository {
 async fn acquire_one(
     transaction: &mut Transaction<'_, MySql>,
     request: &LeaseRequest,
+    force_takeover: bool,
 ) -> FormalResult<LeaseOutcome> {
     validate_request(request)?;
     let row = sqlx::query(
@@ -244,13 +262,27 @@ async fn acquire_one(
         let expired: i8 = row
             .try_get("expired")
             .map_err(|_| FormalError::LocalDatabase("解析租约过期状态"))?;
-        if state == "active" && expired == 0 {
+        if state == "active" && expired == 0 && !force_takeover {
             return Ok(LeaseOutcome::Busy {
                 resource_type: request.resource_type.clone(),
                 resource_key: request.resource_key.clone(),
                 owner_instance_id: owner,
                 operation_id,
             });
+        }
+        if force_takeover && operation_id != request.operation_id {
+            let operation_state = sqlx::query_scalar::<_, String>(
+                "SELECT state FROM operation_record WHERE id = ? FOR UPDATE",
+            )
+            .bind(&operation_id)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|error| map_error("校验被接管操作状态", error))?;
+            if operation_state.as_deref() != Some("running") {
+                return Err(FormalError::Conflict(format!(
+                    "占用任务已结束，不能用旧结果覆盖：操作={operation_id}"
+                )));
+            }
         }
         let next_fencing = token + 1;
         sqlx::query(

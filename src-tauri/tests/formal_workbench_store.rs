@@ -1,20 +1,23 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use inxaiot_desk_buddy_lib::core::secret::SecretValue;
 use inxaiot_desk_buddy_lib::formal::credential_crypto::{self, ReleaseCredentials};
 use inxaiot_desk_buddy_lib::formal::error::FormalError;
-use inxaiot_desk_buddy_lib::formal::mysql::{MySqlConnectionSpec, MySqlTlsMode, ProjectMySqlPools};
 use inxaiot_desk_buddy_lib::formal::release_profile_repository::{
     ReleaseAgentScriptWrite, ReleaseProfileRepository, ReleaseProfileValues, ReleaseProfileWrite,
     StoredReleaseAgentScript,
 };
 use inxaiot_desk_buddy_lib::formal::workbench_store::WorkbenchStore;
 use inxaiot_desk_buddy_lib::infrastructure::agent_asset::embedded_agent_asset;
+use inxaiot_desk_buddy_lib::infrastructure::database::{
+    DatabaseTlsMode, DualMySqlPools, MySqlProjectConfig,
+};
 use sqlx::Row;
 use uuid::Uuid;
 
 struct TestConfig {
-    mysql: MySqlConnectionSpec,
+    mysql: MySqlProjectConfig,
     project_root: PathBuf,
     test_description: String,
 }
@@ -53,14 +56,14 @@ fn config() -> TestConfig {
     ))
     .expect("platform config");
     TestConfig {
-        mysql: MySqlConnectionSpec {
+        mysql: MySqlProjectConfig {
             host: default(&yaml, "MYSQL_HOST").into(),
             port: default(&yaml, "MYSQL_PORT").parse().expect("mysql port"),
             username: default(&yaml, "MYSQL_USER").into(),
-            password: default(&yaml, "MYSQL_PASSWORD").into(),
+            password: SecretValue::new(default(&yaml, "MYSQL_PASSWORD")),
             platform_schema: line(&test_description, "平台业务数据库名：").into(),
             workbench_schema: line(&test_description, "工作台数据库：").into(),
-            tls_mode: MySqlTlsMode::Disabled,
+            tls_mode: DatabaseTlsMode::Disabled,
             connect_timeout: Duration::from_secs(10),
         },
         project_root,
@@ -130,10 +133,10 @@ fn encrypted_release_credentials_round_trip_is_authenticated() {
 #[ignore = "runs SQLx migration in the authorized workbench database"]
 async fn workbench_schema_matches_documented_data_boundary() {
     let config = config();
-    let pools = ProjectMySqlPools::connect(&config.mysql)
+    let pools = DualMySqlPools::connect(&config.mysql)
         .await
         .expect("connect project mysql");
-    let store = WorkbenchStore::new(pools.workbench().clone());
+    let store = WorkbenchStore::new(pools.workbench.clone());
     store.migrate().await.expect("workbench migration");
     let audit = store
         .audit_schema(&config.mysql.workbench_schema)
@@ -168,12 +171,12 @@ async fn workbench_schema_matches_documented_data_boundary() {
 #[ignore = "writes and removes one isolated release profile in the authorized workbench database"]
 async fn release_profile_uses_optimistic_version_and_encrypted_credentials() {
     let config = config();
-    let pools = ProjectMySqlPools::connect(&config.mysql)
+    let pools = DualMySqlPools::connect(&config.mysql)
         .await
         .expect("connect project mysql");
-    let store = WorkbenchStore::new(pools.workbench().clone());
+    let store = WorkbenchStore::new(pools.workbench.clone());
     store.migrate().await.expect("workbench migration");
-    let repository = ReleaseProfileRepository::new(pools.workbench().clone());
+    let repository = ReleaseProfileRepository::new(pools.workbench.clone());
     let profile_key = format!("poc-{}", &Uuid::now_v7().simple().to_string()[..20]);
     let (values, credentials) = release_values(&config);
     let first = repository
@@ -242,7 +245,7 @@ async fn release_profile_uses_optimistic_version_and_encrypted_credentials() {
     let row =
         sqlx::query("SELECT credential_ciphertext FROM aio_release_profile WHERE profile_key = ?")
             .bind(&profile_key)
-            .fetch_one(pools.workbench())
+            .fetch_one(&pools.workbench)
             .await
             .expect("read release ciphertext");
     let ciphertext: Vec<u8> = row.try_get("credential_ciphertext").expect("ciphertext");
@@ -256,7 +259,7 @@ async fn release_profile_uses_optimistic_version_and_encrypted_credentials() {
          WHERE object_type = 'aio_release_profile' AND object_key = ?",
     )
     .bind(&profile_key)
-    .fetch_all(pools.workbench())
+    .fetch_all(&pools.workbench)
     .await
     .expect("read audit rows");
     assert_eq!(audit_rows.len(), 3);
@@ -290,10 +293,10 @@ async fn readable_client_instance_round_trips_without_truncation() {
     let config = config();
     assert_eq!(config.mysql.host, "192.168.3.6");
     assert_eq!(config.mysql.workbench_schema, "inxaiot_desk_buddy");
-    let pools = ProjectMySqlPools::connect(&config.mysql)
+    let pools = DualMySqlPools::connect(&config.mysql)
         .await
         .expect("connect workbench");
-    WorkbenchStore::new(pools.workbench().clone())
+    WorkbenchStore::new(pools.workbench.clone())
         .migrate()
         .await
         .expect("widen instance columns");
@@ -305,7 +308,7 @@ async fn readable_client_instance_round_trips_without_truncation() {
         let length: u64 = sqlx::query_scalar(
             "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND column_name = ?"
         ).bind(&config.mysql.workbench_schema).bind(table).bind(column)
-            .fetch_one(pools.workbench()).await.expect("instance column length");
+            .fetch_one(&pools.workbench).await.expect("instance column length");
         assert_eq!(length, 512);
     }
     let id = Uuid::now_v7().to_string();
@@ -315,11 +318,7 @@ async fn readable_client_instance_round_trips_without_truncation() {
         "完整电脑名称".repeat(12)
     );
     assert!(instance.chars().count() > 64);
-    let mut transaction = pools
-        .workbench()
-        .begin()
-        .await
-        .expect("isolated source test");
+    let mut transaction = pools.workbench.begin().await.expect("isolated source test");
     sqlx::query("INSERT INTO operation_record (id, domain_type, operation_type, operation_name, operator_name, instance_id, state, started_at, heartbeat_at) VALUES (?, 'aio', 'source_test', '实例来源回归', 'source-test', ?, 'succeeded', UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))")
         .bind(&id).bind(&instance).execute(&mut *transaction).await.expect("operation source");
     sqlx::query("INSERT INTO audit_event (id, domain_type, object_type, object_key, action, operator_name, instance_id, changed_fields_json, created_at) VALUES (?, 'aio', 'source_test', ?, 'create', 'source-test', ?, '[]', UTC_TIMESTAMP(6))")
@@ -346,7 +345,7 @@ async fn readable_client_instance_round_trips_without_truncation() {
     ] {
         let count: i64 = sqlx::query_scalar(query)
             .bind(&id)
-            .fetch_one(pools.workbench())
+            .fetch_one(&pools.workbench)
             .await
             .expect("no test row retained");
         assert_eq!(count, 0);

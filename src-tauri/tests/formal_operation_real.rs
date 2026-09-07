@@ -1,8 +1,8 @@
 use std::path::Path;
 use std::time::Duration;
 
+use inxaiot_desk_buddy_lib::core::secret::SecretValue;
 use inxaiot_desk_buddy_lib::formal::error::FormalError;
-use inxaiot_desk_buddy_lib::formal::mysql::{MySqlConnectionSpec, MySqlTlsMode, ProjectMySqlPools};
 use inxaiot_desk_buddy_lib::formal::operation_repository::{
     OperationFinalResult, OperationRepository, OperationStart, TargetFinalResult,
 };
@@ -10,6 +10,9 @@ use inxaiot_desk_buddy_lib::formal::resource_lease_repository::{
     LeaseRequest, ResourceLeaseRepository,
 };
 use inxaiot_desk_buddy_lib::formal::workbench_store::WorkbenchStore;
+use inxaiot_desk_buddy_lib::infrastructure::database::{
+    DatabaseTlsMode, DualMySqlPools, MySqlProjectConfig,
+};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -26,7 +29,7 @@ fn default<'a>(text: &'a str, key: &str) -> &'a str {
     &rest[..rest.find('}').expect("config default end")]
 }
 
-fn config() -> MySqlConnectionSpec {
+fn config() -> MySqlProjectConfig {
     let project = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("project");
@@ -37,14 +40,14 @@ fn config() -> MySqlConnectionSpec {
         "inxvision-platform/inxaiot-starter-platform/src/main/resources/application-dev.yml",
     ))
     .expect("platform config");
-    MySqlConnectionSpec {
+    MySqlProjectConfig {
         host: default(&yaml, "MYSQL_HOST").into(),
         port: default(&yaml, "MYSQL_PORT").parse().expect("mysql port"),
         username: default(&yaml, "MYSQL_USER").into(),
-        password: default(&yaml, "MYSQL_PASSWORD").into(),
+        password: SecretValue::new(default(&yaml, "MYSQL_PASSWORD")),
         platform_schema: line(&description, "平台业务数据库名：").into(),
         workbench_schema: line(&description, "工作台数据库：").into(),
-        tls_mode: MySqlTlsMode::Disabled,
+        tls_mode: DatabaseTlsMode::Disabled,
         connect_timeout: Duration::from_secs(10),
     }
 }
@@ -70,15 +73,15 @@ fn lease_request(resource_key: &str, operation_id: &str) -> LeaseRequest {
 #[ignore = "writes and precisely removes one isolated operation, two target results, and leases"]
 async fn operation_targets_finalization_counts_version_and_exact_cleanup() {
     let config = config();
-    let pools = ProjectMySqlPools::connect(&config)
+    let pools = DualMySqlPools::connect(&config)
         .await
         .expect("connect project mysql");
-    WorkbenchStore::new(pools.workbench().clone())
+    WorkbenchStore::new(pools.workbench.clone())
         .migrate()
         .await
         .expect("workbench migration");
-    let operations = OperationRepository::new(pools.workbench().clone());
-    let leases = ResourceLeaseRepository::new(pools.workbench().clone());
+    let operations = OperationRepository::new(pools.workbench.clone());
+    let leases = ResourceLeaseRepository::new(pools.workbench.clone());
     let first_mac = random_mac();
     let second_mac = random_mac();
     let started = operations
@@ -230,7 +233,7 @@ async fn operation_targets_finalization_counts_version_and_exact_cleanup() {
     .bind(&operation_id)
     .bind(&operation_id)
     .bind(&operation_id)
-    .fetch_one(pools.workbench())
+    .fetch_one(&pools.workbench)
     .await
     .expect("verify exact operation cleanup");
     assert_eq!(remaining, 0);
@@ -243,7 +246,7 @@ async fn operation_targets_finalization_counts_version_and_exact_cleanup() {
 #[ignore = "read-only inspection for an interrupted isolated operation test"]
 async fn inspect_interrupted_operation_candidates() {
     let config = config();
-    let pools = ProjectMySqlPools::connect(&config)
+    let pools = DualMySqlPools::connect(&config)
         .await
         .expect("connect project mysql");
     let rows = sqlx::query(
@@ -254,7 +257,7 @@ async fn inspect_interrupted_operation_candidates() {
     .bind("phase3 isolated operation")
     .bind("phase3-operation-test")
     .bind("instance-operation-test")
-    .fetch_all(pools.workbench())
+    .fetch_all(&pools.workbench)
     .await
     .expect("read isolated operation candidates");
     for row in rows {
@@ -265,13 +268,13 @@ async fn inspect_interrupted_operation_candidates() {
             "SELECT COUNT(*) FROM operation_target_result WHERE operation_id = ?",
         )
         .bind(&id)
-        .fetch_one(pools.workbench())
+        .fetch_one(&pools.workbench)
         .await
         .expect("target result count");
         let persisted_leases: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM resource_lease WHERE operation_id = ?")
                 .bind(&id)
-                .fetch_one(pools.workbench())
+                .fetch_one(&pools.workbench)
                 .await
                 .expect("lease count");
         println!(
@@ -286,7 +289,7 @@ async fn inspect_interrupted_operation_candidates() {
 async fn cleanup_exact_interrupted_operation() {
     let operation_id = std::env::var("INX_TEST_OPERATION_ID").expect("exact operation id");
     let config = config();
-    let pools = ProjectMySqlPools::connect(&config)
+    let pools = DualMySqlPools::connect(&config)
         .await
         .expect("connect project mysql");
     let marker_count: i64 = sqlx::query_scalar(
@@ -297,11 +300,11 @@ async fn cleanup_exact_interrupted_operation() {
     .bind("phase3 isolated operation")
     .bind("phase3-operation-test")
     .bind("instance-operation-test")
-    .fetch_one(pools.workbench())
+    .fetch_one(&pools.workbench)
     .await
     .expect("verify isolated operation marker");
     assert_eq!(marker_count, 1, "refuse to clean an unmarked operation");
-    OperationRepository::new(pools.workbench().clone())
+    OperationRepository::new(pools.workbench.clone())
         .delete_test_operation(&operation_id)
         .await
         .expect("delete exact interrupted operation");
@@ -313,7 +316,7 @@ async fn cleanup_exact_interrupted_operation() {
     .bind(&operation_id)
     .bind(&operation_id)
     .bind(&operation_id)
-    .fetch_one(pools.workbench())
+    .fetch_one(&pools.workbench)
     .await
     .expect("verify exact interrupted operation cleanup");
     assert_eq!(remaining, 0);

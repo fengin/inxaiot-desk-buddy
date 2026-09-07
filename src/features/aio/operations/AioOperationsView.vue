@@ -107,6 +107,8 @@ let projectContextMounted = false;
 let projectContextRequest = 0;
 let preflightUiRequest = 0;
 let operationSubmissionRequest = 0;
+let imageSelectionRequest = 0;
+const latestImageSelectionRequest = new Map<string, number>();
 
 const steps = [
   { title: "选择", hint: "模式、范围和发布文件" },
@@ -272,6 +274,8 @@ onBeforeUnmount(() => {
 
 async function activateProjectContext(projectId?: string) {
   const request = ++projectContextRequest;
+  imageSelectionRequest += 1;
+  latestImageSelectionRequest.clear();
   preflightUiRequest += 1;
   operationSubmissionRequest += 1;
   checking.value = false;
@@ -386,10 +390,17 @@ function chooseImageTag(service: string, key: string | number) {
 }
 
 async function chooseImage(service: string) {
+  const expectedProjectId = projects.activeProjectId;
+  const request = ++imageSelectionRequest;
+  latestImageSelectionRequest.set(service, request);
+  const isCurrent = () => projectContextMounted
+    && projects.activeProjectId === expectedProjectId
+    && latestImageSelectionRequest.get(service) === request;
   if (!adapter.real) {
     const current = imageSelections.value[service] ?? { filePath: "", imageTag: "", repoTags: [] };
     const path = current.filePath || `C:/fixture/${service}.tar`;
     const inspection = await adapter.inspectImage(path, current.imageTag || undefined);
+    if (!isCurrent()) return;
     imageSelections.value[service] = {
       filePath: path,
       imageTag: current.imageTag || inspection.archive.repoTags[0] || "",
@@ -400,9 +411,10 @@ async function chooseImage(service: string) {
   const selected = await dialogs.selectFile(`选择 ${service} 的Docker镜像归档`, [
     { name: "Docker镜像归档", extensions: ["tar"] }
   ]);
-  if (!selected) return;
+  if (!selected || !isCurrent()) return;
   try {
     const inspection = await adapter.inspectImage(selected);
+    if (!isCurrent()) return;
     const current = imageSelections.value[service];
     imageSelections.value[service] = {
       filePath: inspection.archive.path,
@@ -412,6 +424,7 @@ async function chooseImage(service: string) {
       repoTags: inspection.archive.repoTags
     };
   } catch (error) {
+    if (!isCurrent()) return;
     message.error(commandErrorText(error, "镜像文件检查失败"));
   }
 }

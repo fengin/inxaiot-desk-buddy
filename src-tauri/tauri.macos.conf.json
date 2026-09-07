@@ -3,7 +3,7 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
-    "icon": ["target/macos-assets/icon.png", "target/macos-assets/icon.icns"],
+    "icon": ["icons/icon.png", "icons/icon.icns"],
     "publisher": "INXVision"
   }
 }

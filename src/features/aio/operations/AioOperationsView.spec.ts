@@ -12,6 +12,7 @@ import {
 import { FixtureOperationsAdapter } from "@/dev-fixtures/operationsFixtureAdapter";
 import { configureActivityAdapter } from "@/shared/api/activityAdapter";
 import { configureOperationsAdapter } from "@/shared/api/operationsAdapter";
+import { configureSystemDialogAdapter } from "@/shared/api/systemDialogAdapter";
 import { useActivityStore } from "@/stores/activity";
 import { useDeploymentWorkflowStore } from "@/stores/deploymentWorkflow";
 
@@ -89,6 +90,29 @@ class UntaggedFixtureOperationsAdapter extends FixtureOperationsAdapter {
   ) {
     this.preflightImageTags.push(...plan.imageFiles.map((image) => image.imageTag));
     return super.preflight(projectId, preflightTaskId, plan);
+  }
+}
+
+class DelayedImageOperationsAdapter extends FixtureOperationsAdapter {
+  private releaseFirst!: () => void;
+  private markFirstStarted!: () => void;
+  readonly firstStarted = new Promise<void>((resolve) => { this.markFirstStarted = resolve; });
+  private readonly firstGate = new Promise<void>((resolve) => { this.releaseFirst = resolve; });
+
+  release() {
+    this.releaseFirst();
+  }
+
+  override async inspectImage(path: string, expectedImage?: string) {
+    if (path === "first-image.tar") {
+      this.markFirstStarted();
+      await this.firstGate;
+    }
+    return {
+      archive: { path, size: 1024, repoTags: [path === "first-image.tar" ? "repo/first:1" : "repo/second:2"] },
+      expectedImage,
+      expectedMatches: true
+    };
   }
 }
 
@@ -404,6 +428,54 @@ describe("部署页面活动任务恢复", () => {
       expect(wrapper.findAll(".service-image-row")).toHaveLength(1);
       expect(wrapper.text()).toContain("目标服务");
     } finally {
+      wrapper.unmount();
+    }
+  }, 30000);
+
+  it("同一服务连续选择镜像时只采用最后一次解析结果", async () => {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }))
+    });
+    const operationsAdapter = new DelayedImageOperationsAdapter();
+    Object.defineProperty(operationsAdapter, "real", { value: true });
+    configureActivityAdapter(new FixtureActivityAdapter());
+    configureOperationsAdapter(operationsAdapter);
+    const selectFile = vi.fn()
+      .mockResolvedValueOnce("first-image.tar")
+      .mockResolvedValueOnce("second-image.tar");
+    configureSystemDialogAdapter({
+      real: true,
+      async selectDirectory() { return null; },
+      selectFile
+    });
+    const { default: App } = await import("@/app/App.vue");
+    await router.push("/aio/operations");
+    await router.isReady();
+    const wrapper = mount(App, {
+      attachTo: document.body,
+      global: { plugins: [createPinia(), router, i18n], stubs: { teleport: true } }
+    });
+    try {
+      await flushPromises();
+      const button = wrapper.get('[data-testid="operation-image-select-device-edge"]');
+      await button.trigger("click");
+      await operationsAdapter.firstStarted;
+      await button.trigger("click");
+      await flushPromises();
+
+      const row = wrapper.findAll(".service-image-row")[0];
+      expect((row.get(".image-file-picker input").element as HTMLInputElement).value)
+        .toBe("second-image.tar");
+      expect((wrapper.get('[data-testid="operation-image-tag-device-edge"] input').element as HTMLInputElement).value)
+        .toBe("repo/second:2");
+
+      operationsAdapter.release();
+      await flushPromises();
+      expect((row.get(".image-file-picker input").element as HTMLInputElement).value)
+        .toBe("second-image.tar");
+    } finally {
+      operationsAdapter.release();
       wrapper.unmount();
     }
   }, 30000);

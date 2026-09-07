@@ -28,6 +28,12 @@ export interface ActivityTask {
   cancellable: boolean;
 }
 
+export interface FinalizationRetryResult {
+  task: ActivityTask;
+  takeoverRequired: boolean;
+  message: string;
+}
+
 export type ActivityLogLevel = "INFO" | "WARN" | "ERROR";
 
 export interface ActivityLogEntry {

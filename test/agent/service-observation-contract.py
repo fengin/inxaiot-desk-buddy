@@ -99,14 +99,14 @@ with tempfile.TemporaryDirectory(prefix='inxaiot-observation-') as scratch:
             env = dict(environment, CASE=case, FIXTURE_DIR=root.as_posix(), SERVICE_CHECK_SOURCE='manual', SERVICE_NAME=service, CALLS_FILE=calls.as_posix())
             script = 'set -eu\n' + escape + stub + functions + '\n' + verify_all + verify_one + '\nverify_result=0\n' + verifier + ' || verify_result=$?\ninspect_services\nexit "$verify_result"\n'
             checked = subprocess.run([arguments.shell, '-s'], input=script.encode('utf-8'), env=env, capture_output=True, timeout=15)
-            expected_exit = 1 if mode == 'service' and case == 'mismatch' else 0
+            expected_exit = 1 if case == 'unhealthy' or (mode == 'service' and case == 'mismatch') else 0
             assert checked.returncode == expected_exit, (mode, case, checked.stderr.decode('utf-8'))
             report = json.loads(checked.stdout)['report']
             assert report['services'][0]['state'] == {'normal': 'normal', 'unhealthy': 'abnormal', 'mismatch': 'version_mismatch'}[case]
             call_lines = calls.read_text(encoding='utf-8').splitlines()
             for name in (['edge'] if service else ['edge', 'rule', 'web']):
                 assert call_lines.count(f'docker {name}-id') == 1, (mode, case, call_lines)
-                assert call_lines.count(f'compose -f docker-compose.yml ps -q {name}') == 1
+                assert call_lines.count(f'compose -f docker-compose.yml ps -q {name}') == 1, (mode, case, name, call_lines)
                 assert call_lines.count(f'compose -f docker-compose.yml ps -a -q {name}') == 0
             assert call_lines.count('compose -f docker-compose.yml config --services') == 1
             results.append({'case': f'{mode}_{case}_verification_reuses_same_observation', 'passed': True})

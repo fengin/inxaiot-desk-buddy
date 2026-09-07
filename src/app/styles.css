@@ -2633,7 +2633,8 @@ a {
 }
 
 .parameter-panel .form-grid {
-  gap: 10px;
+  row-gap: 8px;
+  column-gap: 10px;
 }
 
 .parameter-panel .form-grid label {

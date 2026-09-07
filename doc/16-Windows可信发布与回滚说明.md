@@ -72,11 +72,15 @@ $env:INX_RELEASE_ARTIFACT_ROOT = "D:\inxaiot-release-artifacts"
 
 在Mac上安装项目已有Node/pnpm、Rust和Xcode构建依赖后，于项目根目录执行`pnpm build:macos`。入口固定`--bundles app`和`tauri.macos.conf.json`，默认构建当前Mac架构，输出`src-tauri/target/release/bundle/macos/INX 实施工作台.app`。
 
-构建入口先从已有`icons/icon.ico`中无损提取256×256 RGBA PNG并封装ICNS，生成于忽略的`src-tauri/target/macos-assets/`；不依赖另装图像工具、不修改源图标。应使用该入口，直接绕过准备步骤运行Tauri会缺少Mac图标。
+PNG和ICNS图标已经保存在`src-tauri/icons/`，干净检出后可直接用于Mac开发和构建，不需要先执行图标生成步骤。
 
 把整个`.app`复制到“应用程序”目录再打开，不要只复制包内的可执行文件；不需要PKG安装器。Intel与Apple Silicon需分别构建/验证，不将单架构产物宣称为通用包。macOS凭据使用系统Keychain，普通应用数据不写入`.app`。
 
 当前Windows主机只完成配置与入口检查，未生成或实际验证Mac产物。Mac正式发布还必须记录干净提交、产物完整性和原生GUI验收。通过下载渠道分发时Gatekeeper仍可能要求可信签名/公证；“复制即可用”描述包的使用方式，不代表绕过系统信任策略。参考[Tauri应用包说明](https://v2.tauri.app/distribute/macos-application-bundle/)与[Windows运行时说明](https://v2.tauri.app/distribute/windows-installer/)。
+
+### 3.3 Linux
+
+在Linux上安装项目已有Node/pnpm、Rust及Tauri要求的WebKitGTK等系统依赖后，执行`pnpm build:linux`生成当前架构的可执行文件。该入口会拒绝在非Linux系统运行，避免在Windows上误把本机产物当作Linux产物。Linux桌面运行、系统凭据、文件对话框和脚本查看仍需在目标发行版原生验收。
 
 ## 4. 历史签名资产清理结果
 

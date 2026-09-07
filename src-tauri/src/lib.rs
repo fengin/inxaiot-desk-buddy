@@ -78,11 +78,15 @@ pub fn run() {
     let application = builder
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let confirmation = window.state::<ExitConfirmationState>();
+                let Some(confirmation) = window.try_state::<ExitConfirmationState>() else {
+                    return;
+                };
                 if confirmation.take_confirmation() {
                     return;
                 }
-                let state = window.state::<FormalAppState>();
+                let Some(state) = window.try_state::<FormalAppState>() else {
+                    return;
+                };
                 let counts = tauri::async_runtime::block_on(state.task_repository.active_counts())
                     .unwrap_or_default();
                 if counts.total > 0 {
@@ -100,6 +104,7 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            let setup_result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let (data_directory, data_directory_manager) =
                 DataDirectoryManager::resolve(app.path().app_data_dir()?)?;
             let paths = AppPaths::from_data_dir(data_directory)?;
@@ -234,6 +239,12 @@ pub fn run() {
             app.manage(ExitConfirmationState::default());
             app.manage(Mutex::new(logging_guard));
             Ok(())
+            })();
+            if let Err(error) = setup_result {
+                show_startup_error(&format!("工作台启动失败：{error}"));
+                app.handle().exit(1);
+            }
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             list_local_projects,
@@ -293,11 +304,15 @@ pub fn run() {
     };
     application.run(|app_handle, event| match event {
         tauri::RunEvent::ExitRequested { api, .. } => {
-            let confirmation = app_handle.state::<ExitConfirmationState>();
+            let Some(confirmation) = app_handle.try_state::<ExitConfirmationState>() else {
+                return;
+            };
             if confirmation.take_confirmation() {
                 return;
             }
-            let state = app_handle.state::<FormalAppState>();
+            let Some(state) = app_handle.try_state::<FormalAppState>() else {
+                return;
+            };
             let counts = tauri::async_runtime::block_on(state.task_repository.active_counts())
                 .unwrap_or_default();
             if counts.total > 0 {
@@ -314,7 +329,9 @@ pub fn run() {
             }
         }
         tauri::RunEvent::Exit => {
-            let state = app_handle.state::<FormalAppState>();
+            let Some(state) = app_handle.try_state::<FormalAppState>() else {
+                return;
+            };
             tauri::async_runtime::block_on(async {
                 prepare_shutdown_tasks(&state).await;
                 let outcomes = state

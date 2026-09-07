@@ -52,7 +52,7 @@ pnpm tauri dev
 
 ### GitHub多平台发布
 
-- 推送`v*.*.*`标签会触发`.github/workflows/portable-release.yml`；标签必须与`package.json`、Cargo和Tauri中的应用版本一致，例如当前版本使用`v0.1.0`。
+- 推送`v*.*.*`标签会触发`.github/workflows/portable-release.yml`；标签必须与`package.json`、Cargo和Tauri中的应用版本一致，例如当前版本使用`v0.1.1`。
 - Actions并行构建Windows x64、Linux x64、macOS Intel x64和Apple Silicon arm64，生成便携压缩包及对应SHA-256文件；全部构建成功后才创建GitHub Release。手动触发只保存7天的Workflow Artifact，不创建Release。
 - macOS产物使用adhoc签名，便于Apple Silicon加载；没有Apple Developer证书和公证，首次从网络下载后仍可能需要用户在系统“隐私与安全性”中允许打开。
 - GitHub产物用于跨平台构建和原生验收，不能替代目标Mac和Linux发行版上的实际运行、Keychain/Secret Service、文件对话框及SSH/SFTP验证。

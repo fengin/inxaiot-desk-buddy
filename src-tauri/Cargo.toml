@@ -1,6 +1,6 @@
 [package]
 name = "inxaiot-desk-buddy"
-version = "0.1.0"
+version = "0.1.1"
 description = "INX 实施工作台"
 authors = ["INX"]
 edition = "2024"

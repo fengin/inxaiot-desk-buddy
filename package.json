@@ -1,6 +1,6 @@
 {
   "name": "inxaiot-desk-buddy",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "INX 实施工作台桌面应用",
   "type": "module",

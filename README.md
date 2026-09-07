@@ -50,6 +50,13 @@ pnpm tauri dev
 - 发布参数接受已有RSA、Ed25519、ECDSA私钥内容，继续加密存入工作台库；RSA认证使用SHA-2，无需追加新公钥。
 - SSH主机指纹在预检和执行时自动记录，变化只告警并继续，不需要逐台采集或确认；账号认证失败等其他错误仍正常阻断。
 
+### GitHub多平台发布
+
+- 推送`v*.*.*`标签会触发`.github/workflows/portable-release.yml`；标签必须与`package.json`、Cargo和Tauri中的应用版本一致，例如当前版本使用`v0.1.0`。
+- Actions并行构建Windows x64、Linux x64、macOS Intel x64和Apple Silicon arm64，生成便携压缩包及对应SHA-256文件；全部构建成功后才创建GitHub Release。手动触发只保存7天的Workflow Artifact，不创建Release。
+- macOS产物使用adhoc签名，便于Apple Silicon加载；没有Apple Developer证书和公证，首次从网络下载后仍可能需要用户在系统“隐私与安全性”中允许打开。
+- GitHub产物用于跨平台构建和原生验收，不能替代目标Mac和Linux发行版上的实际运行、Keychain/Secret Service、文件对话框及SSH/SFTP验证。
+
 ## 质量检查
 
 一体机列表的“最近服务检查”只读取当前电脑的真实检查快照；历史记录不因超过15分钟变成告警。详情中的“检查服务”会执行只读SSH采集并在本机任务与日志中反馈，普通刷新不会访问一体机。平台共享已部署版本，实际状态、镜像ID、检查时间和失败原因保存在本机`local_aio_service_check`，换电脑后按需重新检查。部署健康步骤复用同次观测，单服升级不会更新其他服务检查时间。

@@ -1,0 +1,268 @@
+name: 构建多平台便携包
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: 校验发布版本
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 校验应用版本与Tag
+        run: node scripts/check-release-version.mjs "${{ github.ref_type == 'tag' && github.ref_name || '' }}"
+
+  windows:
+    name: Windows x64便携包
+    runs-on: windows-latest
+    needs: validate
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 构建 Windows Release
+        run: pnpm build:windows
+
+      - name: 校验Windows GUI子系统
+        run: |
+          $binary = "src-tauri/target/release/inxaiot-desk-buddy.exe"
+          $bytes = [System.IO.File]::ReadAllBytes($binary)
+          $peOffset = [System.BitConverter]::ToInt32($bytes, 0x3c)
+          $subsystem = [System.BitConverter]::ToUInt16($bytes, $peOffset + 24 + 68)
+          if ($subsystem -ne 2) {
+            throw "Windows Release不是GUI子系统：$subsystem"
+          }
+
+      - name: 打包Windows便携包
+        run: |
+          $version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "manual-${{ github.run_number }}" }
+          $packageName = "INX-desk-buddy-windows-x64-portable-$version"
+          $packageDir = Join-Path "release" $packageName
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          Copy-Item "src-tauri/target/release/inxaiot-desk-buddy.exe" (Join-Path $packageDir "INX实施工作台.exe") -Force
+          Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath "release/$packageName.zip" -Force
+          $hash = (Get-FileHash -Algorithm SHA256 "release/$packageName.zip").Hash.ToLowerInvariant()
+          "$hash  $packageName.zip" | Out-File -Encoding ascii "release/$packageName.zip.sha256"
+
+      - name: 保存Windows产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: |
+            release/*.zip
+            release/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  macos:
+    name: macOS便携包（${{ matrix.arch }}）
+    runs-on: ${{ matrix.runner }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: macos-15-intel
+            expected_arch: x86_64
+          - arch: arm64
+            runner: macos-15
+            expected_arch: arm64
+    env:
+      APPLE_SIGNING_IDENTITY: "-"
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 构建macOS App
+        run: pnpm build:macos
+
+      - name: 校验并打包macOS便携包
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            version="manual-${GITHUB_RUN_NUMBER}"
+          fi
+          app_path="$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          if [ -z "$app_path" ]; then
+            echo "::error::未找到macOS .app产物"
+            exit 1
+          fi
+          binary_path="$app_path/Contents/MacOS/inxaiot-desk-buddy"
+          file "$binary_path" | grep -q "${{ matrix.expected_arch }}"
+          codesign --verify --deep --strict "$app_path"
+          package_name="INX-desk-buddy-macos-${{ matrix.arch }}-portable-${version}"
+          mkdir -p release
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "release/${package_name}.zip"
+          (cd release && shasum -a 256 "${package_name}.zip" > "${package_name}.zip.sha256")
+
+      - name: 保存macOS产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            release/*.zip
+            release/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  linux:
+    name: Linux x64便携包
+    runs-on: ubuntu-22.04
+    needs: validate
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装Tauri Linux依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 构建Linux Release
+        run: pnpm build:linux
+
+      - name: 校验并打包Linux便携包
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            version="manual-${GITHUB_RUN_NUMBER}"
+          fi
+          binary="src-tauri/target/release/inxaiot-desk-buddy"
+          file "$binary" | grep -q 'ELF 64-bit.*x86-64'
+          package_name="INX-desk-buddy-linux-x64-portable-${version}"
+          package_dir="release/${package_name}"
+          mkdir -p "$package_dir"
+          install -m 755 "$binary" "$package_dir/inxaiot-desk-buddy"
+          tar -czf "release/${package_name}.tar.gz" -C release "$package_name"
+          (cd release && sha256sum "${package_name}.tar.gz" > "${package_name}.tar.gz.sha256")
+
+      - name: 保存Linux产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: |
+            release/*.tar.gz
+            release/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: 发布GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - windows
+      - macos
+      - linux
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: 汇总多平台产物
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: 创建GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: INX实施工作台 ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: release-assets/*

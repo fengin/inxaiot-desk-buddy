@@ -118,6 +118,17 @@ fn distribution_has_explicit_windows_macos_and_linux_entries() {
     assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 256);
     let icns = std::fs::read(root.join("src-tauri/icons/icon.icns")).unwrap();
     assert_eq!(&icns[..4], b"icns");
+    let workflow =
+        std::fs::read_to_string(root.join(".github/workflows/portable-release.yml")).unwrap();
+    assert!(workflow.contains("- \"v*.*.*\""));
+    assert!(workflow.contains("runner: macos-15-intel"));
+    assert!(workflow.contains("runner: macos-15"));
+    assert!(workflow.contains("runs-on: ubuntu-22.04"));
+    assert!(workflow.contains("runs-on: windows-latest"));
+    assert!(workflow.contains("APPLE_SIGNING_IDENTITY: \"-\""));
+    assert!(workflow.contains("pnpm install --frozen-lockfile"));
+    assert!(workflow.contains("softprops/action-gh-release@v2"));
+    assert!(root.join("scripts/check-release-version.mjs").is_file());
 }
 
 #[test]

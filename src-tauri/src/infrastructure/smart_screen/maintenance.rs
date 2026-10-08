@@ -354,7 +354,7 @@ pub async fn submit(
 ) -> AppResult<String> {
     crate::application::smart_screen::operations::validate_input(&input)?;
     let _guard = tasks::submission_lock().lock().await;
-    let (mut plan, hash) = task_data::read_plan(state.local_store.pool(), project, preview).await?;
+    let (mut plan, hash) = task_data::read_preflight_plan(state.local_store.pool(), project, preview).await?;
     let mut comparable = input.clone();
     comparable.target_ids = plan.input.target_ids.clone();
     comparable.expected_targets = plan.input.expected_targets.clone();

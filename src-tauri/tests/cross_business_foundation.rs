@@ -405,14 +405,6 @@ async fn second_business_checks_mixed_targets_once_and_executes_in_shared_queue(
         .project
         .id;
     checked(&state, &project, "check-1").await;
-    assert_eq!(
-        state
-            .task_repository
-            .clear_terminal_for_project(&project)
-            .await
-            .unwrap(),
-        0
-    );
     let activity =
         inxaiot_desk_buddy_lib::interface::commands::task_activity::query_activity_tasks(
             &state, &project, 20,
@@ -420,7 +412,7 @@ async fn second_business_checks_mixed_targets_once_and_executes_in_shared_queue(
         .await
         .unwrap();
     assert_eq!(activity[0].target_count, 2);
-    assert!(!activity[0].clearable);
+    assert!(activity[0].clearable);
     let input = task(&state, &project, "execute-1", "inspect");
     let mut wrong_domain = input.clone();
     wrong_domain.domain_type = "aio".into();

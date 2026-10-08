@@ -37,7 +37,7 @@ const clearActionTitle = computed(() =>
 );
 const clearConfirmation = computed(() =>
   activity.panelTab === "tasks"
-    ? "清空已结束的任务记录？正在执行和等待执行的任务不会受影响。"
+    ? "清空已结束的任务和检查记录？未提交的操作需重新检查；排队、执行中和结果待核实的任务会保留。"
     : "清空当前任务的全部日志内容？此操作不可恢复。"
 );
 
@@ -166,7 +166,7 @@ watch(
               <time class="log-time">{{ formatDisplayDateTime(entry.timestamp) }}</time><span class="log-level">{{ entry.level }}</span><span class="log-source">{{ entry.source }}</span><span>{{ entry.message }}</span>
             </div>
           </div>
-          <n-empty v-else :description="activity.error || '当前任务暂无日志'" />
+          <n-empty v-else :description="activity.error || (activity.selectedTask ? '当前任务暂无日志' : '暂无可查看日志的任务')" />
       </div>
     </div>
   </section>

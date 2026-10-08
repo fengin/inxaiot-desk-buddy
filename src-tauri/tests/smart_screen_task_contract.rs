@@ -96,6 +96,55 @@ async fn changed_address_and_cross_project_preview_are_rejected() {
 }
 
 #[tokio::test]
+async fn cleared_screen_preview_cannot_execute_and_recheck_creates_an_independent_task() {
+    use inxaiot_desk_buddy_lib::core::error::AppError;
+    use inxaiot_desk_buddy_lib::domain::common::task::TaskState;
+    use inxaiot_desk_buddy_lib::infrastructure::smart_screen::{maintenance, previews};
+    use inxaiot_desk_buddy_lib::interface::commands::task_activity::query_activity_tasks;
+
+    let temp = tempfile::tempdir().unwrap();
+    let state = support::state_at(temp.path(), false).await;
+    let project = Stage75Adapter::new(&state)
+        .create_project(support::local_input()).await.unwrap().project.id;
+    let repo = ScreenRepository::new(state.local_store.pool().clone());
+    let screen = repo.save_local(&project, &fields("192.0.2.8"), None, None).await.unwrap();
+    let request = input(vec![screen]);
+    let checked = tasks::preflight(&state, &project, request.clone()).await.unwrap();
+    let (plan, hash) = task_data::read_plan(state.local_store.pool(), &project, &checked.id).await.unwrap();
+    let activity = query_activity_tasks(&state, &project, 20).await.unwrap();
+    assert!(activity.iter().find(|task| task.id == checked.id).unwrap().clearable);
+
+    assert_eq!(state.task_repository.clear_terminal_for_project(&project).await.unwrap(), 1);
+    let error = tasks::submit(&state, &project, &checked.id, request.clone()).await.unwrap_err();
+    assert!(matches!(error, AppError::NotFound(message) if message == "检查记录已清空，请重新检查后再执行"));
+    let mut maintenance_request = request.clone();
+    maintenance_request.action = "reboot".into();
+    let error = maintenance::submit(&state, &project, &checked.id, maintenance_request).await.unwrap_err();
+    assert!(matches!(error, AppError::NotFound(message) if message == "检查记录已清空，请重新检查后再执行"));
+    assert!(repo.snapshot(&project).await.unwrap().observations.is_empty());
+    assert!(state.task_repository.list_recent(&project, 20).await.unwrap().is_empty());
+
+    // 模拟页面已读出检查快照、提交前检查才被清理的次序。内存中的旧快照不能绕过事务校验。
+    let error = previews::queue_with_id(
+        &state, &checked.id, "screen_preflight", &hash, &plan, "stale-screen-execution".into(),
+    ).await.unwrap_err();
+    assert!(matches!(error, AppError::NotFound(message) if message == "检查记录已清空，请重新检查后再执行"));
+    assert!(state.task_repository.get("stale-screen-execution").await.is_err());
+    let orphan_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM local_screen_task_data WHERE local_project_id=?")
+        .bind(&project).fetch_one(state.local_store.pool()).await.unwrap();
+    assert_eq!(orphan_count, 0);
+
+    let checked_again = tasks::preflight(&state, &project, request.clone()).await.unwrap();
+    let execution = tasks::submit(&state, &project, &checked_again.id, request).await.unwrap();
+    assert_eq!(state.task_repository.clear_terminal_for_project(&project).await.unwrap(), 1);
+    assert!(state.task_repository.get(&checked_again.id).await.is_err());
+    assert_eq!(state.task_repository.get(&execution).await.unwrap().state, TaskState::Queued);
+    assert_eq!(task_data::read_plan(state.local_store.pool(), &project, &execution).await.unwrap().0.targets.len(), 1);
+    assert!(repo.snapshot(&project).await.unwrap().observations.is_empty());
+    support::close(state).await;
+}
+
+#[tokio::test]
 async fn selected_subset_consumes_original_preview_only_once() {
     let temp = tempfile::tempdir().unwrap();
     let state = support::state_at(temp.path(), false).await;
@@ -359,6 +408,7 @@ async fn cancelled_maintenance_batch_never_calls_devices_and_releases_local_guar
         created_at: inxaiot_desk_buddy_lib::infrastructure::local_sqlite::screen_repository::now(),
         detail: serde_json::to_value(maintenance::MaintenancePlan {
             apk: None,
+            app_config: None,
             observations: Default::default(),
             request_ids: Default::default(),
         })

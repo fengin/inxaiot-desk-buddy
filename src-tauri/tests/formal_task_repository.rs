@@ -1,9 +1,11 @@
 use inxaiot_desk_buddy_lib::core::error::AppError;
 use inxaiot_desk_buddy_lib::domain::common::task::{StepState, TargetState, TaskState};
+use inxaiot_desk_buddy_lib::formal::config::AppPaths;
 use inxaiot_desk_buddy_lib::formal::local_store::LocalStore;
 use inxaiot_desk_buddy_lib::infrastructure::local_sqlite::task_repository::{
     CreateTask, TargetUpdate, TaskRepository, TaskStepWrite,
 };
+use inxaiot_desk_buddy_lib::infrastructure::task_data_lifecycle::TaskDataLifecycle;
 
 async fn insert_project(store: &LocalStore, id: &str) {
     sqlx::query(
@@ -667,7 +669,251 @@ async fn clearing_terminal_tasks_keeps_retryable_active_and_other_project_record
 }
 
 #[tokio::test]
-async fn clearing_terminal_tasks_preserves_unsubmitted_successful_preflight_until_consumed() {
+async fn clearing_screen_task_records_keeps_logs_and_protected_project_records() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let paths = AppPaths::from_data_dir(temp.path()).expect("app paths");
+    paths.ensure().expect("ensure app paths");
+    let store = LocalStore::open(&paths.local_db)
+        .await
+        .expect("local store");
+    insert_project(&store, "project-a").await;
+    insert_project(&store, "project-b").await;
+    let repository = TaskRepository::new(store.pool().clone());
+    let fixtures = [
+        ("screen-completed", "project-a", TaskState::Succeeded),
+        ("screen-running", "project-a", TaskState::Running),
+        ("screen-guarded", "project-a", TaskState::Failed),
+        (
+            "screen-finalizing",
+            "project-a",
+            TaskState::FinalizingFailed,
+        ),
+        ("screen-other-project", "project-b", TaskState::Succeeded),
+    ];
+    for (id, project, final_state) in fixtures {
+        let log = paths.project_task_log_path(project, id).expect("task log");
+        let mut input = task(id, project);
+        input.domain_type = "screen".into();
+        input.operation_type = "inspect".into();
+        input.payload_ref = None;
+        input.remote_operation_record_id = None;
+        input.targets = vec![("screen".into(), "screen-a".into())];
+        input.log_path = log.to_string_lossy().into_owned();
+        repository.create(input).await.expect("create screen task");
+        for (expected, next) in [
+            (TaskState::Draft, TaskState::Checking),
+            (TaskState::Checking, TaskState::Ready),
+            (TaskState::Ready, TaskState::Queued),
+            (TaskState::Queued, TaskState::Running),
+        ] {
+            repository
+                .transition(id, expected, next, None, None)
+                .await
+                .expect("advance screen task");
+        }
+        if final_state != TaskState::Running {
+            repository
+                .transition(id, TaskState::Running, final_state, None, None)
+                .await
+                .expect("finish screen task");
+        }
+        // 使用真实迁移后的屏任务表，验证公共清理会触发其关联清理。
+        sqlx::query("INSERT INTO local_screen_task_data(local_task_id,local_project_id,plan_json,plan_sha256,result_json,updated_at) VALUES(?,?,?,?,'{\"targets\":{},\"finished\":true}','1')")
+            .bind(id).bind(project).bind(format!("{{\"projectId\":\"{project}\"}}"))
+            .bind("a".repeat(64)).execute(store.pool()).await.expect("screen task data");
+        std::fs::create_dir_all(log.parent().expect("log parent")).expect("log directory");
+        std::fs::write(&log, format!("log for {id}")).expect("task log bytes");
+    }
+    repository
+        .protect_results("screen-guarded", "结果尚待核实")
+        .await
+        .expect("protect screen results");
+    succeeded_preflight(
+        &repository,
+        "unsubmitted-preflight",
+        "project-a",
+        &["A"],
+        &"b".repeat(64),
+    )
+    .await;
+    let preflight_log = paths
+        .project_task_log_path("project-a", "unsubmitted-preflight")
+        .expect("preflight log");
+    std::fs::write(&preflight_log, b"unsubmitted preflight log").expect("preflight log bytes");
+    sqlx::query("UPDATE local_task SET log_path=? WHERE id='unsubmitted-preflight'")
+        .bind(preflight_log.to_string_lossy().as_ref())
+        .execute(store.pool())
+        .await
+        .expect("preflight log path");
+
+    assert_eq!(
+        repository
+            .clear_terminal_for_project("project-a")
+            .await
+            .expect("clear finished task records"),
+        2
+    );
+    assert!(repository.get("screen-completed").await.is_err());
+    assert!(
+        repository
+            .targets("screen-completed")
+            .await
+            .expect("deleted screen targets")
+            .is_empty()
+    );
+    let removed_screen_data: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM local_screen_task_data WHERE local_task_id='screen-completed'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("deleted screen task data");
+    assert_eq!(removed_screen_data, 0);
+    for (id, project, expected_state) in fixtures {
+        assert_eq!(
+            std::fs::read(
+                paths
+                    .project_task_log_path(project, id)
+                    .expect("task log path")
+            )
+            .expect("preserved log file"),
+            format!("log for {id}").into_bytes()
+        );
+        if id != "screen-completed" {
+            assert_eq!(
+                repository
+                    .get(id)
+                    .await
+                    .expect("protected task remains")
+                    .state,
+                expected_state
+            );
+            let data_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM local_screen_task_data WHERE local_task_id=?",
+            )
+            .bind(id)
+            .fetch_one(store.pool())
+            .await
+            .expect("preserved screen task data");
+            assert_eq!(data_count, 1);
+        }
+    }
+    assert!(
+        repository
+            .results_protected("screen-guarded")
+            .await
+            .expect("result guard remains")
+    );
+    assert!(repository.get("unsubmitted-preflight").await.is_err());
+    assert_eq!(
+        std::fs::read(preflight_log).expect("preflight log remains"),
+        b"unsubmitted preflight log"
+    );
+    assert_eq!(
+        repository
+            .clear_terminal_for_project("project-a")
+            .await
+            .expect("repeat clearing"),
+        0
+    );
+    store.close().await;
+}
+
+#[tokio::test]
+async fn clearing_screen_task_log_preserves_task_snapshot_and_other_logs() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let paths = AppPaths::from_data_dir(temp.path()).expect("app paths");
+    paths.ensure().expect("ensure app paths");
+    let store = LocalStore::open(&paths.local_db)
+        .await
+        .expect("local store");
+    insert_project(&store, "project-a").await;
+    let repository = TaskRepository::new(store.pool().clone());
+    let task_id = "screen-log-only";
+    let log = paths
+        .project_task_log_path("project-a", task_id)
+        .expect("task log path");
+    let mut input = task(task_id, "project-a");
+    input.domain_type = "screen".into();
+    input.operation_type = "inspect".into();
+    input.targets = vec![("screen".into(), "screen-a".into())];
+    input.log_path = log.to_string_lossy().into_owned();
+    repository.create(input).await.expect("create screen task");
+    for (expected, next) in [
+        (TaskState::Draft, TaskState::Checking),
+        (TaskState::Checking, TaskState::Ready),
+        (TaskState::Ready, TaskState::Queued),
+        (TaskState::Queued, TaskState::Running),
+        (TaskState::Running, TaskState::Succeeded),
+    ] {
+        repository
+            .transition(task_id, expected, next, None, None)
+            .await
+            .expect("finish screen task");
+    }
+    let plan = r#"{"projectId":"project-a","screenIds":["screen-a"]}"#;
+    let results = r#"{"targets":{"screen-a":{"message":"检查完成"}},"finished":true}"#;
+    sqlx::query("INSERT INTO local_screen_task_data(local_task_id,local_project_id,plan_json,plan_sha256,result_json,updated_at) VALUES(?,'project-a',?,?,?,'1')")
+        .bind(task_id).bind(plan).bind("c".repeat(64)).bind(results).execute(store.pool()).await.expect("screen task snapshot");
+    std::fs::create_dir_all(log.parent().expect("log parent")).expect("log directory");
+    std::fs::write(&log, b"selected screen task log").expect("selected log");
+    let other_log = paths
+        .project_task_log_path("project-a", "other-task")
+        .expect("other log path");
+    std::fs::write(&other_log, b"other task log").expect("other log");
+    let lifecycle = TaskDataLifecycle::new(&paths);
+    lifecycle
+        .finalize_task("project-a", task_id, TaskState::Succeeded)
+        .expect("record log retention");
+    let retention = std::path::PathBuf::from(format!("{}.retention.json", log.to_string_lossy()));
+    assert!(retention.is_file());
+    let task_before = repository
+        .get(task_id)
+        .await
+        .expect("task before clear log");
+
+    lifecycle
+        .clear_task_log("project-a", task_id)
+        .expect("clear selected task log");
+    assert!(!log.exists());
+    assert!(!retention.exists());
+    let task_after = repository
+        .get(task_id)
+        .await
+        .expect("task remains after log clearing");
+    assert_eq!(task_after.state, task_before.state);
+    assert_eq!(task_after.updated_at, task_before.updated_at);
+    assert_eq!(task_after.sequence, task_before.sequence);
+    assert_eq!(
+        repository
+            .targets(task_id)
+            .await
+            .expect("task targets remain")
+            .len(),
+        1
+    );
+    let saved_data: (String, String, String) = sqlx::query_as("SELECT plan_json,plan_sha256,result_json FROM local_screen_task_data WHERE local_task_id=?")
+        .bind(task_id).fetch_one(store.pool()).await.expect("screen snapshot remains");
+    assert_eq!(saved_data, (plan.into(), "c".repeat(64), results.into()));
+    assert_eq!(
+        std::fs::read(other_log).expect("other log remains"),
+        b"other task log"
+    );
+    lifecycle
+        .clear_task_log("project-a", task_id)
+        .expect("repeat log clear");
+    assert_eq!(
+        repository
+            .list_recent("project-a", 20)
+            .await
+            .expect("tasks remain listed")
+            .len(),
+        1
+    );
+    store.close().await;
+}
+
+#[tokio::test]
+async fn clearing_preflight_requires_recheck_but_preserves_already_queued_execution() {
     let temp = tempfile::tempdir().expect("temporary app data");
     let store = LocalStore::open(temp.path().join("local.db"))
         .await
@@ -688,23 +934,43 @@ async fn clearing_terminal_tasks_preserves_unsubmitted_successful_preflight_unti
         repository
             .clear_terminal_for_project("project-a")
             .await
-            .expect("preserve pending preflight"),
-        0
+            .expect("clear completed preflight"),
+        1
     );
-    assert_eq!(
-        repository
-            .get("preflight-pending-submission")
-            .await
-            .expect("unsubmitted preflight")
-            .state,
-        TaskState::Succeeded
-    );
-
-    let mut deployment = task("deployment-from-preserved-preflight", "project-a");
+    let mut deployment = task("deployment-after-recheck", "project-a");
     deployment.remote_operation_record_id = None;
-    repository
+    let error = repository
         .create_queued_from_preflight(
             "preflight-pending-submission",
+            "deployment_preflight",
+            &snapshot_sha256,
+            deployment.clone(),
+        )
+        .await
+        .expect_err("cleared preflight cannot authorize execution");
+    assert!(
+        matches!(error, AppError::NotFound(message) if message == "检查记录已清空，请重新检查后再执行")
+    );
+    assert!(repository.get(&deployment.id).await.is_err());
+    assert!(
+        repository
+            .targets(&deployment.id)
+            .await
+            .expect("no execution targets")
+            .is_empty()
+    );
+
+    succeeded_preflight(
+        &repository,
+        "preflight-rechecked",
+        "project-a",
+        &["A", "B"],
+        &snapshot_sha256,
+    )
+    .await;
+    repository
+        .create_queued_from_preflight(
+            "preflight-rechecked",
             "deployment_preflight",
             &snapshot_sha256,
             deployment,
@@ -718,15 +984,10 @@ async fn clearing_terminal_tasks_preserves_unsubmitted_successful_preflight_unti
             .expect("clear consumed preflight"),
         1
     );
-    assert!(
-        repository
-            .get("preflight-pending-submission")
-            .await
-            .is_err()
-    );
+    assert!(repository.get("preflight-rechecked").await.is_err());
     assert_eq!(
         repository
-            .get("deployment-from-preserved-preflight")
+            .get("deployment-after-recheck")
             .await
             .expect("queued deployment remains")
             .state,

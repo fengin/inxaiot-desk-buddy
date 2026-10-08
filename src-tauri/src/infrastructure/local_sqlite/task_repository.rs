@@ -65,6 +65,7 @@ pub struct TargetUpdate {
 const PREFLIGHT_COMMON_RESOURCE_TYPE: &str = "preflight_internal";
 const PREFLIGHT_COMMON_RESOURCE_KEY: &str = "common";
 const PREFLIGHT_PASSED_CODE: &str = "PREFLIGHT_TARGET_PASSED";
+pub const CLEARED_PREFLIGHT_MESSAGE: &str = "检查记录已清空，请重新检查后再执行";
 const PREFLIGHT_SUBMITTED_CODE: &str = "PREFLIGHT_SUBMITTED";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -337,7 +338,7 @@ impl TaskRepository {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|error| AppError::database("读取操作检查任务", &error))?
-        .ok_or_else(|| AppError::NotFound(format!("操作检查任务不存在：{preflight_task_id}")))?;
+        .ok_or_else(|| AppError::NotFound(CLEARED_PREFLIGHT_MESSAGE.into()))?;
         let preflight_project: String = get(&preflight, "local_project_id", "读取操作检查项目")?;
         let preflight_operation: String = get(&preflight, "operation_type", "读取操作检查类型")?;
         let preflight_state: String = get(&preflight, "state", "读取操作检查状态")?;
@@ -599,14 +600,7 @@ impl TaskRepository {
         let result = sqlx::query(
             "DELETE FROM local_task WHERE local_project_id = ? AND state IN \
              ('cancelled', 'succeeded', 'partially_succeeded', 'failed', 'interrupted') \
-             AND NOT EXISTS (SELECT 1 FROM local_task_result_guard g WHERE g.local_task_id=local_task.id) \
-             AND NOT (state = 'succeeded' \
-             AND EXISTS (SELECT 1 FROM local_task_target target \
-             WHERE target.local_task_id = local_task.id \
-             AND target.resource_type = 'preflight_internal' \
-             AND target.resource_key = 'common' \
-             AND target.state = 'succeeded' \
-             AND target.message_code = 'PREFLIGHT_TARGET_PASSED'))",
+             AND NOT EXISTS (SELECT 1 FROM local_task_result_guard g WHERE g.local_task_id=local_task.id)",
         )
         .bind(local_project_id)
         .execute(&self.pool)

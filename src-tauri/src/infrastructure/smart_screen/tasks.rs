@@ -186,7 +186,7 @@ pub async fn submit(
         .require_project_access(project, ProjectAccessRequirement::Configured)
         .await?;
     let (mut plan, hash) =
-        task_data::read_plan(state.local_store.pool(), project, preflight_id).await?;
+        task_data::read_preflight_plan(state.local_store.pool(), project, preflight_id).await?;
     let mut comparable = input.clone();
     comparable.target_ids = plan.input.target_ids.clone();
     comparable.expected_targets = plan.input.expected_targets.clone();
@@ -213,10 +213,14 @@ pub async fn submit(
     let id = uuid::Uuid::now_v7().to_string();
     task_data::save_plan(state.local_store.pool(), &id, &plan).await?;
     let create = create_task(state, &id, &plan, &plan.input.action)?;
-    state
+    if let Err(error) = state
         .task_repository
         .create_queued_from_preflight_selection(preflight_id, PREFLIGHT, &hash, create)
-        .await?;
+        .await
+    {
+        let _ = task_data::discard_unqueued_plan(state.local_store.pool(), project, &id).await;
+        return Err(error);
+    }
     let envelope = TaskEnvelope {
         local_task_id: id.clone(),
         local_project_id: project.into(),

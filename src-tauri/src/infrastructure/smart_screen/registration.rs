@@ -391,7 +391,7 @@ pub async fn submit(
     let context = write_context::open(state, project).await?;
     let _guard = tasks::submission_lock().lock().await;
     let (mut plan, hash) =
-        task_data::read_plan(state.local_store.pool(), project, &input.preview_id).await?;
+        task_data::read_preflight_plan(state.local_store.pool(), project, &input.preview_id).await?;
     if plan.input.action != "register"
         || plan.business_project_id.as_deref() != Some(&context.business)
         || plan.data_source_id.as_deref() != Some(&context.source)

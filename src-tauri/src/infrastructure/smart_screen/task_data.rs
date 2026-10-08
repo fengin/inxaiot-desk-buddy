@@ -39,6 +39,25 @@ pub async fn read_plan(
     }
     Ok((plan, hash))
 }
+pub async fn read_preflight_plan(
+    pool: &SqlitePool,
+    project: &str,
+    id: &str,
+) -> AppResult<(ScreenPlan, String)> {
+    read_plan(pool, project, id).await.map_err(|error| match error {
+        AppError::NotFound(_) => AppError::NotFound(
+            crate::infrastructure::local_sqlite::task_repository::CLEARED_PREFLIGHT_MESSAGE.into(),
+        ),
+        error => error,
+    })
+}
+
+pub async fn discard_unqueued_plan(pool: &SqlitePool, project: &str, id: &str) -> AppResult<()> {
+    sqlx::query("DELETE FROM local_screen_task_data WHERE local_project_id=? AND local_task_id=? AND NOT EXISTS(SELECT 1 FROM local_task WHERE id=?)")
+        .bind(project).bind(id).bind(id).execute(pool).await.map_err(db)?;
+    Ok(())
+}
+
 pub async fn read_results(pool: &SqlitePool, project: &str, id: &str) -> AppResult<ScreenResults> {
     let json:String=sqlx::query_scalar("SELECT result_json FROM local_screen_task_data WHERE local_project_id=? AND local_task_id=?").bind(project).bind(id).fetch_one(pool).await.map_err(db)?;
     serde_json::from_str(&json).map_err(|_| AppError::Conflict("智能屏任务结果格式异常".into()))

@@ -1,14 +1,86 @@
 import { createPinia, setActivePinia } from "pinia";
 import { flushPromises, mount } from "@vue/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NMessageProvider } from "naive-ui";
 import { h } from "vue";
 
 import ActivityPanel from "@/shell/ActivityPanel.vue";
 import { useActivityStore } from "@/stores/activity";
 import type { ActivityTask } from "@/shared/model/activity";
+import { FixtureActivityAdapter } from "@/dev-fixtures/activityFixtureAdapter";
+import { FixtureWorkbenchAdapter } from "@/dev-fixtures/workbenchFixtureAdapter";
+import { configureActivityAdapter } from "@/shared/api/activityAdapter";
+import { configureWorkbenchAdapter } from "@/shared/api/workbenchAdapter";
+
+async function mountClearPanel() {
+  const adapter = new FixtureActivityAdapter();
+  configureActivityAdapter(adapter);
+  configureWorkbenchAdapter(new FixtureWorkbenchAdapter());
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  const activity = useActivityStore();
+  activity.openPanel("logs");
+  const wrapper = mount(
+    { render: () => h(NMessageProvider, () => h(ActivityPanel)) },
+    { attachTo: document.body, global: { plugins: [pinia] } }
+  );
+  await flushPromises();
+  return { adapter, activity, wrapper };
+}
+
+async function clickClearConfirmation() {
+  let button: HTMLButtonElement | undefined;
+  await vi.waitFor(() => {
+    button = [...document.body.querySelectorAll("button")].find(item => item.textContent?.trim() === "确认清空");
+    expect(button).toBeDefined();
+  });
+  button!.click();
+  await flushPromises();
+}
 
 describe("activity panel", () => {
+  beforeEach(() => {
+    configureActivityAdapter(new FixtureActivityAdapter());
+    configureWorkbenchAdapter(new FixtureWorkbenchAdapter());
+  });
+
+  it("从日志切回任务后，确认清空只删除任务记录，不调用清日志接口", async () => {
+    const { adapter, activity, wrapper } = await mountClearPanel();
+    const clearTasks = vi.spyOn(adapter, "clearFinishedTasks");
+    const clearLogs = vi.spyOn(adapter, "clearTaskLogs");
+    const taskId = activity.selectedTaskId;
+    try {
+      expect(activity.logs).toHaveLength(3);
+      await wrapper.get(".activity-panel__title button:first-of-type").trigger("click");
+      await wrapper.get("[title='清空已结束任务记录']").trigger("click");
+      await clickClearConfirmation();
+      expect(clearTasks).toHaveBeenCalledExactlyOnceWith("project-shenzhen-bay");
+      expect(clearLogs).not.toHaveBeenCalled();
+      expect(activity.tasks).toEqual([]);
+      expect((await adapter.listLogs(taskId, [], null, 0, 100)).items).toHaveLength(3);
+      await wrapper.get(".activity-panel__title button:nth-of-type(2)").trigger("click");
+      expect(wrapper.text()).toContain("暂无可查看日志的任务");
+    } finally { wrapper.unmount(); }
+  });
+
+  it("从任务切回日志后，确认清空只删除选中任务的日志，保留任务记录", async () => {
+    const { adapter, activity, wrapper } = await mountClearPanel();
+    const clearTasks = vi.spyOn(adapter, "clearFinishedTasks");
+    const clearLogs = vi.spyOn(adapter, "clearTaskLogs");
+    const taskId = activity.selectedTaskId;
+    try {
+      await wrapper.get(".activity-panel__title button:first-of-type").trigger("click");
+      await wrapper.get(".activity-panel__title button:nth-of-type(2)").trigger("click");
+      await wrapper.get("[title='清空当前任务日志']").trigger("click");
+      await clickClearConfirmation();
+      expect(clearTasks).not.toHaveBeenCalled();
+      expect(clearLogs).toHaveBeenCalledExactlyOnceWith(taskId);
+      expect(activity.tasks.map(task => task.id)).toEqual([taskId]);
+      expect(activity.logs).toEqual([]);
+      expect(wrapper.text()).toContain("当前任务暂无日志");
+    } finally { wrapper.unmount(); }
+  });
+
   it("renders the shared task DTO and switches to filtered local logs", async () => {
     const pinia = createPinia();
     setActivePinia(pinia);

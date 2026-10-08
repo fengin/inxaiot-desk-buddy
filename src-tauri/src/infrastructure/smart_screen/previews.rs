@@ -85,10 +85,14 @@ pub async fn queue_with_id(
     super::takeover::before_submit(state, plan).await?;
     task_data::save_plan(state.local_store.pool(), &id, plan).await?;
     let input = tasks::create_task(state, &id, plan, &plan.input.action)?;
-    state
+    if let Err(error) = state
         .task_repository
         .create_queued_from_preflight_selection(preview, kind, hash, input)
-        .await?;
+        .await
+    {
+        let _ = task_data::discard_unqueued_plan(state.local_store.pool(), &plan.project_id, &id).await;
+        return Err(error);
+    }
     if !crate::domain::smart_screen::operation::READ_ACTIONS.contains(&plan.input.action.as_str()) {
         if let Err(error) = state
             .task_repository

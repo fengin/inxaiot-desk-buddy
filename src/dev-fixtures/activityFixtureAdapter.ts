@@ -9,7 +9,7 @@ function screenActivity(task: ScreenTask): ActivityTask {
   const completed = task.targets.filter((t) => !["queued", "running"].includes(t.state)).length;
   return {
     id: task.id, projectId: task.projectId, domainType: "screen", operationType: task.action,
-    name: `${screenActionLabel(task.action)} · 原型`, state: task.state === "needs_review" ? "interrupted" : task.state,
+    name: `${screenActionLabel(task.action)} · 原型`, state: task.state === "needs_review" ? "finalizing_failed" : task.state,
     stage: task.state === "needs_review" ? "等待结果核实" : "模拟屏端操作", targetCount: task.targets.length,
     completedCount: completed, progress: task.targets.length ? Math.round(task.targets.reduce((sum, t) => sum + (t.state === "cancelled" ? 100 : t.progress), 0) / task.targets.length) : 0,
     updatedAt: task.updatedAt, cancellable: task.state === "running"
@@ -17,6 +17,7 @@ function screenActivity(task: ScreenTask): ActivityTask {
 }
 
 const taskEventListeners = new Set<(event: TaskEventPayload) => void>();
+const terminalStates = new Set(["cancelled", "succeeded", "partially_succeeded", "failed", "interrupted"]);
 
 export function publishFixtureTaskEvent(event: TaskEventPayload) {
   for (const listener of taskEventListeners) listener(structuredClone(event));
@@ -61,7 +62,7 @@ export class FixtureActivityAdapter implements ActivityAdapter {
     const screenTasks = this.screen ? (await this.screen.load(projectId)).tasks.map(screenActivity) : [];
     for (const task of screenTasks) this.screenProjects.set(task.id, projectId);
     return structuredClone([...screenTasks.filter((task) => !this.hiddenScreenTasks.has(task.id)), ...this.tasks.filter((task) => task.projectId === projectId)].slice(0, limit))
-      .map((task) => ({ ...task, clearable: !(task.operationType === "deployment_preflight" && task.state === "succeeded") }));
+      .map((task) => ({ ...task, clearable: terminalStates.has(task.state) && task.clearable !== false }));
   }
   async listLogs(taskId: string, levels: Parameters<ActivityAdapter["listLogs"]>[1], keyword: string | null, offset: number, limit: number) {
     const normalized = keyword?.toLocaleLowerCase();
@@ -100,14 +101,13 @@ export class FixtureActivityAdapter implements ActivityAdapter {
     };
   }
   async clearFinishedTasks(projectId: string) {
-    const terminal = new Set(["cancelled", "succeeded", "partially_succeeded", "failed", "interrupted"]);
     const clearedIds = new Set(
-      this.tasks.filter((task) => task.projectId === projectId && terminal.has(task.state)).map((task) => task.id)
+      this.tasks.filter((task) => task.projectId === projectId && terminalStates.has(task.state) && task.clearable !== false).map((task) => task.id)
     );
     this.tasks = this.tasks.filter((task) => !clearedIds.has(task.id));
     let screenCount = 0;
     if (this.screen) for (const task of (await this.screen.load(projectId)).tasks) {
-      if (terminal.has(task.state) && !this.hiddenScreenTasks.has(task.id)) { this.hiddenScreenTasks.add(task.id); screenCount++; }
+      if (terminalStates.has(task.state) && !this.hiddenScreenTasks.has(task.id)) { this.hiddenScreenTasks.add(task.id); screenCount++; }
     }
     return clearedIds.size + screenCount;
   }

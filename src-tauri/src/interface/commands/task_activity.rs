@@ -379,15 +379,7 @@ async fn activity_task(
         .iter()
         .any(|target| target.resource_type == "preflight_internal");
     let results_protected=state.task_repository.results_protected(&task.id).await.map_err(CommandErrorDto::from)?;
-    let clearable = task.state.is_terminal()
-        && !results_protected
-        && !(task.state == TaskState::Succeeded
-            && targets.iter().any(|target| {
-                target.resource_type == "preflight_internal"
-                    && target.resource_key == "common"
-                    && target.state == TargetState::Succeeded
-                    && target.message_code.as_deref() == Some("PREFLIGHT_TARGET_PASSED")
-            }));
+    let clearable = task.state.is_terminal() && !results_protected;
     let stage = if is_preflight {
         match task.state {
             TaskState::Checking => "正在检查".into(),

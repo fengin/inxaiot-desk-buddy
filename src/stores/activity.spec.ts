@@ -333,7 +333,7 @@ describe("activity store", () => {
     activity.dispose();
   });
 
-  it("does not offer clearing when the only finished record is a successful deployment preflight", async () => {
+  it("does not offer clearing when the backend protects the only finished record", async () => {
     configureActivityAdapter(new FixtureActivityAdapter());
     const activity = useActivityStore();
     await activity.start("project-shenzhen-bay");
@@ -354,6 +354,28 @@ describe("activity store", () => {
     }];
 
     expect(activity.canClearFinishedTasks).toBe(false);
+    activity.dispose();
+  });
+
+  it("成功但未提交的检查记录可以单独清除，检查日志不被删除", async () => {
+    const adapter = new FixtureActivityAdapter();
+    configureActivityAdapter(adapter);
+    const activity = useActivityStore();
+    await activity.start("project-shenzhen-bay");
+    await activity.clearFinishedTasks();
+    publishFixtureTaskEvent({
+      eventId: "finished-preview-event", localTaskId: "finished-preview", localProjectId: "project-shenzhen-bay",
+      domainType: "aio", sequence: 1, resourceType: null, resourceKey: null, stage: "检查完成", status: "succeeded",
+      progressCurrent: 1, progressTotal: 1, level: "info", messageCode: "PREFLIGHT_SUCCEEDED",
+      messageParams: { taskName: "部署检查", targetCount: "1" }, message: "检查通过", timestamp: "2026-10-08T10:00:00Z"
+    });
+    await activity.refreshTasks();
+    expect(activity.tasks).toHaveLength(1);
+    expect(activity.tasks[0]).toMatchObject({ id: "finished-preview", clearable: true, state: "succeeded" });
+    expect(activity.canClearFinishedTasks).toBe(true);
+    expect(await activity.clearFinishedTasks()).toBe(1);
+    expect(activity.tasks).toEqual([]);
+    expect((await adapter.listLogs("finished-preview", [], null, 0, 100)).items).toHaveLength(1);
     activity.dispose();
   });
 

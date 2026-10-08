@@ -68,6 +68,25 @@ const PREFLIGHT_PASSED_CODE: &str = "PREFLIGHT_TARGET_PASSED";
 pub const CLEARED_PREFLIGHT_MESSAGE: &str = "检查记录已清空，请重新检查后再执行";
 const PREFLIGHT_SUBMITTED_CODE: &str = "PREFLIGHT_SUBMITTED";
 
+// 检查被实际执行任务消费后，活动面板只显示执行任务；仍保留检查记录供提交校验与追溯。
+// 非法或缺失的绑定不作为隐藏依据，待恢复结果也必须继续可见。
+const ACTIVITY_VISIBLE_SQL: &str = "NOT (local_task.state = 'succeeded' \
+    AND NOT EXISTS (SELECT 1 FROM local_task_result_guard guard WHERE guard.local_task_id = local_task.id) \
+    AND EXISTS (SELECT 1 FROM local_task_target checked JOIN local_task execution \
+      ON execution.id = json_extract(CASE WHEN json_valid(checked.message_params_json) \
+        THEN checked.message_params_json ELSE '{}' END, '$.submittedTaskId') \
+      AND execution.local_project_id = local_task.local_project_id \
+      AND execution.domain_type = local_task.domain_type AND execution.id != local_task.id \
+      WHERE checked.local_task_id = local_task.id AND checked.resource_type = 'preflight_internal' \
+        AND checked.resource_key = 'common' AND checked.state = 'succeeded' \
+        AND checked.message_code = 'PREFLIGHT_SUBMITTED' \
+        AND json_type(CASE WHEN json_valid(checked.message_params_json) \
+          THEN checked.message_params_json ELSE '{}' END, '$.submittedTaskId') = 'text'))";
+
+const CLEARABLE_TASK_SQL: &str = "local_project_id = ? AND state IN \
+    ('cancelled', 'succeeded', 'partially_succeeded', 'failed', 'interrupted') \
+    AND NOT EXISTS (SELECT 1 FROM local_task_result_guard g WHERE g.local_task_id = local_task.id)";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PreflightSnapshotBinding {
@@ -573,18 +592,37 @@ impl TaskRepository {
         local_project_id: &str,
         limit: u32,
     ) -> AppResult<Vec<TaskRecord>> {
+        self.list_recent_matching(local_project_id, limit, false).await
+    }
+
+    pub async fn list_recent_activity(
+        &self,
+        local_project_id: &str,
+        limit: u32,
+    ) -> AppResult<Vec<TaskRecord>> {
+        self.list_recent_matching(local_project_id, limit, true).await
+    }
+
+    async fn list_recent_matching(
+        &self,
+        local_project_id: &str,
+        limit: u32,
+        activity_only: bool,
+    ) -> AppResult<Vec<TaskRecord>> {
         if local_project_id.trim().is_empty() || limit == 0 || limit > 500 {
             return Err(AppError::InvalidConfig("任务列表查询参数无效".into()));
         }
-        let rows = sqlx::query(
+        let visibility = if activity_only { ACTIVITY_VISIBLE_SQL } else { "1 = 1" };
+        let query = format!(
             "SELECT id, local_project_id, remote_operation_record_id, domain_type, operation_type, \
              name, state, priority, batch_size, concurrency, payload_ref, sequence, log_path, \
              error_code, message, created_at, started_at, ended_at, updated_at \
-             FROM local_task WHERE local_project_id = ? \
+             FROM local_task WHERE local_project_id = ? AND {visibility} \
              ORDER BY CASE state WHEN 'running' THEN 0 WHEN 'cancelling' THEN 1 \
               WHEN 'queued' THEN 2 WHEN 'finalizing_failed' THEN 3 ELSE 4 END, \
               updated_at DESC, id DESC LIMIT ?",
-        )
+        );
+        let rows = sqlx::query(&query)
         .bind(local_project_id)
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
@@ -594,20 +632,37 @@ impl TaskRepository {
     }
 
     pub async fn clear_terminal_for_project(&self, local_project_id: &str) -> AppResult<u32> {
+        self.clear_terminal_counts(local_project_id).await.map(|(all, _)| all)
+    }
+
+    pub async fn clear_terminal_activity_for_project(&self, local_project_id: &str) -> AppResult<u32> {
+        self.clear_terminal_counts(local_project_id).await.map(|(_, visible)| visible)
+    }
+
+    async fn clear_terminal_counts(&self, local_project_id: &str) -> AppResult<(u32, u32)> {
         if local_project_id.trim().is_empty() {
             return Err(AppError::InvalidConfig("项目ID不能为空".into()));
         }
-        let result = sqlx::query(
-            "DELETE FROM local_task WHERE local_project_id = ? AND state IN \
-             ('cancelled', 'succeeded', 'partially_succeeded', 'failed', 'interrupted') \
-             AND NOT EXISTS (SELECT 1 FROM local_task_result_guard g WHERE g.local_task_id=local_task.id)",
-        )
-        .bind(local_project_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|error| AppError::database("清空已结束任务记录", &error))?;
-        u32::try_from(result.rows_affected())
-            .map_err(|_| AppError::InvalidConfig("已清空任务数量超出范围".into()))
+        // 计数前取得写锁，避免 WAL 读快照在并发进度更新后无法升级为写事务。
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await
+            .map_err(|error| AppError::database("开始清空已结束任务记录事务", &error))?;
+        let count_query = format!(
+            "SELECT COUNT(*) FROM local_task WHERE {CLEARABLE_TASK_SQL} AND {ACTIVITY_VISIBLE_SQL}"
+        );
+        let visible: i64 = sqlx::query_scalar(&count_query)
+            .bind(local_project_id).fetch_one(&mut *transaction).await
+            .map_err(|error| AppError::database("统计可见的已结束任务记录", &error))?;
+        let delete_query = format!("DELETE FROM local_task WHERE {CLEARABLE_TASK_SQL}");
+        let result = sqlx::query(&delete_query)
+            .bind(local_project_id).execute(&mut *transaction).await
+            .map_err(|error| AppError::database("清空已结束任务记录", &error))?;
+        let all = u32::try_from(result.rows_affected())
+            .map_err(|_| AppError::InvalidConfig("已清空任务数量超出范围".into()))?;
+        let visible = u32::try_from(visible)
+            .map_err(|_| AppError::InvalidConfig("已清空可见任务数量超出范围".into()))?;
+        transaction.commit().await
+            .map_err(|error| AppError::database("提交清空已结束任务记录事务", &error))?;
+        Ok((all, visible))
     }
 
     pub async fn list_artifact_cleanup_candidates(&self) -> AppResult<Vec<TaskRecord>> {

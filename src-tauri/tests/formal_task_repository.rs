@@ -913,6 +913,408 @@ async fn clearing_screen_task_log_preserves_task_snapshot_and_other_logs() {
 }
 
 #[tokio::test]
+async fn activity_filters_consumed_preflight_before_limit_without_removing_its_log() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let store = LocalStore::open(temp.path().join("local.db"))
+        .await
+        .expect("local store");
+    insert_project(&store, "project-a").await;
+    let repository = TaskRepository::new(store.pool().clone());
+    let hash = "e".repeat(64);
+    succeeded_preflight(
+        &repository,
+        "consumed-check",
+        "project-a",
+        &["A", "B"],
+        &hash,
+    )
+    .await;
+    let log = temp.path().join("aio-preflight.jsonl");
+    std::fs::write(&log, b"AIO preflight has a real log file").expect("preflight log");
+    sqlx::query("UPDATE local_task SET log_path=? WHERE id='consumed-check'")
+        .bind(log.to_string_lossy().as_ref())
+        .execute(store.pool())
+        .await
+        .expect("preflight log path");
+    let before = repository
+        .list_recent_activity("project-a", 20)
+        .await
+        .expect("unsubmitted activity");
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].id, "consumed-check");
+
+    repository
+        .create_queued_from_preflight(
+            "consumed-check",
+            "deployment_preflight",
+            &hash,
+            task("execution", "project-a"),
+        )
+        .await
+        .expect("queue checked execution");
+    repository
+        .transition(
+            "execution",
+            TaskState::Queued,
+            TaskState::Running,
+            None,
+            None,
+        )
+        .await
+        .expect("start execution");
+    repository
+        .transition(
+            "execution",
+            TaskState::Running,
+            TaskState::Succeeded,
+            None,
+            None,
+        )
+        .await
+        .expect("finish execution");
+    succeeded_preflight(
+        &repository,
+        "unsubmitted-check",
+        "project-a",
+        &["A", "B"],
+        &hash,
+    )
+    .await;
+    repository
+        .create(task("failed-check", "project-a"))
+        .await
+        .expect("create failed check");
+    repository
+        .transition(
+            "failed-check",
+            TaskState::Draft,
+            TaskState::Checking,
+            None,
+            None,
+        )
+        .await
+        .expect("start failed check");
+    repository
+        .transition(
+            "failed-check",
+            TaskState::Checking,
+            TaskState::Failed,
+            None,
+            None,
+        )
+        .await
+        .expect("finish failed check");
+    for (id, timestamp) in [
+        ("consumed-check", "9999"),
+        ("execution", "8888"),
+        ("failed-check", "7777"),
+        ("unsubmitted-check", "6666"),
+    ] {
+        sqlx::query("UPDATE local_task SET updated_at=? WHERE id=?")
+            .bind(timestamp)
+            .bind(id)
+            .execute(store.pool())
+            .await
+            .expect("deterministic order");
+    }
+    let raw = repository
+        .list_recent("project-a", 2)
+        .await
+        .expect("internal task list");
+    assert_eq!(
+        raw.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(),
+        ["consumed-check", "execution"]
+    );
+    let visible = repository
+        .list_recent_activity("project-a", 2)
+        .await
+        .expect("limited visible tasks");
+    assert_eq!(
+        visible
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        ["execution", "failed-check"]
+    );
+    let all_visible = repository
+        .list_recent_activity("project-a", 20)
+        .await
+        .expect("visible tasks");
+    assert_eq!(all_visible.len(), 3);
+    assert!(
+        all_visible
+            .iter()
+            .any(|task| task.id == "unsubmitted-check")
+    );
+    assert_eq!(
+        std::fs::read(&log).expect("preflight log preserved"),
+        b"AIO preflight has a real log file"
+    );
+    assert!(repository.get("consumed-check").await.is_ok());
+
+    repository
+        .protect_results("consumed-check", "检查结果待核实")
+        .await
+        .expect("protect check");
+    assert!(
+        repository
+            .list_recent_activity("project-a", 20)
+            .await
+            .expect("guarded activity")
+            .iter()
+            .any(|task| task.id == "consumed-check")
+    );
+    repository
+        .resolve_results("consumed-check")
+        .await
+        .expect("resolve check");
+    for binding in [
+        "not-json",
+        "{}",
+        r#"{"submittedTaskId":"missing-execution"}"#,
+        r#"{"submittedTaskId":123}"#,
+    ] {
+        sqlx::query("UPDATE local_task_target SET message_params_json=? WHERE local_task_id='consumed-check' AND resource_type='preflight_internal'")
+            .bind(binding).execute(store.pool()).await.expect("invalid binding fixture");
+        assert!(
+            repository
+                .list_recent_activity("project-a", 20)
+                .await
+                .expect("invalid bindings remain visible")
+                .iter()
+                .any(|task| task.id == "consumed-check")
+        );
+    }
+    store.close().await;
+}
+
+#[tokio::test]
+async fn activity_clear_counts_visible_tasks_but_deletes_consumed_checks_in_the_same_transaction() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let store = LocalStore::open(temp.path().join("local.db"))
+        .await
+        .expect("local store");
+    insert_project(&store, "project-a").await;
+    insert_project(&store, "project-b").await;
+    let repository = TaskRepository::new(store.pool().clone());
+    let hash = "f".repeat(64);
+    succeeded_preflight(&repository, "hidden-check", "project-a", &["A", "B"], &hash).await;
+    repository
+        .create_queued_from_preflight(
+            "hidden-check",
+            "deployment_preflight",
+            &hash,
+            task("finished-execution", "project-a"),
+        )
+        .await
+        .expect("queue execution");
+    repository
+        .transition(
+            "finished-execution",
+            TaskState::Queued,
+            TaskState::Running,
+            None,
+            None,
+        )
+        .await
+        .expect("start execution");
+    repository
+        .transition(
+            "finished-execution",
+            TaskState::Running,
+            TaskState::Succeeded,
+            None,
+            None,
+        )
+        .await
+        .expect("finish execution");
+    for (id, project, final_state) in [
+        ("active-execution", "project-a", TaskState::Running),
+        ("guarded-execution", "project-a", TaskState::Failed),
+        ("other-project", "project-b", TaskState::Succeeded),
+    ] {
+        repository
+            .create(task(id, project))
+            .await
+            .expect("create retained task");
+        for (expected, next) in [
+            (TaskState::Draft, TaskState::Checking),
+            (TaskState::Checking, TaskState::Ready),
+            (TaskState::Ready, TaskState::Queued),
+            (TaskState::Queued, TaskState::Running),
+        ] {
+            repository
+                .transition(id, expected, next, None, None)
+                .await
+                .expect("advance retained task");
+        }
+        if final_state != TaskState::Running {
+            repository
+                .transition(id, TaskState::Running, final_state, None, None)
+                .await
+                .expect("finish retained task");
+        }
+    }
+    repository
+        .protect_results("guarded-execution", "结果待核实")
+        .await
+        .expect("protect result");
+    assert_eq!(
+        repository
+            .list_recent("project-a", 20)
+            .await
+            .expect("raw records")
+            .len(),
+        4
+    );
+    assert_eq!(
+        repository
+            .list_recent_activity("project-a", 20)
+            .await
+            .expect("visible records")
+            .len(),
+        3
+    );
+    assert_eq!(
+        repository
+            .clear_terminal_activity_for_project("project-a")
+            .await
+            .expect("clear visible finished tasks"),
+        1
+    );
+    assert!(repository.get("hidden-check").await.is_err());
+    assert!(repository.get("finished-execution").await.is_err());
+    assert_eq!(
+        repository
+            .get("active-execution")
+            .await
+            .expect("active task remains")
+            .state,
+        TaskState::Running
+    );
+    assert!(repository.get("guarded-execution").await.is_ok());
+    assert!(
+        repository
+            .results_protected("guarded-execution")
+            .await
+            .expect("guard remains")
+    );
+    assert!(repository.get("other-project").await.is_ok());
+    assert_eq!(
+        repository
+            .clear_terminal_activity_for_project("project-a")
+            .await
+            .expect("repeat clearing"),
+        0
+    );
+    store.close().await;
+}
+
+#[tokio::test]
+async fn activity_clear_locks_before_counting_during_concurrent_task_updates() {
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+    use sqlx::{Connection, SqliteConnection};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let options = SqliteConnectOptions::new()
+        .filename(temp.path().join("local.db"))
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal);
+    let pause_count = Arc::new(AtomicBool::new(false));
+    let resumed_by_signal = Arc::new(AtomicBool::new(false));
+    let (count_entered_tx, mut count_entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+    let resume_rx = Mutex::new(resume_rx);
+    let pause_in_collation = Arc::clone(&pause_count);
+    let resumed_in_collation = Arc::clone(&resumed_by_signal);
+    let count_options = options.clone().collation("count_barrier", move |left, right| {
+        if pause_in_collation.swap(false, Ordering::SeqCst) {
+            let _ = count_entered_tx.send(());
+            let resumed = resume_rx
+                .lock()
+                .ok()
+                .and_then(|receiver| receiver.recv_timeout(Duration::from_secs(10)).ok())
+                .is_some();
+            resumed_in_collation.store(resumed, Ordering::SeqCst);
+        }
+        left.cmp(right)
+    });
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(count_options)
+        .await
+        .expect("clearing connection");
+    // 最小任务表保留清理查询的全部字段；测试排序规则只用于在 COUNT 阶段暂停。
+    sqlx::raw_sql(
+        "CREATE TABLE local_task (
+            id TEXT PRIMARY KEY, local_project_id TEXT COLLATE count_barrier,
+            domain_type TEXT, state TEXT, sequence INTEGER);
+         CREATE TABLE local_task_result_guard (local_task_id TEXT);
+         CREATE TABLE local_task_target (
+            local_task_id TEXT, resource_type TEXT, resource_key TEXT,
+            state TEXT, message_code TEXT, message_params_json TEXT);
+         INSERT INTO local_task VALUES ('finished', 'project-a', 'smart_screen', 'succeeded', 0);
+         INSERT INTO local_task VALUES ('active', 'project-a', 'smart_screen', 'running', 0);",
+    )
+    .execute(&pool)
+    .await
+    .expect("concurrent clearing fixture");
+    let mut writer = SqliteConnection::connect_with(
+        &options
+            .busy_timeout(Duration::ZERO)
+            .collation("count_barrier", str::cmp),
+    )
+    .await
+    .expect("independent progress connection");
+    let repository = TaskRepository::new(pool.clone());
+    pause_count.store(true, Ordering::SeqCst);
+    let clearing = tokio::spawn(async move {
+        repository.clear_terminal_activity_for_project("project-a").await
+    });
+    tokio::time::timeout(Duration::from_secs(10), count_entered_rx.recv())
+        .await
+        .expect("clearing reaches count within deadline")
+        .expect("count barrier remains connected");
+
+    let concurrent_update = sqlx::query(
+        "UPDATE local_task SET sequence=sequence+1 WHERE id='active'",
+    )
+    .execute(&mut writer)
+    .await;
+    let released = resume_tx.try_send(()).is_ok();
+    let cleared = tokio::time::timeout(Duration::from_secs(10), clearing)
+        .await
+        .expect("clearing completes within deadline")
+        .expect("clearing worker completes");
+    assert!(released && resumed_by_signal.load(Ordering::SeqCst));
+    let contention = concurrent_update.expect_err("count already holds the write lock");
+    assert_eq!(
+        contention.as_database_error().and_then(|error| error.code()).as_deref(),
+        Some("5"),
+        "progress writer must encounter SQLITE_BUSY while counting",
+    );
+    assert_eq!(cleared.expect("clear succeeds without a stale WAL snapshot"), 1);
+    assert_eq!(
+        sqlx::query("UPDATE local_task SET sequence=sequence+1 WHERE id='active'")
+            .execute(&mut writer)
+            .await
+            .expect("progress resumes after clearing")
+            .rows_affected(),
+        1,
+    );
+    let remaining: Vec<(String, i64)> = sqlx::query_as("SELECT id, sequence FROM local_task")
+        .fetch_all(&pool)
+        .await
+        .expect("remaining task");
+    assert_eq!(remaining, vec![("active".into(), 1)]);
+    writer.close().await.expect("close progress connection");
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn clearing_preflight_requires_recheck_but_preserves_already_queued_execution() {
     let temp = tempfile::tempdir().expect("temporary app data");
     let store = LocalStore::open(temp.path().join("local.db"))

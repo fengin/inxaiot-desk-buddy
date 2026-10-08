@@ -145,6 +145,43 @@ async fn cleared_screen_preview_cannot_execute_and_recheck_creates_an_independen
 }
 
 #[tokio::test]
+async fn screen_activity_shows_one_execution_and_clear_counts_it_once() {
+    use inxaiot_desk_buddy_lib::domain::common::task::TaskState;
+    use inxaiot_desk_buddy_lib::interface::commands::task_activity::query_activity_tasks;
+
+    let temp = tempfile::tempdir().unwrap();
+    let state = support::state_at(temp.path(), false).await;
+    let project = Stage75Adapter::new(&state)
+        .create_project(support::local_input()).await.unwrap().project.id;
+    let repo = ScreenRepository::new(state.local_store.pool().clone());
+    let screen = repo.save_local(&project, &fields("192.0.2.9"), None, None).await.unwrap();
+    let mut request = input(vec![screen]);
+    request.action = "ping".into();
+    let preview = tasks::preflight(&state, &project, request.clone()).await.unwrap();
+    let before = query_activity_tasks(&state, &project, 20).await.unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].id, preview.id);
+
+    let execution = tasks::submit(&state, &project, &preview.id, request).await.unwrap();
+    let after = query_activity_tasks(&state, &project, 20).await.unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].id, execution);
+    assert_eq!(after[0].operation_type, "ping");
+    assert_eq!(state.task_repository.list_recent(&project, 20).await.unwrap().len(), 2);
+    assert!(task_data::read_plan(state.local_store.pool(), &project, &preview.id).await.is_ok());
+    state.task_repository.transition(&execution, TaskState::Queued, TaskState::Running, None, None).await.unwrap();
+    state.task_repository.transition(&execution, TaskState::Running, TaskState::Succeeded, None, None).await.unwrap();
+
+    assert_eq!(state.task_repository.clear_terminal_activity_for_project(&project).await.unwrap(), 1);
+    assert!(query_activity_tasks(&state, &project, 20).await.unwrap().is_empty());
+    assert!(state.task_repository.list_recent(&project, 20).await.unwrap().is_empty());
+    let snapshot_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM local_screen_task_data WHERE local_project_id=?")
+        .bind(&project).fetch_one(state.local_store.pool()).await.unwrap();
+    assert_eq!(snapshot_count, 0);
+    support::close(state).await;
+}
+
+#[tokio::test]
 async fn selected_subset_consumes_original_preview_only_once() {
     let temp = tempfile::tempdir().unwrap();
     let state = support::state_at(temp.path(), false).await;

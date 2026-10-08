@@ -77,7 +77,7 @@ pub async fn query_activity_tasks(
 ) -> Result<Vec<ActivityTaskDto>, CommandErrorDto> {
     let tasks = state
         .task_repository
-        .list_recent(local_project_id, limit)
+        .list_recent_activity(local_project_id, limit)
         .await
         .map_err(CommandErrorDto::from)?;
     let mut result = Vec::with_capacity(tasks.len());
@@ -116,7 +116,7 @@ pub async fn clear_finished_local_tasks(
 ) -> Result<u32, CommandErrorDto> {
     state
         .task_repository
-        .clear_terminal_for_project(&local_project_id)
+        .clear_terminal_activity_for_project(&local_project_id)
         .await
         .map_err(CommandErrorDto::from)
 }

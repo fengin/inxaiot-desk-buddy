@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import process from 'node:process';
 import console from 'node:console';
 import { assertManifestTarget, assertToolTarget, buildTarget, executableName } from './screen-tool-platform.mjs';
+import { copyJavaLegalNotices } from './java-legal-notices.mjs';
 
 const args = process.argv.slice(2);
 const option = (name, fallback) => {
@@ -84,7 +85,7 @@ if (args.includes('--verify')) {
     for (const name of readdirSync(build)) if (/\.(dll|so|dylib)$/.test(name) || name === 'lib64') cpSync(join(build, name), join(root, 'android-build', name), { recursive: true, dereference: true });
     if (existsSync(join(java, 'jmods'))) {
       run(join(java, 'bin', exe('jlink')), ['--add-modules','java.base,java.logging,jdk.crypto.ec,jdk.charsets','--strip-debug','--no-header-files','--no-man-pages','--output',join(root,'java')]);
-      cpSync(join(java, 'legal'), join(root, 'java/legal'), {recursive:true,dereference:true});
+      copyJavaLegalNotices(java, join(root, 'java'));
     } else cpSync(java, join(root, 'java'), { recursive: true, dereference: true });
     versions = { platformTools:revision(platform),buildTools:revision(build),javaRuntime:`${vendor} ${javaVersion}`,os:target.platform,architecture:target.architecture };
   }

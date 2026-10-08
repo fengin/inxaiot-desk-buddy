@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
 import { Buffer } from 'node:buffer';
 import { assertManifestTarget, assertToolTarget, binaryTarget, buildTarget, executableName } from './screen-tool-platform.mjs';
+import { copyJavaLegalNotices } from './java-legal-notices.mjs';
 
 function pe(machine = 0x8664) {
   const bytes = Buffer.alloc(128); bytes.write('MZ'); bytes.writeUInt32LE(64, 0x3c); bytes.write('PE\0\0', 64, 'binary'); bytes.writeUInt16LE(machine, 68); return bytes;
@@ -88,4 +89,68 @@ test('命令行验证和重算清单都拒绝错误系统，且不改原清单',
     assert.notEqual(result.status, 0); assert.match(result.stderr, /平台或架构不匹配/);
     assert.equal(readFileSync(manifest, 'utf8'), original);
   }
+});
+
+function legalFixture(t) {
+  const root = mkdtempSync(join(tmpdir(), 'inx-java-legal-'));
+  const source = join(root, 'jdk');
+  const runtime = join(root, 'runtime');
+  for (const directory of [join(source, 'legal/java.base'), join(source, 'legal/java.logging'), join(runtime, 'legal/java.base'), join(runtime, 'legal/java.logging'), join(runtime, 'bin')]) mkdirSync(directory, { recursive: true });
+  t.after(() => {
+    assert.equal(realpathSync(root).startsWith(realpathSync(tmpdir())), true);
+    rmSync(root, { recursive: true, force: true });
+  });
+  return { root, source, runtime };
+}
+
+test('覆盖 jlink 只读许可证，不修改源 JDK 和运行时程序的内容及权限', t => {
+  const { source, runtime } = legalFixture(t);
+  const sourceFile = join(source, 'legal/java.logging/LICENSE');
+  const targetFile = join(runtime, 'legal/java.logging/LICENSE');
+  const java = join(runtime, 'bin/java');
+  writeFileSync(sourceFile, '完整许可证原文'); chmodSync(sourceFile, 0o444);
+  writeFileSync(targetFile, 'jlink 原许可证'); chmodSync(targetFile, 0o444);
+  writeFileSync(java, '可执行文件内容'); chmodSync(java, 0o755);
+  const sourceMode = statSync(sourceFile).mode;
+  const javaMode = statSync(java).mode;
+  copyJavaLegalNotices(source, runtime);
+  assert.equal(readFileSync(targetFile, 'utf8'), '完整许可证原文');
+  assert.equal(readFileSync(sourceFile, 'utf8'), '完整许可证原文');
+  assert.equal(statSync(sourceFile).mode, sourceMode);
+  assert.equal(statSync(targetFile).mode & 0o777, sourceMode & 0o777);
+  assert.equal(readFileSync(java, 'utf8'), '可执行文件内容');
+  assert.equal(statSync(java).mode, javaMode);
+});
+
+test('Java 模块许可证的源链接与目标链接均转成独立文件，保持许可证内容', t => {
+  const { root, source, runtime } = legalFixture(t);
+  const original = join(source, 'legal/java.base/LICENSE');
+  const linked = join(source, 'legal/java.logging/LICENSE');
+  const target = join(runtime, 'legal/java.logging/LICENSE');
+  const outside = join(root, 'outside-license');
+  writeFileSync(original, '共享许可证原文'); writeFileSync(outside, '目标链接不能改写这里');
+  try {
+    symlinkSync(original, linked, 'file');
+    symlinkSync(outside, target, 'file');
+  } catch (error) {
+    if (process.platform === 'win32' && error.code === 'EPERM') { t.skip('当前 Windows 账号没有创建文件符号链接权限；Unix CI 执行此验证'); return; }
+    throw error;
+  }
+  copyJavaLegalNotices(source, runtime);
+  assert.equal(lstatSync(linked).isSymbolicLink(), true);
+  assert.equal(lstatSync(target).isSymbolicLink(), false);
+  assert.equal(readFileSync(target, 'utf8'), '共享许可证原文');
+  assert.equal(readFileSync(outside, 'utf8'), '目标链接不能改写这里');
+});
+
+test('不允许 Java 许可证目标指向源 JDK 或通过目录链接写到外部', t => {
+  const { root, source, runtime } = legalFixture(t);
+  assert.throws(() => copyJavaLegalNotices(source, source), /必须分开/);
+  rmSync(join(runtime, 'legal/java.logging'), { recursive: true });
+  const outside = join(root, 'outside'); mkdirSync(outside);
+  try { symlinkSync(outside, join(runtime, 'legal/java.logging'), process.platform === 'win32' ? 'junction' : 'dir'); } catch (error) {
+    if (process.platform === 'win32' && error.code === 'EPERM') { t.skip('当前 Windows 账号没有创建目录链接权限；Unix CI 执行此验证'); return; }
+    throw error;
+  }
+  assert.throws(() => copyJavaLegalNotices(source, runtime), /目标目录无效/);
 });

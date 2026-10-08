@@ -2,15 +2,15 @@
 
 ## 1. 适用范围与当前状态
 
-本文定义`inxaiot-desk-buddy`的内部发布边界。源码、构建和正式产物留在公司受控主机，不使用GitHub托管Runner或第三方制品上传。2026-09-01用户确认取消内部Windows代码签名硬门禁；2026-09-02进一步确认Windows免安装EXE、macOS可复制`.app`。NSIS安装不再是交付或阶段8的前置要求。
+本文定义 `inxaiot-desk-buddy` 的两类发布方式：公司受控主机通过 Jenkins 生成内部 Windows 产物；GitHub 托管 Runner 根据版本标签构建 Windows、macOS 和 Linux 便携包，并保存到对应仓库的 Actions 与 Release，供目标系统下载验收。源码同步到项目已有 GitLab 和 GitHub 仓库；本机实机凭据、私钥、设备数据和构建缓存不进入 Git，也不传给 GitHub 构建。Windows 交付免安装程序，macOS 交付可整体复制的 `.app`，NSIS 安装器不是前置要求。
 
 当前已完成：
 
 - `Jenkinsfile.windows`分层定义能力门禁、显式真实环境门禁和内部发布门禁；Runner标签固定为`inxaiot-windows-release`并禁止并发发布。
 - `src-tauri/tauri.release.conf.json`关闭安装器打包；`--no-bundle`只是不生成安装包，仍是优化后的正式Release EXE，不等于debug或desktop-e2e构建。
 - `scripts/generate-sbom.ps1`生成CycloneDX 1.5 SBOM，组件数量以本次清单为准。
-- `scripts/release-internal.ps1`要求Git工作区干净，以版本+12位提交ID创建不可覆盖产物目录，构建后校验Cargo Release依赖元数据绑定同一非dirty提交，并复查工作区、HEAD和Tree未变化；输出免安装EXE、SBOM、SHA-256及清单v3。最终发布采用同卷原子移动。
-- `scripts/verify-internal-release.ps1`离线复验文件集合、大小/SHA-256、Git提交/Tree、目录命名、只读属性和EXE的`NotSigned`状态。v3必须包含portable与sbom各一份；兼容历史v2的portable/installer/sbom，不修改旧产物。旧脚本名继续转发。
+- `scripts/release-internal.ps1`要求Git工作区干净，以版本+12位提交ID创建不可覆盖产物目录，构建后校验Cargo Release依赖元数据绑定同一非dirty提交，并复查工作区、HEAD和Tree未变化；输出免安装 EXE、完整 tools 目录、SBOM、SHA-256 及清单 v4。最终发布采用同卷原子移动。
+- `scripts/verify-internal-release.ps1`离线复验文件集合、大小/SHA-256、Git提交/Tree、目录命名、只读属性和EXE的`NotSigned`状态。v4 包含 portable、sbom 各一份及 screen-tool 文件集合，逐文件验证 tools 并检查工具能否运行；兼容历史 v2/v3，不修改旧产物。旧脚本名继续转发。
 - 首个正式内部产物集已由干净提交`f9adb6ec6845b8e5267a9bf7a19551b6eb8245fc`生成并通过两次离线复验。
 
 当前状态：P1-20按内部无签名发布策略关闭。历史内部证书Thumbprint `4B6FA6B7CBF774B4BB0BFACEE8EC51EE8A7FC3C1`已从CurrentUser My/Root/TrustedPublisher精确删除，已知CNG容器和私钥文件匹配数均为0；受控产物根继续保留。
@@ -19,11 +19,12 @@
 
 ### 2.1 可信CI
 
-- 使用公司现有内网Jenkins Controller。
+- 内部 Windows 发布使用公司现有内网 Jenkins Controller；本节 Runner 身份和产物目录要求适用于该通道。
 - Windows Runner标签：`inxaiot-windows-release`。
 - Runner必须使用专用Windows身份，禁止交互登录共享使用；该身份独占`D:\inxaiot-release-artifacts`写权限。
 - Jenkins凭据`inxaiot-stage75-ed25519`仅供受控真实环境门禁使用；对应公钥须由环境管理员独立安装和撤销，内部发布本身不读取该凭据。
 - `RUN_REAL_GATES`和`PUBLISH_INTERNAL_RELEASE`均为默认关闭的显式参数；真实节点副作用与正式发布不能由普通提交自动触发。
+- GitHub 多平台构建由已有工作流 `.github/workflows/portable-release.yml` 执行：推送与应用版本一致的 `v*.*.*` 标签后构建，手动触发仅保存 Actions 产物；不执行内网实机测试。工作流使用内置 `GITHUB_TOKEN` 写入本仓库产物和 Release，不使用内网发布凭据。应用版本、目标架构、随包工具和产物校验必须通过；Mac 的实际运行验收单独记录。
 
 ### 2.2 无签名信任边界
 
@@ -43,7 +44,9 @@
 
 ## 3. 发布、升级与回滚
 
-正式发布必须从干净提交执行：
+正式发布必须从干净提交执行。发布机设置 `ANDROID_SDK_ROOT`（Android SDK 路径）和 `JAVA_HOME`（Temurin 或 JetBrains Java 21 路径），准备 platform-tools 35 及以上与 build-tools 36.1.0。SDK 必须属于目标电脑的操作系统，Java 必须匹配目标架构；Windows x64 交付包含 Windows 版 `adb.exe`、`AdbWinApi.dll`、`AdbWinUsbApi.dll` 和 x64 Java。随包脚本缺文件、缺许可证、系统或架构不匹配、校验失败或工具不能运行时停止发布。
+
+发布结果是完整目录，包含主程序和 `tools`；复制、升级及回滚必须整体处理。内部清单 v4 的分发类型为 `portable-directory`。只复制 EXE 会缺少智能屏所需工具。
 
 ```powershell
 $env:INX_RELEASE_ARTIFACT_ROOT = "D:\inxaiot-release-artifacts"
@@ -70,13 +73,23 @@ $env:INX_RELEASE_ARTIFACT_ROOT = "D:\inxaiot-release-artifacts"
 
 ### 3.2 macOS
 
-在Mac上安装项目已有Node/pnpm、Rust和Xcode构建依赖后，于项目根目录执行`pnpm build:macos`。入口固定`--bundles app`和`tauri.macos.conf.json`，默认构建当前Mac架构，输出`src-tauri/target/release/bundle/macos/INX 实施工作台.app`。
+在 Mac 上安装项目已有 Node/pnpm、Rust 和 Xcode 构建依赖，准备 macOS 的 platform-tools 35 及以上、build-tools 36.1.0，以及与本机架构匹配的 Temurin 或 JetBrains Java 21；通过 `ANDROID_SDK_ROOT` 和 `JAVA_HOME` 指明目录。Android SDK 的准备方式见 [Platform-Tools 官方说明](https://developer.android.com/tools/releases/platform-tools)和 [sdkmanager 官方说明](https://developer.android.com/tools/sdkmanager)。
+
+于项目根目录执行 `pnpm build:macos`。已有构建脚本 `scripts/build-macos.mjs` 使用 `--bundles app` 和配置文件 `tauri.macos.conf.json`，输出 `src-tauri/target/release/bundle/macos/INX 实施工作台.app`。Intel x64 与 Apple Silicon arm64 分别在对应架构的 Mac 上构建；可用 `--arch x64` 或 `--arch arm64` 明确目标，但目标必须与构建机一致。不支持 Windows 构建 Mac 包，也不支持另一架构或通用包的交叉构建。
 
 PNG和ICNS图标已经保存在`src-tauri/icons/`，干净检出后可直接用于Mac开发和构建，不需要先执行图标生成步骤。
 
+`build:macos` 自动完成以下步骤，多平台发布流水线调用同一命令：
+
+1. 调用已有打包脚本 `scripts/package-screen-tools.mjs`，明确传入 `--platform darwin` 和本机 `--arch`，先检查工具文件和可运行性；工具不满足要求时停止。
+2. 编译应用并确认主程序架构，再将 macOS `adb`、`aapt`（APK 信息读取工具）、验签工具、匹配架构的 Java 及许可证放入 `.app/Contents/Resources/tools`，不带入 Windows EXE 或 DLL。
+3. 逐个签随包的 Mac 可执行文件和动态库、重算工具清单、签应用外层，最后复验工具完整性、实际运行和应用签名。工具清单同时记录系统与架构，工作台运行时拒绝与当前程序不符的工具包。
+
+默认使用 adhoc 签名；设置环境变量 `APPLE_SIGNING_IDENTITY` 时使用指定签名身份，公证仍需按正式分发流程另行完成。官方 macOS ADB 使用同时包含 Intel 和 Apple Silicon 架构的 Universal 文件，不单独维护两套 ADB；打包要求 ADB 包含目标架构。若 `aapt` 只有 Intel 版本，Apple Silicon 构建机及最终使用电脑都需要 Rosetta。CI 上安装 Rosetta 仅解决 CI 自身运行工具，不能让缺少 Rosetta 的用户电脑直接运行 Intel 工具；交付前必须按实际工具确认并记录这一限制。
+
 把整个`.app`复制到“应用程序”目录再打开，不要只复制包内的可执行文件；不需要PKG安装器。Intel与Apple Silicon需分别构建/验证，不将单架构产物宣称为通用包。macOS凭据使用系统Keychain，普通应用数据不写入`.app`。
 
-当前Windows主机只完成配置与入口检查，未生成或实际验证Mac产物。Mac正式发布还必须记录干净提交、产物完整性和原生GUI验收。通过下载渠道分发时Gatekeeper仍可能要求可信签名/公证；“复制即可用”描述包的使用方式，不代表绕过系统信任策略。参考[Tauri应用包说明](https://v2.tauri.app/distribute/macos-application-bundle/)与[Windows运行时说明](https://v2.tauri.app/distribute/windows-installer/)。
+当前 Windows 主机只能完成打包编排的模拟测试与文件格式、架构、清单等纯校验，未生成或实际验证 Mac 产物。Intel 和 Apple Silicon 的真实构建、签名、工具运行及设备操作仍待 Mac 验收。Mac 正式发布还必须记录干净提交、产物完整性和原生 GUI 验收。通过下载渠道分发时 Gatekeeper 仍可能要求可信签名/公证；“复制即可用”描述包的使用方式，不代表绕过系统信任策略。参考[Tauri应用包说明](https://v2.tauri.app/distribute/macos-application-bundle/)与[Windows运行时说明](https://v2.tauri.app/distribute/windows-installer/)。
 
 ### 3.3 Linux
 

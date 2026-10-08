@@ -34,7 +34,7 @@
 | Git仓库 | `D:\code\work\inxvision-iot\inxvision-assistance\inxaiot-desk-buddy` |
 | 初审HEAD | `e3eb60a`，本地`master`与本地跟踪引用`origin/master`一致 |
 | 重点变更 | `8005afb..e3eb60a`，168个文件，新增16,447行、删除4,171行 |
-| 初审前已有改动 | `README.md`已有修改；`doc/18-开发阶段总结与代码Review交接.md`未跟踪，均已保留 |
+| 初审前已有改动 | `README.md`已有修改；[一体机开发阶段总结与代码 Review 交接](一体机/18-开发阶段总结与代码Review交接.md)当时未跟踪，均已保留 |
 | 本轮业务改动 | 已处理R01、R02、R03、R04、R05、R06、R07、R09、R10、R11、R12、R13、R14；R08按业务决策关闭 |
 | 本轮辅助文件 | 初审使用的临时复现程序已在证据记录完成后删除，没有进入业务源码 |
 
@@ -105,7 +105,7 @@ Vue页面 → Pinia状态 → Tauri命令 → Rust应用层
 | R11 | 每个服务只接收最后一次镜像选择请求；切项目和页面卸载会让旧响应失效 | `src/features/aio/operations/AioOperationsView.vue` | 连续选两次、切项目、旧错误晚到 |
 | R12 | 默认Agent把已配置Healthcheck的healthy作为成功条件；starting有限等待，持续unhealthy触发现有失败回滚，回滚旧服务也等待健康 | `src-tauri/resources/agent/edge-node-agent.sh`、`test/agent/` | Compose隔离34项、服务观测47项通过 |
 | R13 | 7个活动数据库测试文件改用生产`DualMySqlPools`，删除无人引用的`formal/mysql.rs`重复实现 | `src-tauri/tests/`、`src-tauri/src/formal/mod.rs` | Rust全目标非忽略测试通过；真实环境测试保持ignored |
-| R14 | 技术方案改为当前标签规则、真实部署顺序、实际最终化恢复边界、Agent 0.1.13和三平台构建说明 | `doc/03-技术方案设计.md`、`doc/16-Windows可信发布与回滚说明.md`、`README.md` | 文档入口和代码调用链复核 |
+| R14 | 技术方案改为当前标签规则、真实部署顺序、实际最终化恢复边界、Agent 0.1.13和三平台构建说明 | [一体机技术方案设计](一体机/03-技术方案设计.md)、`doc/16-Windows可信发布与回滚说明.md`、`README.md` | 文档入口和代码调用链复核 |
 
 ## 七、已确认正确或已经关闭的历史问题
 

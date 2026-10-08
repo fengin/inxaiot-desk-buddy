@@ -4,17 +4,12 @@ use crate::application::ports::deployment_workflow::{
 use crate::core::error::{AppError, AppResult};
 use crate::domain::aio::deployment_workflow::{
     DeploymentTaskStepView, DeploymentTaskTargetView, DeploymentTaskView, OperationHistoryDetail,
-    OperationHistoryItem, OperationHistoryPage, OperationHistoryQuery, OperationHistoryTarget,
+    OperationHistoryPage, OperationHistoryQuery,
 };
 use crate::domain::common::task::{
     StepState, TargetState, TaskState, TaskStepRecord, TaskTargetRecord,
 };
 use crate::formal::app_state::FormalAppState;
-use crate::formal::operation_repository::{
-    OperationHistoryRecord, OperationHistoryTargetRecord, OperationRepository,
-};
-use crate::infrastructure::aio_assets_service::project_operator;
-use crate::infrastructure::project_context::{map_formal_error, project_database};
 
 pub struct Stage75BQueryAdapter<'a> {
     state: &'a FormalAppState,
@@ -125,41 +120,21 @@ impl OperationHistoryQueryPort for Stage75BQueryAdapter<'_> {
         project_id: &str,
         query: &OperationHistoryQuery,
     ) -> AppResult<OperationHistoryPage> {
-        project_operator(self.state, project_id).await?;
-        let pools = project_database(self.state, project_id).await?;
-        let (items, total) = OperationRepository::new(pools.workbench.clone())
-            .list_history(
-                "aio",
-                query.operation_type.as_deref(),
-                query.state.as_deref(),
-                query.page,
-                query.page_size,
-            )
+        crate::infrastructure::operation_history::list_history(self.state, "aio", project_id, query)
             .await
-            .map_err(map_formal_error)?;
-        Ok(OperationHistoryPage {
-            items: items.into_iter().map(map_history).collect(),
-            total,
-            page: query.page,
-            page_size: query.page_size,
-        })
     }
-
     async fn history_detail(
         &self,
         project_id: &str,
         operation_id: &str,
     ) -> AppResult<OperationHistoryDetail> {
-        project_operator(self.state, project_id).await?;
-        let pools = project_database(self.state, project_id).await?;
-        let (operation, targets) = OperationRepository::new(pools.workbench.clone())
-            .history_detail("aio", operation_id)
-            .await
-            .map_err(map_formal_error)?;
-        Ok(OperationHistoryDetail {
-            operation: map_history(operation),
-            targets: targets.into_iter().map(map_history_target).collect(),
-        })
+        crate::infrastructure::operation_history::history_detail(
+            self.state,
+            "aio",
+            project_id,
+            operation_id,
+        )
+        .await
     }
 }
 
@@ -206,43 +181,6 @@ fn target_result_message(target: &TaskTargetRecord, steps: &[TaskStepRecord]) ->
                 && matches!(step.state, StepState::Failed | StepState::Interrupted)
         })
         .and_then(|step| step.message.clone())
-}
-
-fn map_history(record: OperationHistoryRecord) -> OperationHistoryItem {
-    OperationHistoryItem {
-        id: record.id,
-        domain_type: record.domain_type,
-        operation_type: record.operation_type,
-        operation_name: record.operation_name,
-        operator_name: record.operator_name,
-        instance_id: record.instance_id,
-        state: record.state,
-        target_count: record.target_count,
-        success_count: record.success_count,
-        failure_count: record.failure_count,
-        cancelled_count: record.cancelled_count,
-        artifact_name: record.artifact_name,
-        artifact_version: record.artifact_version,
-        started_at: record.started_at.to_string(),
-        ended_at: record.ended_at.map(|value| value.to_string()),
-        result_summary: record.result_summary,
-        error_code: record.error_code,
-        error_summary: record.error_summary,
-    }
-}
-
-fn map_history_target(record: OperationHistoryTargetRecord) -> OperationHistoryTarget {
-    OperationHistoryTarget {
-        resource_type: record.resource_type,
-        resource_key: record.resource_key,
-        state: record.result_state,
-        before_version: record.before_version,
-        after_version: record.after_version,
-        result_summary: record.result_summary,
-        error_code: record.error_code,
-        error_summary: record.error_summary,
-        completed_at: record.completed_at.map(|value| value.to_string()),
-    }
 }
 
 #[cfg(test)]

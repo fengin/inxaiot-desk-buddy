@@ -15,6 +15,11 @@ export function createThemeOverrides(density: DensityMode): GlobalThemeOverrides
       borderRadius: "5px",
       borderRadiusSmall: "4px",
       fontSize: "var(--inx-font-size-base)",
+      // 控件尺寸决定高度和间距，常规文案统一跟随基础字号；Mini/Tiny 保留原有小字号。
+      fontSizeSmall: "var(--inx-font-size-base)",
+      fontSizeMedium: "var(--inx-font-size-base)",
+      fontSizeLarge: "var(--inx-font-size-base)",
+      fontSizeHuge: "var(--inx-font-size-base)",
       heightSmall: comfortable ? "32px" : "28px",
       heightMedium: comfortable ? "36px" : "32px"
     },
@@ -24,6 +29,24 @@ export function createThemeOverrides(density: DensityMode): GlobalThemeOverrides
       paddingSmall: comfortable ? "0 12px" : "0 10px",
       borderRadiusSmall: "5px",
       borderRadiusMedium: "5px"
+    },
+    Form: {
+      // 表单标签和反馈有独立字号，不会继承 common 的同名尺寸令牌。
+      labelFontSizeLeftSmall: "var(--inx-font-size-base)",
+      labelFontSizeLeftMedium: "var(--inx-font-size-base)",
+      labelFontSizeLeftLarge: "var(--inx-font-size-base)",
+      labelFontSizeTopSmall: "var(--inx-font-size-base)",
+      labelFontSizeTopMedium: "var(--inx-font-size-base)",
+      labelFontSizeTopLarge: "var(--inx-font-size-base)",
+      feedbackFontSizeSmall: "var(--inx-font-size-table)",
+      feedbackFontSizeMedium: "var(--inx-font-size-table)",
+      feedbackFontSizeLarge: "var(--inx-font-size-table)"
+    },
+    Message: { fontSize: "var(--inx-font-size-base)" },
+    Tabs: {
+      tabFontSizeSmall: "var(--inx-font-size-base)",
+      tabFontSizeMedium: "var(--inx-font-size-base)",
+      tabFontSizeLarge: "var(--inx-font-size-base)"
     },
     DataTable: {
       fontSizeSmall: "var(--inx-font-size-table)",
@@ -47,4 +70,3 @@ export function createThemeOverrides(density: DensityMode): GlobalThemeOverrides
     }
   };
 }
-

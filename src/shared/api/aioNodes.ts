@@ -6,7 +6,8 @@ import type {
   AioNodeListPage,
   ImportSelection,
   InventoryApplyOutcome,
-  InventoryPreview
+  InventoryPreview,
+  InventoryValues
 } from "@/shared/model/aio";
 
 export interface ListAioNodesQuery {
@@ -30,6 +31,10 @@ export function checkEdgeNodeServices(localProjectId: string, mac: string) {
 
 export function previewInventoryImport(localProjectId: string, filePath: string) {
   return invoke<InventoryPreview>("preview_inventory_import", { localProjectId, filePath });
+}
+
+export function previewAioNodeCreate(localProjectId: string, values: InventoryValues) {
+  return invoke<InventoryPreview>("preview_aio_node_create", { localProjectId, values });
 }
 
 export function getLatestInventoryImport(localProjectId: string) {

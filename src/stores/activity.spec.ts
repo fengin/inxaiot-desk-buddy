@@ -1,5 +1,5 @@
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   FixtureActivityAdapter,
@@ -35,6 +35,38 @@ class DeferredProjectActivityAdapter extends FixtureActivityAdapter {
   }
 }
 
+class HistoryActivityAdapter extends EventFixtureActivityAdapter {
+  readonly calls: { projectId: string; limit: number }[] = [];
+
+  constructor(readonly rows: ActivityTask[]) { super(); }
+
+  override async listTasks(projectId: string, limit: number) {
+    this.calls.push({ projectId, limit });
+    return this.rows.filter(task => task.projectId === projectId).slice(0, limit);
+  }
+
+  override async listLogs(taskId: string) {
+    return {
+      items: [{ id: taskId, taskId, sequence: 1, timestamp: "2026-10-08T10:00:00Z",
+        level: "INFO" as const, source: "测试屏", message: taskId }],
+      nextOffset: 1,
+      hasMore: false
+    };
+  }
+}
+
+class DeferredHistoryActivityAdapter extends HistoryActivityAdapter {
+  private finishHistory?: (rows: ActivityTask[]) => void;
+
+  override listTasks(projectId: string, limit: number): Promise<ActivityTask[]> {
+    if (limit !== 500) return super.listTasks(projectId, limit);
+    this.calls.push({ projectId, limit });
+    return new Promise(resolve => { this.finishHistory = resolve; });
+  }
+
+  resolveHistory(rows = this.rows) { this.finishHistory?.(rows); }
+}
+
 function projectTask(projectId: string): ActivityTask {
   return {
     id: `task-${projectId}`,
@@ -53,7 +85,125 @@ function projectTask(projectId: string): ActivityTask {
 }
 
 describe("activity store", () => {
-  beforeEach(() => setActivePinia(createPinia()));
+  beforeEach(() => { setActivePinia(createPinia()); configureActivityAdapter(new FixtureActivityAdapter()); });
+
+  it("新操作指定任务后，日志不再停留在旧诊断；普通刷新仍保留手动选择", async()=>{
+    class CurrentTaskAdapter extends FixtureActivityAdapter{
+      override async listTasks(){return [{...projectTask('project-current'),id:'install-current',name:'安装/升级小新',domainType:'smart_screen',operationType:'install',state:'running' as const}, {...projectTask('project-current'),id:'diagnostics-old',name:'采集诊断',state:'succeeded' as const}];}
+      override async listLogs(taskId:string){return {items:[{id:taskId,taskId,sequence:1,timestamp:'2026-09-29T09:45:00Z',level:'INFO' as const,source:'办公室10寸屏',message:taskId==='install-current'?'正在传输安装包':'开始设备检查'}],nextOffset:1,hasMore:false};}
+    }
+    configureActivityAdapter(new CurrentTaskAdapter());const activity=useActivityStore();
+    await activity.refreshTasks('project-current');await activity.selectTask('diagnostics-old');
+    await activity.refreshTasks('project-current','install-current');expect(activity.selectedTask?.id).toBe('install-current');expect(activity.logs[0]?.message).toBe('正在传输安装包');
+    await activity.selectTask('diagnostics-old');await activity.refreshTasks('project-current');expect(activity.selectedTask?.id).toBe('diagnostics-old');
+    activity.dispose();
+  });
+
+  it("进度事件的并发刷新不会丢失刚提交任务的日志选择",async()=>{
+    class PendingAdapter extends FixtureActivityAdapter{
+      waits:Array<(items:ActivityTask[])=>void>=[];
+      override listTasks():Promise<ActivityTask[]>{return new Promise(resolve=>this.waits.push(resolve));}
+    }
+    const adapter=new PendingAdapter();configureActivityAdapter(adapter);const activity=useActivityStore();
+    const rows=[{...projectTask('p'),id:'new-install'},{...projectTask('p'),id:'old-diagnostic'}];
+    const initial=activity.refreshTasks('p');adapter.waits[0]!(rows);await initial;await activity.selectTask('old-diagnostic');
+    const preferred=activity.refreshTasks('p','new-install');const eventRefresh=activity.refreshTasks('p');
+    adapter.waits[2]!(rows);await eventRefresh;adapter.waits[1]!(rows);await preferred;
+    expect(activity.selectedTaskId).toBe('new-install');activity.dispose();
+  });
+
+  it("从历史打开第 101 条以后的任务，事件刷新仍显示该任务的日志；查看最近任务只读取 100 条", async () => {
+    vi.useFakeTimers();
+    const rows = Array.from({ length: 150 }, (_, index) => ({
+      ...projectTask("p"), id: `history-${index}`
+    }));
+    const adapter = new HistoryActivityAdapter(rows);
+    configureActivityAdapter(adapter);
+    const activity = useActivityStore();
+    try {
+      await activity.start("p");
+      expect(adapter.calls.map(call => call.limit)).toEqual([100]);
+      await activity.refreshTasks("p", "history-149");
+      expect(activity.selectedTask?.id).toBe("history-149");
+      expect(activity.logs[0]?.taskId).toBe("history-149");
+
+      adapter.emit({
+        eventId: "new-progress", localTaskId: "history-0", sequence: 2,
+        localProjectId: "p", domainType: "smart_screen", stage: "检查设备",
+        status: "running", progressCurrent: 1, progressTotal: 2,
+        level: "info", messageCode: "SCREEN_PROGRESS", messageParams: {},
+        message: "检查中", timestamp: "2026-10-08T10:00:00Z"
+      });
+      await vi.advanceTimersByTimeAsync(120);
+      expect(activity.selectedTaskId).toBe("history-149");
+      expect(activity.selectedTask?.id).toBe("history-149");
+      expect(activity.logs[0]?.taskId).toBe("history-149");
+      expect(adapter.calls.map(call => call.limit)).toEqual([100, 100, 500, 100, 500]);
+
+      await activity.selectTask("history-0");
+      await activity.refreshTasks("p");
+      expect(adapter.calls.map(call => call.limit)).toEqual([100, 100, 500, 100, 500, 100]);
+    } finally {
+      activity.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("旧任务的扩展查询晚于项目切换返回时，不覆盖新项目及日志", async () => {
+    const oldRows = Array.from({ length: 150 }, (_, index) => ({
+      ...projectTask("old"), id: `old-${index}`
+    }));
+    const current = projectTask("current");
+    const adapter = new DeferredHistoryActivityAdapter([...oldRows, current]);
+    configureActivityAdapter(adapter);
+    const activity = useActivityStore();
+    const oldRefresh = activity.refreshTasks("old", "old-149");
+    await vi.waitFor(() => expect(adapter.calls).toContainEqual({ projectId: "old", limit: 500 }));
+    await activity.refreshTasks("current");
+    adapter.resolveHistory(oldRows);
+    await oldRefresh;
+    expect(activity.tasks.map(task => task.id)).toEqual([current.id]);
+    expect(activity.selectedTask?.id).toBe(current.id);
+    expect(activity.logs[0]?.taskId).toBe(current.id);
+    activity.dispose();
+  });
+
+  it("等待旧任务扩展查询时用户另选任务，慢查询不会重新选中旧任务", async () => {
+    const rows = Array.from({ length: 150 }, (_, index) => ({
+      ...projectTask("p"), id: `history-${index}`
+    }));
+    const adapter = new DeferredHistoryActivityAdapter(rows);
+    configureActivityAdapter(adapter);
+    const activity = useActivityStore();
+    await activity.refreshTasks("p");
+    const oldRefresh = activity.refreshTasks("p", "history-149");
+    await vi.waitFor(() => expect(adapter.calls).toContainEqual({ projectId: "p", limit: 500 }));
+    await activity.selectTask("history-1");
+    adapter.resolveHistory();
+    await oldRefresh;
+    expect(activity.selectedTaskId).toBe("history-1");
+    expect(activity.selectedTask?.id).toBe("history-1");
+    expect(activity.logs[0]?.taskId).toBe("history-1");
+    activity.dispose();
+  });
+
+  it("同项目新一次定位已完成后，旧任务扩展查询不再替换任务列表", async () => {
+    const rows = Array.from({ length: 150 }, (_, index) => ({
+      ...projectTask("p"), id: `history-${index}`
+    }));
+    const adapter = new DeferredHistoryActivityAdapter(rows);
+    configureActivityAdapter(adapter);
+    const activity = useActivityStore();
+    const oldRefresh = activity.refreshTasks("p", "history-149");
+    await vi.waitFor(() => expect(adapter.calls).toContainEqual({ projectId: "p", limit: 500 }));
+    await activity.refreshTasks("p", "history-0");
+    adapter.resolveHistory();
+    await oldRefresh;
+    expect(activity.tasks).toHaveLength(100);
+    expect(activity.selectedTask?.id).toBe("history-0");
+    expect(activity.logs[0]?.taskId).toBe("history-0");
+    activity.dispose();
+  });
 
   it("keeps browser fixtures behind the activity adapter contract", async () => {
     const activity = useActivityStore();
@@ -189,6 +339,7 @@ describe("activity store", () => {
     await activity.start("project-shenzhen-bay");
     activity.tasks = [{
       id: "preflight-awaiting-submit",
+      clearable: false,
       projectId: "project-shenzhen-bay",
       domainType: "aio",
       operationType: "deployment_preflight",

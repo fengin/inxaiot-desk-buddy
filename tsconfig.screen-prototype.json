@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "composite": false,
+    "ignoreDeprecations": "6.0",
+    "types": ["vite/client", "vitest/globals", "node"]
+  },
+  "include": [
+    "src/env.d.ts",
+    "src/features/smart-screen/**/*.ts",
+    "src/features/smart-screen/**/*.vue",
+    "src/shared/model/screen.ts",
+    "src/shared/api/screenAdapter.ts",
+    "src/shared/api/realScreenAdapter.ts",
+    "src/stores/smartScreens.ts",
+    "src/dev-fixtures/screenData.ts",
+    "src/dev-fixtures/screenFixtureAdapter.ts",
+    "src/dev-fixtures/activityFixtureAdapter.ts"
+  ],
+  "exclude": ["**/*.spec.ts"]
+}

@@ -9,3 +9,4 @@ pub mod ports;
 pub mod project_access;
 pub mod project_management;
 pub mod release_artifacts;
+pub mod smart_screen;

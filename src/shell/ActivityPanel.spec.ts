@@ -6,6 +6,7 @@ import { h } from "vue";
 
 import ActivityPanel from "@/shell/ActivityPanel.vue";
 import { useActivityStore } from "@/stores/activity";
+import type { ActivityTask } from "@/shared/model/activity";
 
 describe("activity panel", () => {
   it("renders the shared task DTO and switches to filtered local logs", async () => {

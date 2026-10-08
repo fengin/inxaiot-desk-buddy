@@ -141,6 +141,7 @@ export interface OperationHistoryItem {
 }
 
 export interface OperationHistoryTarget {
+  details?: { targetName?: string; targetIp?: string; device?: string; business?: string; shared?: string; observedAt?: string; observedIp?: string; appVersionCode?: number; retryOfOperationId?: string; package?: {name?:string;version?:string;versionCode?:number;sha256?:string}; configuration?: {fields?:string[];save?:string;restart?:string;readback?:string;changes?:{field:string;before:string|boolean|null;after:string|boolean|null}[]} };
   resourceType: string;
   resourceKey: string;
   state: string;

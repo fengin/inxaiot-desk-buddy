@@ -8,6 +8,7 @@ import { createApp } from "vue";
 import App from "@/app/App.vue";
 import { i18n } from "@/app/i18n";
 import { router } from "@/app/router";
+import { isPrototypePreview } from "@/app/runtimeMode";
 import { configureWorkbenchAdapter } from "@/shared/api/workbenchAdapter";
 import { RealWorkbenchAdapter } from "@/shared/api/realWorkbenchAdapter";
 import { configureActivityAdapter } from "@/shared/api/activityAdapter";
@@ -23,9 +24,11 @@ import { configureDiagnosticsAdapter } from "@/shared/api/diagnosticsAdapter";
 import { RealDiagnosticsAdapter } from "@/shared/api/realDiagnosticsAdapter";
 import { configureSystemDialogAdapter } from "@/shared/api/systemDialogAdapter";
 import { RealSystemDialogAdapter } from "@/shared/api/realSystemDialogAdapter";
+import { configureScreenAdapter } from "@/shared/api/screenAdapter";
+import { RealScreenAdapter } from "@/shared/api/realScreenAdapter";
 
 async function bootstrap() {
-  if (isTauriRuntime()) {
+  if (isTauriRuntime() && !isPrototypePreview()) {
     configureWorkbenchAdapter(new RealWorkbenchAdapter());
     configureActivityAdapter(new RealActivityAdapter());
     configureAioAdapter(new RealAioAdapter());
@@ -33,6 +36,7 @@ async function bootstrap() {
     configureDataDirectoryAdapter(new RealDataDirectoryAdapter());
     configureDiagnosticsAdapter(new RealDiagnosticsAdapter());
     configureSystemDialogAdapter(new RealSystemDialogAdapter());
+    configureScreenAdapter(new RealScreenAdapter());
   } else if (import.meta.env.DEV) {
     const { FixtureWorkbenchAdapter } = await import("@/dev-fixtures/workbenchFixtureAdapter");
     const { FixtureActivityAdapter } = await import("@/dev-fixtures/activityFixtureAdapter");
@@ -41,8 +45,11 @@ async function bootstrap() {
     const { FixtureDataDirectoryAdapter } = await import("@/dev-fixtures/dataDirectoryFixtureAdapter");
     const { FixtureDiagnosticsAdapter } = await import("@/dev-fixtures/diagnosticsFixtureAdapter");
     const { FixtureSystemDialogAdapter } = await import("@/dev-fixtures/systemDialogFixtureAdapter");
+    const { FixtureScreenAdapter } = await import("@/dev-fixtures/screenFixtureAdapter");
+    const screenAdapter = new FixtureScreenAdapter();
+    configureScreenAdapter(screenAdapter);
     configureWorkbenchAdapter(new FixtureWorkbenchAdapter());
-    configureActivityAdapter(new FixtureActivityAdapter());
+    configureActivityAdapter(new FixtureActivityAdapter(screenAdapter));
     configureAioAdapter(new FixtureAioAdapter());
     configureOperationsAdapter(new FixtureOperationsAdapter());
     configureDataDirectoryAdapter(new FixtureDataDirectoryAdapter());

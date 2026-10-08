@@ -54,7 +54,9 @@ use crate::infrastructure::deployment_remote::{
 use crate::infrastructure::device_api::{AioRegistrationPayload, DeviceApiClient};
 use crate::infrastructure::local_sqlite::host_key_repository::HostKeyRepository;
 use crate::infrastructure::local_sqlite::task_repository::TargetUpdate;
-use crate::infrastructure::project_context::{map_formal_error, project_database};
+use crate::infrastructure::project_context::{
+    map_formal_error, project_aio_database as project_database,
+};
 use crate::infrastructure::release_archive::create_generated_release_tar_observed;
 use crate::infrastructure::release_remote_auth::release_remote_auth;
 use crate::infrastructure::release_template::render_release_templates;
@@ -201,6 +203,18 @@ async fn prepare_deployment(
     let operator = project_operator(state, local_project_id).await?;
     let instance_id = application_instance_id().to_string();
     let pools = project_database(state, local_project_id).await?;
+    let platform_inventory =
+        crate::infrastructure::platform_aio::PlatformAioRepository::new(pools.platform.clone())
+            .list_all()
+            .await?;
+    let deployment_macs = target_macs
+        .iter()
+        .map(|mac| {
+            platform_inventory
+                .deployment_mac(mac)
+                .map(|value| (mac.clone(), value))
+        })
+        .collect::<AppResult<HashMap<_, _>>>()?;
     let local_projects =
         LocalProjectRepository::new(state.local_store.pool().clone(), state.secret_store.clone());
     let connection = local_projects
@@ -414,7 +428,8 @@ async fn prepare_deployment(
         std::fs::create_dir_all(&node_dir)
             .map_err(|error| AppError::io("创建节点渲染目录", &error))?;
         let (env, host_info, compose) = if let Some(manifest) = release_manifest.as_ref() {
-            let context = render_context(node, &profile, manifest);
+            let mut context = render_context(node, &profile, manifest);
+            context.node_mac = deployment_macs[mac].clone();
             let rendered = render_release_templates(
                 &profile.values.env_template,
                 &profile.values.host_info_template,
@@ -463,7 +478,7 @@ async fn prepare_deployment(
                 registration: AioRegistrationPayload {
                     name: node.name.clone(),
                     ip: node.ip.clone(),
-                    mac: node.mac_normalized.clone(),
+                    mac: deployment_macs[mac].clone(),
                     platform_ip: profile.values.platform_host.clone(),
                     platform_port: profile.values.platform_api_port.to_string(),
                     auth_key: profile.credentials.platform_auth_key.clone(),
@@ -1641,6 +1656,8 @@ mod tests {
                 secret_store: Arc::new(MemorySecretStore::default()),
                 runtime_registry: ProjectRuntimeRegistry::default(),
                 job_supervisor,
+                task_recovery_registry:
+                    crate::infrastructure::task_handlers::built_in_recovery_registry(),
                 task_handler_registry,
                 task_queue,
                 task_event_bus,

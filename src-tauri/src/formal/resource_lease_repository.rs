@@ -96,20 +96,26 @@ impl ResourceLeaseRepository {
     }
 
     pub async fn acquire_many(&self, requests: Vec<LeaseRequest>) -> FormalResult<Vec<LeaseGrant>> {
-        self.acquire_many_with_policy(requests, false).await
+        self.acquire_many_with_policy(requests, false, false).await
     }
 
     pub async fn force_acquire_many(
         &self,
         requests: Vec<LeaseRequest>,
     ) -> FormalResult<Vec<LeaseGrant>> {
-        self.acquire_many_with_policy(requests, true).await
+        self.acquire_many_with_policy(requests, true, false).await
+    }
+
+    /// 只恢复同一操作自己的占用，不能借恢复覆盖其他操作。
+    pub async fn recover_same_operation(&self, requests: Vec<LeaseRequest>) -> FormalResult<Vec<LeaseGrant>> {
+        self.acquire_many_with_policy(requests, true, true).await
     }
 
     async fn acquire_many_with_policy(
         &self,
         requests: Vec<LeaseRequest>,
         force_takeover: bool,
+        same_operation_only: bool,
     ) -> FormalResult<Vec<LeaseGrant>> {
         if requests.is_empty() {
             return Err(FormalError::InvalidConfig("租约目标不能为空".into()));
@@ -129,7 +135,7 @@ impl ResourceLeaseRepository {
         })?;
         let mut grants = Vec::with_capacity(unique.len());
         for (_, request) in unique {
-            match acquire_one(&mut transaction, &request, force_takeover).await? {
+            match acquire_one(&mut transaction, &request, force_takeover, same_operation_only).await? {
                 LeaseOutcome::Acquired(grant) => grants.push(grant),
                 LeaseOutcome::Busy {
                     resource_type,
@@ -232,8 +238,29 @@ async fn acquire_one(
     transaction: &mut Transaction<'_, MySql>,
     request: &LeaseRequest,
     force_takeover: bool,
+    same_operation_only: bool,
 ) -> FormalResult<LeaseOutcome> {
     validate_request(request)?;
+    // 先以唯一键建立/锁定记录，再读取。对不存在的键先 SELECT FOR UPDATE
+    // 会让并发事务同时持有间隙锁，随后 INSERT 互相等待而发生死锁。
+    // released/0 仅在本事务内作为初始值，真正获得占用时推进到 active/1。
+    sqlx::query(
+        "INSERT INTO resource_lease \
+         (resource_type, resource_key, domain_type, operation_id, owner_instance_id, owner_user, \
+          lease_token, fencing_token, lease_state, acquired_at, heartbeat_at, expires_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'released', UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)) \
+         ON DUPLICATE KEY UPDATE resource_key = resource_lease.resource_key",
+    )
+    .bind(&request.resource_type)
+    .bind(&request.resource_key)
+    .bind(&request.domain_type)
+    .bind(&request.operation_id)
+    .bind(&request.owner_instance_id)
+    .bind(&request.owner_user)
+    .bind(Uuid::now_v7().to_string())
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| map_error("初始化资源租约", error))?;
     let row = sqlx::query(
         "SELECT owner_instance_id, operation_id, fencing_token, lease_state, \
          expires_at <= UTC_TIMESTAMP(6) AS expired FROM resource_lease \
@@ -262,7 +289,8 @@ async fn acquire_one(
         let expired: i8 = row
             .try_get("expired")
             .map_err(|_| FormalError::LocalDatabase("解析租约过期状态"))?;
-        if state == "active" && expired == 0 && !force_takeover {
+        if state == "active" && ((expired == 0 && !force_takeover)
+            || (same_operation_only && (operation_id != request.operation_id || owner != request.owner_instance_id))) {
             return Ok(LeaseOutcome::Busy {
                 resource_type: request.resource_type.clone(),
                 resource_key: request.resource_key.clone(),

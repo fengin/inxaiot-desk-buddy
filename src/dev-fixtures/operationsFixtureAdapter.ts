@@ -24,7 +24,7 @@ export class FixtureOperationsAdapter implements OperationsAdapter {
     projectId: string,
     preflightTaskId: string,
     plan: Parameters<OperationsAdapter["preflight"]>[2]
-  ) {
+  ): ReturnType<OperationsAdapter["preflight"]> {
     let sequence = 0;
     const totalWorkItems = preflightWorkTotal(plan.mode, plan.targetMacs.length);
     const emitProgress = (
@@ -149,7 +149,7 @@ export class FixtureOperationsAdapter implements OperationsAdapter {
     projectId: string,
     preflightTaskId: Parameters<OperationsAdapter["submit"]>[1],
     executionSnapshot: Parameters<OperationsAdapter["submit"]>[2]
-  ) {
+  ): ReturnType<OperationsAdapter["submit"]> {
     const checked = this.preflightSnapshots.get(preflightTaskId);
     if (!checked || checked.projectId !== projectId) {
       throw new Error("检查结果已失效，请重新检查");
@@ -162,7 +162,7 @@ export class FixtureOperationsAdapter implements OperationsAdapter {
       plan.mode,
       projectId,
       plan.targetMacs,
-      plan.artifactName
+      plan.artifactName ?? "服务镜像"
     );
     return {
       taskId: task.id,

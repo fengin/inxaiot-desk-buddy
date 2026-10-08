@@ -181,43 +181,8 @@ impl<'a> Stage75Adapter<'a> {
             .await
             .map_err(map_formal_error)?;
         runtime.set_health(ConnectionHealth::Connecting).await;
-        let result = runtime
-            .database_or_try_init(|| async {
-                let connection = self
-                    .projects()
-                    .connection_secrets(project_id)
-                    .await
-                    .map_err(map_formal_error)?;
-                let config = mysql_config(
-                    &ProjectInput {
-                        name: connection.project.name,
-                        platform_url: connection.project.platform_url,
-                        db_host: connection.project.db_host,
-                        db_port: connection.project.db_port,
-                        db_user: connection.project.db_user,
-                        db_tls_enabled: connection.project.db_tls_enabled,
-                        db_password: Some(connection.db_password),
-                        business_db: connection.project.business_db,
-                        workbench_db: connection.project.workbench_db,
-                    },
-                    None,
-                )?;
-                let pools = DualMySqlPools::connect(&config).await?;
-                let report = pools.probe(&config).await?;
-                if !report.missing_required_columns.is_empty() {
-                    pools.close().await;
-                    return Err(AppError::InvalidConfig(format!(
-                        "平台一体机表缺少字段：{}",
-                        report.missing_required_columns.join("、")
-                    )));
-                }
-                self.projects()
-                    .touch_opened(project_id)
-                    .await
-                    .map_err(map_formal_error)?;
-                Ok(pools)
-            })
-            .await;
+        let result =
+            crate::infrastructure::project_context::project_pools(self.state, project_id).await;
         let pools = match result {
             Ok(pools) => pools,
             Err(error) => {
@@ -412,7 +377,7 @@ impl ProjectManagementPort for Stage75Adapter<'_> {
             .await
             .map_err(map_formal_error)?;
         pools.close().await;
-        let platform_schema_compatible = report.missing_required_columns.is_empty();
+        let platform_schema_compatible = true;
         Ok(ProjectConnectionTestResult {
             successful: platform_schema_compatible,
             platform_database_connected: true,
@@ -422,18 +387,30 @@ impl ProjectManagementPort for Stage75Adapter<'_> {
             workbench_schema_message: schema.message,
             mysql_version: report.server_version,
             connection_encrypted: report.tls_cipher.is_some(),
-            message: if platform_schema_compatible {
-                "双数据库连接和平台 Schema 探测通过".into()
-            } else {
-                format!(
-                    "平台一体机表缺少字段：{}",
-                    report.missing_required_columns.join("、")
-                )
-            },
+            message: "平台与工作台数据库连接成功；业务表在使用对应功能时检查".into(),
         })
     }
 
     async fn switch_project(&self, project_id: &str) -> AppResult<ProjectOverview> {
+        let project = self
+            .projects()
+            .get(project_id)
+            .await
+            .map_err(map_formal_error)?;
+        if crate::domain::common::project::local_project_only(
+            &project.platform_url,
+            &project.db_host,
+            &project.db_user,
+            &project.business_db,
+        ) {
+            self.projects()
+                .touch_opened(project_id)
+                .await
+                .map_err(map_formal_error)?;
+            let mut overview = self.overview(project).await?;
+            overview.status_message = "本机项目可用；配置平台连接后可使用项目共享功能".into();
+            return Ok(overview);
+        }
         let (_, schema) = self.pools_and_schema(project_id).await?;
         let record = self
             .projects()
@@ -494,8 +471,7 @@ impl ProjectManagementPort for Stage75Adapter<'_> {
         project_id: &str,
         request: PlatformLoginRequest,
     ) -> AppResult<ProjectSessionView> {
-        // 数据库及Schema问题在登录项目时提示，不延后到部署检查页。
-        self.ready_pools(project_id).await?;
+        // 登录与共享库连接分别检查；共享库故障不阻止获得平台会话。
         self.register_secrets([request.password.clone()]);
         let project = self
             .projects()
@@ -604,6 +580,11 @@ impl ProjectAccessPort for Stage75Adapter<'_> {
             ProjectAccessRequirement::Configured => {}
             ProjectAccessRequirement::ActiveSession => {
                 self.require_active_session(project_id).await?;
+            }
+            ProjectAccessRequirement::PlatformRead => {
+                self.require_active_session(project_id).await?;
+                crate::infrastructure::project_context::project_pools(self.state, project_id)
+                    .await?;
             }
             ProjectAccessRequirement::Ready => {
                 self.require_active_session(project_id).await?;

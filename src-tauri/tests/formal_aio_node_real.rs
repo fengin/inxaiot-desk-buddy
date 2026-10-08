@@ -1,54 +1,15 @@
-use std::path::Path;
-use std::time::Duration;
+#[path = "common/aio_test_config.rs"]
+mod aio_test_config;
 
-use inxaiot_desk_buddy_lib::core::secret::SecretValue;
 use inxaiot_desk_buddy_lib::formal::aio_node_repository::{
     AioNodeRepository, AioNodeValues, AioNodeWrite, ServiceVersionWrite,
 };
 use inxaiot_desk_buddy_lib::formal::error::FormalError;
 use inxaiot_desk_buddy_lib::formal::mac;
 use inxaiot_desk_buddy_lib::formal::workbench_store::WorkbenchStore;
-use inxaiot_desk_buddy_lib::infrastructure::database::{
-    DatabaseTlsMode, DualMySqlPools, MySqlProjectConfig,
-};
+use inxaiot_desk_buddy_lib::infrastructure::database::DualMySqlPools;
 use sqlx::Row;
 use uuid::Uuid;
-
-fn line<'a>(text: &'a str, label: &str) -> &'a str {
-    text.lines()
-        .find_map(|item| item.trim().strip_prefix(label))
-        .map(str::trim)
-        .unwrap_or_else(|| panic!("missing {label}"))
-}
-
-fn default<'a>(text: &'a str, key: &str) -> &'a str {
-    let marker = format!("${{{key}:");
-    let rest = &text[text.find(&marker).expect("config default") + marker.len()..];
-    &rest[..rest.find('}').expect("config default end")]
-}
-
-fn config() -> MySqlProjectConfig {
-    let project = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("project");
-    let description =
-        std::fs::read_to_string(project.join("test/测试数据说明.txt")).expect("test data");
-    let workspace = project.parent().and_then(Path::parent).expect("workspace");
-    let yaml = std::fs::read_to_string(workspace.join(
-        "inxvision-platform/inxaiot-starter-platform/src/main/resources/application-dev.yml",
-    ))
-    .expect("platform config");
-    MySqlProjectConfig {
-        host: default(&yaml, "MYSQL_HOST").into(),
-        port: default(&yaml, "MYSQL_PORT").parse().expect("mysql port"),
-        username: default(&yaml, "MYSQL_USER").into(),
-        password: SecretValue::new(default(&yaml, "MYSQL_PASSWORD")),
-        platform_schema: line(&description, "平台业务数据库名：").into(),
-        workbench_schema: line(&description, "工作台数据库：").into(),
-        tls_mode: DatabaseTlsMode::Disabled,
-        connect_timeout: Duration::from_secs(10),
-    }
-}
 
 fn values(mac: &str, name: &str) -> AioNodeValues {
     AioNodeValues {
@@ -82,7 +43,7 @@ fn mac_normalization_is_the_only_asset_identity() {
 #[tokio::test]
 #[ignore = "writes and removes one isolated aio node"]
 async fn aio_asset_optimistic_lock_service_version_audit_and_cleanup() {
-    let config = config();
+    let config = aio_test_config::isolated_project();
     let pools = DualMySqlPools::connect(&config)
         .await
         .expect("connect project mysql");

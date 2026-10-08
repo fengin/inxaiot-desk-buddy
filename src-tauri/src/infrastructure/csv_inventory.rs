@@ -1,13 +1,11 @@
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::net::IpAddr;
 use std::path::Path;
 
 use csv::{ReaderBuilder, StringRecord, Trim};
 
 use crate::core::error::{AppError, AppResult};
-use crate::domain::aio::inventory::{InventoryValues, ParsedInventoryRow};
-use crate::domain::aio::mac::MacAddress;
+use crate::domain::aio::inventory::{InventoryValues, ParsedInventoryRow, validate_inventory_values};
 
 const MAX_INVENTORY_BYTES: u64 = 10 * 1024 * 1024;
 const REQUIRED_HEADERS: &[&str] = &["name", "ip", "mac"];
@@ -111,7 +109,7 @@ fn parse_row(
     record: &StringRecord,
     headers: &HashMap<String, usize>,
 ) -> ParsedInventoryRow {
-    let mut values = InventoryValues {
+    let values = InventoryValues {
         name: value(record, headers, "name"),
         ip: value(record, headers, "ip"),
         mac: value(record, headers, "mac"),
@@ -122,34 +120,7 @@ fn parse_row(
         location: optional_value(record, headers, "location"),
         remark: optional_value(record, headers, "remark"),
     };
-    values.normalize_text();
-    let mut errors = Vec::new();
-    if values.name.is_empty() {
-        errors.push(format!("第 {row_number} 行：名称不能为空"));
-    }
-    if values.ip.is_empty() {
-        errors.push(format!("第 {row_number} 行：IP 不能为空"));
-    } else if values.ip.parse::<IpAddr>().is_err() {
-        errors.push(format!("第 {row_number} 行：IP 格式无效"));
-    }
-    let mac_normalized = if values.mac.is_empty() {
-        errors.push(format!("第 {row_number} 行：MAC 不能为空"));
-        None
-    } else {
-        match MacAddress::parse(&values.mac) {
-            Ok(mac) => Some(mac.normalized().to_string()),
-            Err(_) => {
-                errors.push(format!("第 {row_number} 行：MAC 格式无效"));
-                None
-            }
-        }
-    };
-    ParsedInventoryRow {
-        row_number,
-        values,
-        mac_normalized,
-        errors,
-    }
+    validate_inventory_values(row_number, values)
 }
 
 fn value(record: &StringRecord, headers: &HashMap<String, usize>, name: &str) -> String {

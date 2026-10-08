@@ -33,6 +33,8 @@ export const useActivityStore = defineStore("activity", () => {
   let refreshTimer: number | undefined;
   let taskRefreshRequest = 0;
   let logRefreshRequest = 0;
+  let taskSelectionRevision = 0;
+  let pendingTaskFocus: { projectId: string; taskId: string } | undefined;
 
   const selectedTask = computed(
     () => tasks.value.find((task) => task.id === selectedTaskId.value) ?? tasks.value[0]
@@ -42,7 +44,7 @@ export const useActivityStore = defineStore("activity", () => {
   );
   const canClearFinishedTasks = computed(() => tasks.value.some((task) =>
     terminalStates.has(task.state)
-    && !(task.operationType === "deployment_preflight" && task.state === "succeeded")
+    && task.clearable !== false
   ));
   const canClearSelectedTaskLogs = computed(
     () => Boolean(selectedTask.value && terminalStates.has(selectedTask.value.state))
@@ -53,8 +55,11 @@ export const useActivityStore = defineStore("activity", () => {
     panelOpen.value = true;
   }
 
-  async function refreshTasks(nextProjectId = projectId.value) {
+  async function refreshTasks(nextProjectId = projectId.value, preferredTaskId?: string) {
     const request = ++taskRefreshRequest;
+    const selectionRevision = taskSelectionRevision;
+    if (pendingTaskFocus?.projectId !== nextProjectId) pendingTaskFocus = undefined;
+    if (preferredTaskId) pendingTaskFocus = { projectId: nextProjectId, taskId: preferredTaskId };
     if (!nextProjectId) {
       projectId.value = "";
       selectedTaskId.value = "";
@@ -74,9 +79,23 @@ export const useActivityStore = defineStore("activity", () => {
     loading.value = true;
     error.value = "";
     try {
-      const nextTasks = await useActivityAdapter().listTasks(nextProjectId, 100);
+      let nextTasks = await useActivityAdapter().listTasks(nextProjectId, 100);
       if (request !== taskRefreshRequest || projectId.value !== nextProjectId) return;
+      const requestedFocus = pendingTaskFocus?.projectId === nextProjectId
+        ? pendingTaskFocus.taskId
+        : selectedTaskId.value;
+      // 历史页可打开最近 500 条中的任务，事件刷新时也要保留其日志选择。
+      if (requestedFocus && nextTasks.length >= 100 && !nextTasks.some(task => task.id === requestedFocus)) {
+        nextTasks = await useActivityAdapter().listTasks(nextProjectId, 500);
+        if (request !== taskRefreshRequest || projectId.value !== nextProjectId) return;
+      }
       tasks.value = nextTasks;
+      const focus = pendingTaskFocus?.projectId === nextProjectId ? pendingTaskFocus.taskId : undefined;
+      if (focus && selectionRevision === taskSelectionRevision && tasks.value.some(task => task.id === focus)) {
+        selectedTaskId.value = focus;
+        pendingTaskFocus = undefined;
+        logs.value = [];
+      }
       if (!tasks.value.some((task) => task.id === selectedTaskId.value)) {
         selectedTaskId.value = tasks.value[0]?.id ?? "";
       }
@@ -138,6 +157,9 @@ export const useActivityStore = defineStore("activity", () => {
   }
 
   async function selectTask(taskId: string) {
+    taskSelectionRevision += 1;
+    pendingTaskFocus = undefined;
+    if (selectedTaskId.value !== taskId) logs.value = [];
     selectedTaskId.value = taskId;
     await refreshLogs();
   }
@@ -220,6 +242,7 @@ export const useActivityStore = defineStore("activity", () => {
   }
 
   function dispose() {
+    pendingTaskFocus = undefined;
     unlisten?.();
     unlisten = undefined;
     if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);

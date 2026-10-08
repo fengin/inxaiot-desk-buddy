@@ -34,6 +34,25 @@ pub struct PlatformInventorySnapshot {
     pub issues: Vec<PlatformRecordIssue>,
 }
 
+impl PlatformInventorySnapshot {
+    /// 内部锁和资产按规范化 MAC 匹配；平台接口按原始文本匹配，部署配置必须保留该写法。
+    pub fn deployment_mac(&self, mac: &str) -> AppResult<String> {
+        let normalized = MacAddress::parse(mac)?.normalized().to_string();
+        let matches = self
+            .nodes
+            .iter()
+            .filter(|node| node.mac_normalized == normalized)
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [] => Ok(normalized),
+            [node] => Ok(node.mac_raw.clone()),
+            _ => Err(AppError::Conflict(format!(
+                "平台中同一 MAC（{normalized}）有多条一体机记录，请先在平台处理重复记录后重试"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PlatformAioRepository {
     pool: MySqlPool,
@@ -171,7 +190,44 @@ fn invalid_mac_issue(
 
 #[cfg(test)]
 mod tests {
-    use super::{PLATFORM_AIO_SELECT, invalid_mac_issue};
+    use super::{PLATFORM_AIO_SELECT, PlatformInventorySnapshot, invalid_mac_issue};
+    use crate::domain::aio::inventory::PlatformNodeSnapshot;
+
+    #[test]
+    fn deployment_preserves_platform_mac_text_and_rejects_duplicate_identity() {
+        let mut snapshot = PlatformInventorySnapshot::default();
+        assert_eq!(
+            snapshot.deployment_mac("00:0c:29:3b:b9:33").unwrap(),
+            "000C293BB933"
+        );
+        let node = PlatformNodeSnapshot {
+            id: "old-id".into(),
+            name: "existing".into(),
+            ip: "192.168.3.79".into(),
+            mac_raw: "00:0c:29:3b:b9:33".into(),
+            mac_normalized: "000C293BB933".into(),
+            building_id: None,
+            addr_alias: None,
+            status: Some(1),
+            last_beat_time: None,
+            last_sync_time: None,
+        };
+        snapshot.nodes.push(node.clone());
+        assert_eq!(
+            snapshot.deployment_mac("000C293BB933").unwrap(),
+            node.mac_raw
+        );
+        assert_eq!(
+            snapshot.deployment_mac("00-0C-29-3B-B9-33").unwrap(),
+            node.mac_raw
+        );
+        let mut duplicate = node;
+        duplicate.id = "new-id".into();
+        duplicate.mac_raw = "000C293BB933".into();
+        snapshot.nodes.push(duplicate);
+        assert!(snapshot.deployment_mac("000C293BB933").is_err());
+        assert!(snapshot.deployment_mac("invalid").is_err());
+    }
 
     #[test]
     fn platform_adapter_statement_is_strictly_read_only() {
@@ -209,4 +265,23 @@ mod tests {
             "未填写 MAC 地址"
         );
     }
+}
+
+pub async fn require_aio_schema(pool: &sqlx::MySqlPool) -> crate::core::error::AppResult<()> {
+    crate::infrastructure::database::require_table_columns(
+        pool,
+        "op_edge_aio_server",
+        &[
+            "id",
+            "name",
+            "ip",
+            "mac",
+            "building_id",
+            "addr_alias",
+            "status",
+            "last_beat_time",
+            "last_sync_time",
+        ],
+    )
+    .await
 }

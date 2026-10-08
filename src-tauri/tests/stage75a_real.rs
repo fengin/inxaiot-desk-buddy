@@ -1,3 +1,6 @@
+#[path = "common/project_test_config.rs"]
+mod project_test_config;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,13 +57,8 @@ fn line<'a>(text: &'a str, label: &str) -> &'a str {
         .unwrap_or_else(|| panic!("missing {label}"))
 }
 
-fn default<'a>(text: &'a str, key: &str) -> &'a str {
-    let marker = format!("${{{key}:");
-    let rest = &text[text.find(&marker).expect("config default") + marker.len()..];
-    &rest[..rest.find('}').expect("config default end")]
-}
-
 fn config() -> TestConfig {
+    let database = project_test_config::database();
     let project_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("project")
@@ -70,23 +68,15 @@ fn config() -> TestConfig {
     let start = description.find('{').expect("login json");
     let end = start + description[start..].find('}').expect("login json end") + 1;
     let login = serde_json::from_str(&description[start..end]).expect("login json parse");
-    let workspace = project_root
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace");
-    let yaml = std::fs::read_to_string(workspace.join(
-        "inxvision-platform/inxaiot-starter-platform/src/main/resources/application-dev.yml",
-    ))
-    .expect("platform config");
     let suffix = Uuid::now_v7().simple().to_string();
     TestConfig {
         project_root,
         platform_schema: line(&description, "平台业务数据库名：").into(),
         platform_url: format!("http://{}", line(&description, "平台API：")),
-        host: default(&yaml, "MYSQL_HOST").into(),
-        port: default(&yaml, "MYSQL_PORT").parse().expect("mysql port"),
-        username: default(&yaml, "MYSQL_USER").into(),
-        password: default(&yaml, "MYSQL_PASSWORD").into(),
+        host: database.host,
+        port: database.port,
+        username: database.username,
+        password: database.password,
         schema: format!("inxaiot_desk_buddy_stage75int_{}", &suffix[..12]),
         description,
         login,
@@ -230,6 +220,8 @@ async fn stage75a_real_adapter_project_session_profile_and_host_key_contract() {
             secret_store: Arc::new(MemorySecretStore::default()),
             runtime_registry: ProjectRuntimeRegistry::default(),
             job_supervisor,
+            task_recovery_registry:
+                inxaiot_desk_buddy_lib::infrastructure::task_handlers::built_in_recovery_registry(),
             task_handler_registry,
             task_queue,
             task_event_bus,

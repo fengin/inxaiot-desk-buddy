@@ -177,6 +177,13 @@ export class FixtureWorkbenchAdapter implements WorkbenchAdapter {
 
   async switchProject(projectId: string) {
     const project = this.requiredProject(projectId);
+    if (![project.platformUrl, project.dbHost, project.dbUser, project.businessDb].some((value) => value.trim())) {
+      project.connectionState = "disconnected";
+      project.databaseState = "disconnected";
+      project.schemaState = undefined;
+      project.statusMessage = "本机项目可用";
+      return structuredClone(project);
+    }
     project.databaseState = "connected";
     project.connectionEncrypted = project.dbTlsEnabled;
     project.schemaState = "ready";

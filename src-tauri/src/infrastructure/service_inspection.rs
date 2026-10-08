@@ -26,7 +26,9 @@ use crate::infrastructure::local_sqlite::host_key_repository::HostKeyRepository;
 use crate::infrastructure::local_sqlite::task_repository::{
     CreateTask, TargetUpdate, TaskStepWrite,
 };
-use crate::infrastructure::project_context::{map_formal_error, project_database};
+use crate::infrastructure::project_context::{
+    map_formal_error, project_aio_database as project_database,
+};
 use crate::infrastructure::release_remote_auth::release_remote_auth;
 use crate::infrastructure::remote::RusshConnector;
 use crate::infrastructure::remote::observed::ObservedConnector;
@@ -677,6 +679,8 @@ mod tests {
             secret_store: Arc::new(MemorySecretStore::default()),
             runtime_registry: ProjectRuntimeRegistry::default(),
             job_supervisor,
+            task_recovery_registry:
+                crate::infrastructure::task_handlers::built_in_recovery_registry(),
             task_handler_registry,
             task_queue,
             task_event_bus,

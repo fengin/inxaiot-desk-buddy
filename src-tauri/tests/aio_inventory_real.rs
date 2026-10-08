@@ -1,12 +1,9 @@
-use std::path::Path;
-use std::time::Duration;
+#[path = "common/aio_test_config.rs"]
+mod aio_test_config;
 
-use inxaiot_desk_buddy_lib::core::secret::SecretValue;
 use inxaiot_desk_buddy_lib::domain::aio::inventory::ImportCounts;
 use inxaiot_desk_buddy_lib::formal::workbench_store::WorkbenchStore;
-use inxaiot_desk_buddy_lib::infrastructure::database::{
-    DatabaseTlsMode, DualMySqlPools, MySqlProjectConfig,
-};
+use inxaiot_desk_buddy_lib::infrastructure::database::DualMySqlPools;
 use inxaiot_desk_buddy_lib::infrastructure::platform_aio::PlatformAioRepository;
 use inxaiot_desk_buddy_lib::infrastructure::workbench_aio::{
     ApplyInventoryWrite, InventoryAssetWrite, WorkbenchAioRepository,
@@ -14,42 +11,6 @@ use inxaiot_desk_buddy_lib::infrastructure::workbench_aio::{
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use uuid::Uuid;
-
-fn line<'a>(text: &'a str, label: &str) -> &'a str {
-    text.lines()
-        .find_map(|item| item.trim().strip_prefix(label))
-        .map(str::trim)
-        .unwrap_or_else(|| panic!("missing {label}"))
-}
-
-fn default<'a>(text: &'a str, key: &str) -> &'a str {
-    let marker = "$".to_string() + "{" + key + ":";
-    let rest = &text[text.find(&marker).expect("config default") + marker.len()..];
-    &rest[..rest.find('}').expect("config default end")]
-}
-
-fn config() -> MySqlProjectConfig {
-    let project = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("project");
-    let description =
-        std::fs::read_to_string(project.join("test/测试数据说明.txt")).expect("test data");
-    let workspace = project.parent().and_then(Path::parent).expect("workspace");
-    let yaml = std::fs::read_to_string(workspace.join(
-        "inxvision-platform/inxaiot-starter-platform/src/main/resources/application-dev.yml",
-    ))
-    .expect("platform config");
-    MySqlProjectConfig {
-        host: default(&yaml, "MYSQL_HOST").into(),
-        port: default(&yaml, "MYSQL_PORT").parse().expect("mysql port"),
-        username: default(&yaml, "MYSQL_USER").into(),
-        password: SecretValue::new(default(&yaml, "MYSQL_PASSWORD")),
-        platform_schema: line(&description, "平台业务数据库名：").into(),
-        workbench_schema: line(&description, "工作台数据库：").into(),
-        tls_mode: DatabaseTlsMode::Disabled,
-        connect_timeout: Duration::from_secs(10),
-    }
-}
 
 fn isolated_mac() -> String {
     let uuid = Uuid::now_v7().simple().to_string().to_uppercase();
@@ -103,7 +64,7 @@ fn asset(mac: String, ip_suffix: u8) -> InventoryAssetWrite {
 #[tokio::test]
 #[ignore = "requires authorized project databases and writes exact isolated assets"]
 async fn platform_is_read_only_and_import_application_is_atomic_and_exactly_cleaned() {
-    let pools = DualMySqlPools::connect(&config())
+    let pools = DualMySqlPools::connect(&aio_test_config::isolated_project())
         .await
         .expect("connect project databases");
     WorkbenchStore::new(pools.workbench.clone())

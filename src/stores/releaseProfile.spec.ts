@@ -32,10 +32,28 @@ class DelayedSaveAdapter extends FixtureWorkbenchAdapter {
   }
 }
 
+import { emptyReleaseProfileDraft } from "@/shared/model/releaseProfile";
+
 describe("release profile store", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     configureWorkbenchAdapter(new FixtureWorkbenchAdapter());
+  });
+
+  it("uses built-in templates for new profiles and keeps saved project templates on reset", async () => {
+    const draft = emptyReleaseProfileDraft();
+    expect(draft.values.envTemplate).toContain("DEVICE_EDGE_IMAGE={{ images.device-edge }}");
+    expect(draft.values.composeTemplate).toContain("device-edge-web:");
+    expect(draft.values.hostInfoTemplate).toContain("{{ node.mac }}");
+    const store = useReleaseProfileStore();
+    await store.load("project-chengdu-center");
+    expect(store.profile).toBeUndefined();
+    expect(store.draft.values).toEqual(draft.values);
+    await store.load("project-shenzhen-bay");
+    const savedEnv = store.profile!.values.envTemplate;
+    store.draft.values.envTemplate = "temporary edit";
+    store.resetDraft();
+    expect(store.draft.values.envTemplate).toBe(savedEnv);
   });
 
   it("loads, validates and saves with an optimistic version", async () => {

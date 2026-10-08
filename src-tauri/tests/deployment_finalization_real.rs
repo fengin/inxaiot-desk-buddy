@@ -1,4 +1,6 @@
-use std::path::Path;
+#[path = "common/project_test_config.rs"]
+mod project_test_config;
+
 use std::time::Duration;
 
 use inxaiot_desk_buddy_lib::formal::aio_node_repository::ServiceVersionWrite;
@@ -25,27 +27,14 @@ struct TestConfig {
     schema: String,
 }
 
-fn default<'a>(text: &'a str, key: &str) -> &'a str {
-    let marker = format!("${{{key}:");
-    let rest = &text[text.find(&marker).expect("config default") + marker.len()..];
-    &rest[..rest.find('}').expect("config default end")]
-}
-
 fn config() -> TestConfig {
-    let project = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("project root");
-    let workspace = project.parent().and_then(Path::parent).expect("workspace");
-    let yaml = std::fs::read_to_string(workspace.join(
-        "inxvision-platform/inxaiot-starter-platform/src/main/resources/application-dev.yml",
-    ))
-    .expect("platform config");
+    let database = project_test_config::database();
     let suffix = Uuid::now_v7().simple().to_string();
     TestConfig {
-        host: default(&yaml, "MYSQL_HOST").into(),
-        port: default(&yaml, "MYSQL_PORT").parse().expect("mysql port"),
-        username: default(&yaml, "MYSQL_USER").into(),
-        password: default(&yaml, "MYSQL_PASSWORD").into(),
+        host: database.host,
+        port: database.port,
+        username: database.username,
+        password: database.password,
         schema: format!("inxaiot_desk_buddy_finalization_{}", &suffix[..12]),
     }
 }

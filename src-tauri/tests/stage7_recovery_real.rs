@@ -1,3 +1,6 @@
+#[path = "common/project_test_config.rs"]
+mod project_test_config;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,28 +29,18 @@ fn line<'a>(text: &'a str, label: &str) -> &'a str {
         .unwrap_or_else(|| panic!("missing {label}"))
 }
 
-fn default<'a>(text: &'a str, key: &str) -> &'a str {
-    let marker = "$".to_string() + "{" + key + ":";
-    let rest = &text[text.find(&marker).expect("config default") + marker.len()..];
-    &rest[..rest.find('}').expect("config default end")]
-}
-
 fn config() -> MySqlProjectConfig {
+    let database = project_test_config::database();
     let project = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("project");
     let description =
         std::fs::read_to_string(project.join("test/测试数据说明.txt")).expect("test data");
-    let workspace = project.parent().and_then(Path::parent).expect("workspace");
-    let yaml = std::fs::read_to_string(workspace.join(
-        "inxvision-platform/inxaiot-starter-platform/src/main/resources/application-dev.yml",
-    ))
-    .expect("platform config");
     MySqlProjectConfig {
-        host: default(&yaml, "MYSQL_HOST").into(),
-        port: default(&yaml, "MYSQL_PORT").parse().expect("mysql port"),
-        username: default(&yaml, "MYSQL_USER").into(),
-        password: SecretValue::new(default(&yaml, "MYSQL_PASSWORD")),
+        host: database.host,
+        port: database.port,
+        username: database.username,
+        password: SecretValue::new(database.password),
         platform_schema: line(&description, "平台业务数据库名：").into(),
         workbench_schema: line(&description, "工作台数据库：").into(),
         tls_mode: DatabaseTlsMode::Disabled,
@@ -194,6 +187,10 @@ async fn stale_operation_keeps_known_result_and_marks_pending_target_unknown() {
 #[tokio::test]
 #[ignore = "runs two isolated owners against one random lease key and removes only that counter"]
 async fn concurrent_instances_allow_exactly_one_lease_owner() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("error")
+        .with_test_writer()
+        .try_init();
     let pools = DualMySqlPools::connect(&config())
         .await
         .expect("connect project mysql");
@@ -220,16 +217,17 @@ async fn concurrent_instances_allow_exactly_one_lease_owner() {
     barrier.wait().await;
     let mut winner: Option<LeaseGrant> = None;
     let mut conflicts = 0;
+    let mut unexpected = Vec::new();
     for handle in handles {
         match handle.await.expect("lease contender") {
             Ok(mut grants) => winner = grants.pop(),
             Err(FormalError::Conflict(_)) => conflicts += 1,
-            Err(error) => panic!("unexpected lease error: {error}"),
+            Err(error) => unexpected.push(error.to_string()),
         }
     }
-    assert_eq!(conflicts, 1);
-    let winner = winner.expect("one lease winner");
-    repository.release(&winner).await.expect("release winner");
+    if let Some(winner) = &winner {
+        repository.release(winner).await.expect("release winner");
+    }
     repository
         .delete_test_counter("aio", &resource_key)
         .await
@@ -244,6 +242,12 @@ async fn concurrent_instances_allow_exactly_one_lease_owner() {
     assert_eq!(remaining, 0);
     pools.close().await;
     println!("stage7 concurrent lease key={resource_key} remaining=0");
+    assert!(
+        unexpected.is_empty(),
+        "unexpected lease errors: {unexpected:?}"
+    );
+    assert_eq!(conflicts, 1);
+    assert!(winner.is_some(), "one lease winner");
 }
 
 #[tokio::test]

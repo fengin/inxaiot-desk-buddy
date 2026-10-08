@@ -22,6 +22,7 @@ pub struct ProjectRuntime {
     pub opened_at: OffsetDateTime,
     health: RwLock<ConnectionHealth>,
     database: OnceCell<Arc<DualMySqlPools>>,
+    platform_write: OnceCell<sqlx::MySqlPool>,
 }
 
 impl ProjectRuntime {
@@ -35,6 +36,7 @@ impl ProjectRuntime {
             opened_at: OffsetDateTime::now_utc(),
             health: RwLock::new(ConnectionHealth::Connecting),
             database: OnceCell::new(),
+            platform_write: OnceCell::new(),
         })
     }
 
@@ -65,7 +67,14 @@ impl ProjectRuntime {
         self.database.get().cloned()
     }
 
+    /// 与普通只读连接独立；只有已校验权限的限定业务方法使用。
+    pub async fn platform_write_or_try_init<F, Fut>(&self, initializer: F) -> AppResult<sqlx::MySqlPool>
+    where F: FnOnce() -> Fut, Fut: Future<Output = AppResult<sqlx::MySqlPool>> {
+        self.platform_write.get_or_try_init(initializer).await.cloned()
+    }
+
     pub async fn close_database(&self) {
+        if let Some(pool) = self.platform_write.get() { pool.close().await; }
         if let Some(pools) = self.database.get() {
             pools.close().await;
         }

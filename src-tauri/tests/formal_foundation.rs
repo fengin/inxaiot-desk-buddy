@@ -185,6 +185,8 @@ async fn app_state_remains_lightweight_and_composed_from_ports() {
         secret_store: Arc::new(MemorySecretStore::default()),
         runtime_registry: ProjectRuntimeRegistry::default(),
         job_supervisor,
+        task_recovery_registry:
+            inxaiot_desk_buddy_lib::infrastructure::task_handlers::built_in_recovery_registry(),
         task_handler_registry,
         task_queue,
         task_event_bus,

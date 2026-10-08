@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import OperationFormTheme from "@/shared/components/OperationFormTheme.vue";
 import {
   NAlert,
   NButton,
@@ -23,7 +24,6 @@ import {
   CheckCircle2,
   CircleAlert,
   ChevronDown,
-  ChevronRight,
   Clock3,
   FileArchive,
   History,
@@ -42,6 +42,7 @@ import { commandErrorCode, commandErrorText } from "@/shared/api/errors";
 import { formatDisplayLocalPath } from "@/shared/format/localPath";
 import { formatDisplayDateTime } from "@/shared/format/dateTime";
 import DeploymentPreflightGroups from "./DeploymentPreflightGroups.vue";
+import AioOperationTable from "./AioOperationTable.vue";
 import { useSystemDialogAdapter } from "@/shared/api/systemDialogAdapter";
 import type { OperationMode } from "@/shared/model/demo";
 import type {
@@ -79,9 +80,10 @@ const preflightSubmissionReady = computed(() =>
   && Boolean(workflow.preflightTaskId)
   && Boolean(workflow.preflight.executionSnapshot)
 );
-const mode = ref<OperationMode>("full_upgrade");
+const mode = ref<OperationMode>("service_upgrade");
 const step = ref(0);
 const selectedMacs = ref<string[]>([]);
+const targetSelectionNotice = ref("");
 const serviceName = ref("");
 const imageSelections = ref<Record<string, {
   filePath: string;
@@ -285,6 +287,7 @@ async function activateProjectContext(projectId?: string) {
   historyOpen.value = false;
   imageSelections.value = {};
   selectedMacs.value = [];
+  targetSelectionNotice.value = "";
   targetSearch.value = "";
   preflightTaskId.value = undefined;
   preflightProgressCurrent.value = 0;
@@ -297,6 +300,7 @@ async function activateProjectContext(projectId?: string) {
     workflow.clearTask();
   }
   if (!projectId || !projects.isReady) return;
+  const routedSelection = takeRoutedTargetSelection(projectId);
   await Promise.all([
     aio.refresh(projectId),
     aio.loadSelectionNodes(projectId),
@@ -305,16 +309,52 @@ async function activateProjectContext(projectId?: string) {
   ]);
   if (request !== projectContextRequest || projectId !== projects.activeProjectId) return;
   if (await restoreActiveDeployment(projectId)) return;
-  const routedTarget = typeof route.query.target === "string" ? route.query.target : "";
-  const routedNode = eligibleNodes.value.find(
-    (node) => node.mac === routedTarget && node.managementState !== "conflict"
-  );
-  selectedMacs.value = routedNode
-    ? [routedNode.mac]
-    : eligibleNodes.value
-        .filter((node) => node.managementState === "managed" && node.platformState === "online")
-        .slice(0, 4)
-        .map((node) => node.mac);
+  if (request !== projectContextRequest || projectId !== projects.activeProjectId) return;
+  if (routedSelection) {
+    if (routedSelection.projectId !== projectId) {
+      targetSelectionNotice.value = "所选一体机属于其他项目，请返回当前项目的一体机列表重新选择。";
+      return;
+    }
+    const selected = routedSelection.macs.flatMap((mac) => {
+      const matches = eligibleNodes.value.filter((node) => normalizeMac(node.mac) === mac);
+      return matches.length === 1 ? [matches[0]!.mac] : [];
+    });
+    selectedMacs.value = selected;
+    const skipped = routedSelection.macs.length - selected.length;
+    if (skipped > 0) {
+      targetSelectionNotice.value = `${skipped} 台一体机已移除或存在信息冲突，未带入本次操作；已保留其余 ${selected.length} 台，请核对执行范围。`;
+    } else if (!selected.length) {
+      targetSelectionNotice.value = "没有可带入的一体机，请返回列表重新选择。";
+    }
+    return;
+  }
+  selectedMacs.value = eligibleNodes.value
+    .filter((node) => node.managementState === "managed" && node.platformState === "online")
+    .slice(0, 4)
+    .map((node) => node.mac);
+}
+
+function normalizeMac(mac: string) {
+  return mac.replace(/[:\s-]/g, "").toUpperCase();
+}
+
+function takeRoutedTargetSelection(projectId: string) {
+  const isBatch = Object.prototype.hasOwnProperty.call(route.query, "targets");
+  if (!isBatch && !Object.prototype.hasOwnProperty.call(route.query, "target")) return undefined;
+  const values = isBatch ? route.query.targets : route.query.target;
+  const macs = [...new Set((Array.isArray(values) ? values : [values])
+    .filter((value): value is string => typeof value === "string" && Boolean(value.trim()))
+    .map(normalizeMac))];
+  // 批量跳转必须带所属项目；旧详情页的单台跳转使用当前项目。
+  const selectionProjectId = typeof route.query.project === "string"
+    ? route.query.project
+    : isBatch ? "" : projectId;
+  const query = { ...route.query };
+  delete query.targets;
+  delete query.target;
+  delete query.project;
+  void router.replace({ path: route.path, query, hash: route.hash });
+  return { projectId: selectionProjectId, macs };
 }
 
 async function restoreActiveDeployment(projectId: string) {
@@ -345,6 +385,13 @@ function nodeName(mac: string) {
   return eligibleNodes.value.find((node) => node.macNormalized === normalized)?.name
     ?? aio.nodes.find((node) => node.macNormalized === normalized)?.name
     ?? mac;
+}
+
+function nodeIp(mac: string) {
+  const normalized = mac.replace(/[:\s-]/g, "").toUpperCase();
+  return eligibleNodes.value.find((node) => node.macNormalized === normalized)?.ip
+    ?? aio.nodes.find((node) => node.macNormalized === normalized)?.ip
+    ?? "—";
 }
 
 function stageLabel(stage?: string) {
@@ -722,7 +769,7 @@ function historyArtifact(record: OperationHistoryItem) {
 </script>
 
 <template>
-  <section class="workspace-page operations-page" data-testid="aio-operations">
+  <section class="workspace-page operations-page aio-compact-operations" data-testid="aio-operations">
     <header class="page-header">
       <div><h1>部署升级</h1></div>
       <div class="page-actions"><n-button size="small" secondary @click="openHistory"><template #icon><History /></template>查看历史记录</n-button></div>
@@ -756,9 +803,11 @@ function historyArtifact(record: OperationHistoryItem) {
         <section v-if="step === 0" class="operation-stage select-stage">
           <div class="stage-main">
             <header class="stage-heading"><div><span class="feature-icon info"><PackageCheck :size="20" /></span><span><strong>选择{{ modeLabel }}范围</strong><small class="operation-mode-hint">{{ modeHint }}</small></span></div></header>
-            <div class="selection-toolbar"><span>目标一体机</span><b>已选 <strong class="metric-number metric-info" data-testid="selected-node-count">{{ selectedMacs.length }}</strong> / 可选 <strong class="metric-number metric-operation" data-testid="eligible-node-count">{{ eligibleNodes.length }}</strong> 台</b><n-input v-model:value="targetSearch" class="target-search" size="tiny" clearable placeholder="搜索全部节点" /><n-button size="tiny" quaternary @click="selectedMacs = visibleEligibleNodes.map((node) => node.mac)">选择全部匹配</n-button><n-button size="tiny" quaternary @click="selectedMacs = visibleEligibleNodes.filter((node) => node.platformState === 'online').map((node) => node.mac)">选择匹配在线</n-button><n-button size="tiny" quaternary @click="selectedMacs = []">清空</n-button></div>
+            <n-alert v-if="targetSelectionNotice" class="target-selection-notice" type="warning" :show-icon="true" data-testid="operation-target-selection-notice">{{ targetSelectionNotice }}</n-alert>
+            <div class="selection-toolbar"><n-input v-model:value="targetSearch" class="target-search" size="tiny" clearable placeholder="搜索全部节点" /><n-button size="tiny" quaternary @click="selectedMacs = visibleEligibleNodes.map((node) => node.mac)">选择全部匹配</n-button><n-button size="tiny" quaternary @click="selectedMacs = visibleEligibleNodes.filter((node) => node.platformState === 'online').map((node) => node.mac)">选择匹配在线</n-button><n-button size="tiny" quaternary @click="selectedMacs = []">清空</n-button><span>目标一体机</span><b>已选 <strong class="metric-number metric-info" data-testid="selected-node-count">{{ selectedMacs.length }}</strong> / 可选 <strong class="metric-number metric-operation" data-testid="eligible-node-count">{{ eligibleNodes.length }}</strong> 台</b></div>
             <div v-if="aio.selectionLoading" class="empty-state">正在读取项目完整节点选择集…</div>
-            <div class="node-selection-list">
+            <div class="aio-selection-head" aria-hidden="true"><span></span><span>一体机名称</span><span>IP 地址</span><span>位置</span><span>状态</span></div>
+            <div class="node-selection-list inx-scroll-area">
               <label v-for="node in visibleEligibleNodes" :key="node.mac" :class="{ selected: selectedMacs.includes(node.mac) }">
                 <n-checkbox :checked="selectedMacs.includes(node.mac)" @update:checked="toggleNode(node.mac, $event)" />
                 <strong class="node-selection-name" :title="node.name">{{ node.name }}</strong>
@@ -769,15 +818,16 @@ function historyArtifact(record: OperationHistoryItem) {
             </div>
           </div>
           <aside class="stage-settings">
+            <operation-form-theme>
             <h3>本次执行设置</h3>
             <n-alert v-if="!release.profile || !composeServices.length" type="warning" :show-icon="true" class="compose-missing-alert">
               请先在发布参数中配置并保存 docker-compose.yml
-              <template #action><n-button size="tiny" @click="router.push('/aio/release')">前往配置</n-button></template>
+              <n-button size="tiny" @click="router.push('/aio/release')">前往配置</n-button>
             </n-alert>
             <label v-if="mode === 'service_upgrade'">目标服务<n-select v-model:value="serviceName" size="small" :options="serviceOptions" :disabled="!serviceOptions.length" /></label>
-            <div v-if="selectedServiceRows.length" class="service-image-list" data-testid="operation-service-images">
+            <div v-if="selectedServiceRows.length" class="service-image-list inx-scroll-area" data-testid="operation-service-images">
               <div v-for="service in selectedServiceRows" :key="service.name" class="service-image-row">
-                <strong>{{ service.name }}</strong>
+                <span class="operation-file-label">{{ service.name }}</span>
                 <div class="service-image-fields">
                   <div class="image-file-picker">
                     <n-input :value="formatDisplayLocalPath(imageSelections[service.name]?.filePath)" size="tiny" readonly placeholder="请选择镜像文件" :title="formatDisplayLocalPath(imageSelections[service.name]?.filePath)" />
@@ -817,6 +867,7 @@ function historyArtifact(record: OperationHistoryItem) {
               <n-progress type="line" :percentage="preflightProgressPercent" :show-indicator="false" :height="5" processing />
             </div>
             <n-button class="full-button" type="primary" data-testid="operation-preflight" :loading="checking" :disabled="checking || !selectedMacs.length" @click="runCheck"><template #icon><ShieldCheck /></template>检查执行条件</n-button>
+            </operation-form-theme>
           </aside>
         </section>
 
@@ -839,15 +890,23 @@ function historyArtifact(record: OperationHistoryItem) {
               <n-tag class="execution-task-state" :type="stateTone(currentTask?.state ?? 'running')" :bordered="false">{{ historyResultLabel(currentTask?.state ?? 'running') }}</n-tag>
             </div>
           </div>
-          <div v-if="currentTask?.targets.length" class="execution-nodes"><div v-for="(target, index) in currentTask.targets" :key="target.mac" :class="{ active: target.state === 'running', done: target.state === 'succeeded' }"><span><b>{{ index + 1 }}</b><strong>{{ nodeName(target.mac) }}</strong><small>{{ target.mac }}</small></span><span>{{ stageLabel(target.stage) }} · {{ target.progress }}%</span><n-tag class="execution-target-state" size="small" :bordered="false" :type="stateTone(target.state)">{{ historyResultLabel(target.state) }}</n-tag></div></div>
+          <AioOperationTable v-if="currentTask?.targets.length" class="aio-execution-table" label="部署执行进度" :columns="['一体机名称', 'IP（当前资料）', 'MAC', '当前阶段 / 进度', '状态']" widths="minmax(120px, 1fr) 126px 126px minmax(160px, 1.2fr) 90px">
+            <div v-for="target in currentTask.targets" :key="target.mac" class="aio-table-row" role="row" :class="{ active: target.state === 'running', done: target.state === 'succeeded' }">
+              <strong role="cell" :title="nodeName(target.mac)">{{ nodeName(target.mac) }}</strong><span role="cell" class="aio-table-address">{{ nodeIp(target.mac) }}</span><span role="cell" class="aio-table-address" :title="target.mac">{{ target.mac }}</span><span role="cell" :title="stageLabel(target.stage)">{{ stageLabel(target.stage) }} · {{ target.progress }}%</span><span role="cell"><n-tag class="execution-target-state" size="small" :bordered="false" :type="stateTone(target.state)">{{ historyResultLabel(target.state) }}</n-tag></span>
+            </div>
+          </AioOperationTable>
           <div v-else class="empty-state">任务已提交，正在读取本地任务记录和执行进度。</div>
           <footer class="stage-footer"><span>切换项目不会停止当前任务，可在底部任务与日志面板持续查看。</span><n-button v-if="currentTask?.cancellable" size="small" type="error" secondary data-testid="operation-cancel" @click="cancelCurrentTask">请求取消</n-button><n-button size="small" secondary @click="openCurrentLogs">打开完整日志</n-button></footer>
         </section>
 
         <section v-else class="operation-stage result-stage" data-testid="operation-result">
           <div class="result-hero" :class="{ 'result-not-success': resultState !== 'succeeded' }"><span class="result-icon" :class="resultState === 'succeeded' ? 'success' : 'warning'"><CheckCircle2 v-if="resultState === 'succeeded'" :size="32" /><CircleAlert v-else :size="32" /></span><div><strong class="result-hero-title">{{ modeLabel }}已形成最终结果</strong><p class="result-hero-summary">成功 {{ resultSuccessCount }} 台，失败 {{ resultFailureCount }} 台，取消 {{ resultCancelledCount }} 台。</p></div><n-tag :type="stateTone(resultState)" :bordered="false">{{ historyResultLabel(resultState) }}</n-tag></div>
-          <div class="result-metrics"><span><small>目标数量</small><strong>{{ resultTargetCount }}</strong></span><span><small>成功</small><strong class="success-text">{{ resultSuccessCount }}</strong></span><span><small>失败/异常</small><strong>{{ resultFailureCount }}</strong></span><span><small>发布版本</small><strong :title="artifactLabel">{{ artifactLabel }}</strong></span></div>
-          <div v-if="resultTargets.length" class="result-list"><div v-for="target in resultTargets" :key="target.mac" :class="{ 'result-not-success': target.state !== 'succeeded' }"><CheckCircle2 v-if="target.state === 'succeeded'" :size="17" /><CircleAlert v-else :size="17" /><span><strong>{{ nodeName(target.mac) }}</strong><small>{{ target.mac }}</small></span><span>{{ targetResultText(target) }}</span><n-tag size="small" :type="stateTone(target.state)" :bordered="false">{{ historyResultLabel(target.state) }}</n-tag></div></div>
+          <div class="result-metrics"><span><small>目标数量</small><strong>{{ resultTargetCount }}</strong></span><span><small>成功</small><strong class="success-text">{{ resultSuccessCount }}</strong></span><span><small>失败/异常</small><strong>{{ resultFailureCount }}</strong></span><span><small>发布版本</small><strong class="result-version" :title="artifactLabel">{{ artifactLabel }}</strong></span></div>
+          <AioOperationTable v-if="resultTargets.length" class="aio-result-table" label="部署最终结果" :columns="['一体机名称', 'IP（当前资料）', 'MAC', '执行结果', '状态']" widths="minmax(120px, 1fr) 126px 126px minmax(160px, 1.4fr) 90px">
+            <div v-for="target in resultTargets" :key="target.mac" class="aio-table-row" role="row" :class="{ 'result-not-success': target.state !== 'succeeded' }">
+              <span role="cell" class="aio-table-identity" :title="nodeName(target.mac)"><CheckCircle2 v-if="target.state === 'succeeded'" :size="15" /><CircleAlert v-else :size="15" /><strong>{{ nodeName(target.mac) }}</strong></span><span role="cell" class="aio-table-address">{{ nodeIp(target.mac) }}</span><span role="cell" class="aio-table-address" :title="target.mac">{{ target.mac }}</span><span role="cell" class="aio-table-message" :title="targetResultText(target)">{{ targetResultText(target) }}</span><span role="cell"><n-tag size="small" :type="stateTone(target.state)" :bordered="false">{{ historyResultLabel(target.state) }}</n-tag></span>
+            </div>
+          </AioOperationTable>
           <div v-else class="empty-state">没有可验证的节点最终结果，未按成功处理。</div>
           <p v-if="resultState === 'finalizing_failed'" class="modal-description">任务执行已结束，但结果记录尚未完整保存；工作台已保留本次任务数据，重新启动后会自动补写。</p>
           <footer class="stage-footer"><n-button size="small" secondary @click="openHistory">查看操作记录</n-button><n-button v-if="['failed', 'cancelled', 'interrupted', 'check_failed'].includes(resultState)" size="small" secondary @click="retryOperation"><template #icon><RotateCcw /></template>按当前参数重新检查</n-button><n-button size="small" type="primary" :disabled="resultState === 'finalizing_failed'" @click="resetFlow"><template #icon><RotateCcw /></template>创建下一次任务</n-button></footer>
@@ -855,17 +914,17 @@ function historyArtifact(record: OperationHistoryItem) {
       </div>
     </section>
 
-    <n-modal :show="historyOpen" preset="card" :title="selectedHistory ? '部署升级详情' : '部署升级历史'" class="history-modal" data-testid="operation-history" :bordered="false" @update:show="!$event && closeHistory()">
+    <n-modal :show="historyOpen" preset="card" :title="selectedHistory ? '部署升级详情' : '部署升级历史'" class="history-modal aio-operation-history" data-testid="operation-history" :bordered="false" @update:show="!$event && closeHistory()">
       <template v-if="!selectedHistory">
         <p class="modal-description">其他电脑可以查看操作结果；完整过程和日志仅保存在发起任务的电脑。</p>
-        <div v-if="history.length" class="history-list">
-          <button v-for="record in history" :key="record.id" type="button" @click="selectHistory(record)">
-            <span class="history-icon" :class="record.state === 'succeeded' ? 'success' : 'warning'"><History :size="17" /></span>
-            <span class="history-main"><strong>{{ record.operationName }} · {{ historyArtifact(record) }}</strong><small>{{ record.id }} · {{ record.operatorName }} · 目标 {{ record.targetCount }} / 成功 {{ record.successCount }} / 失败 {{ record.failureCount }}</small></span>
-            <n-tag size="small" :bordered="false" :type="stateTone(record.state)">{{ historyResultLabel(record.state) }}</n-tag>
-            <time>{{ formatDisplayDateTime(record.endedAt ?? record.startedAt) }}</time><ChevronRight :size="16" />
+        <AioOperationTable v-if="history.length" class="aio-history-table" label="部署升级历史" :columns="['操作 / 发布内容', '操作人员', '目标 / 成功 / 失败', '状态', '时间']" widths="minmax(160px, 1fr) 88px 116px 90px 152px">
+          <button v-for="record in history" :key="record.id" type="button" class="aio-table-row" role="row" @click="selectHistory(record)">
+            <strong role="cell" :title="`${record.operationName} · ${historyArtifact(record)} · ${record.id}`">{{ record.operationName }} · {{ historyArtifact(record) }}</strong>
+            <span role="cell" :title="record.operatorName">{{ record.operatorName }}</span><span role="cell">{{ record.targetCount }} / {{ record.successCount }} / {{ record.failureCount }}</span>
+            <span role="cell"><n-tag size="small" :bordered="false" :type="stateTone(record.state)">{{ historyResultLabel(record.state) }}</n-tag></span>
+            <time role="cell" :title="formatDisplayDateTime(record.endedAt ?? record.startedAt)">{{ formatDisplayDateTime(record.endedAt ?? record.startedAt) }}</time>
           </button>
-        </div>
+        </AioOperationTable>
         <n-pagination v-if="workflow.history.total > workflow.history.pageSize" :page="workflow.history.page" :page-size="workflow.history.pageSize" :item-count="workflow.history.total" size="small" @update:page="changeHistoryPage" />
         <div v-if="!history.length" class="empty-state">{{ workflow.historyLoading ? '正在读取共享操作历史…' : '当前项目没有共享部署操作记录。' }}</div>
       </template>
@@ -877,13 +936,12 @@ function historyArtifact(record: OperationHistoryItem) {
           <n-tag :bordered="false" :type="stateTone(selectedHistory.state)">{{ historyResultLabel(selectedHistory.state) }}</n-tag>
         </div>
         <dl class="history-detail__facts"><dt>操作人员</dt><dd>{{ selectedHistory.operatorName }}</dd><dt>发起电脑</dt><dd>{{ selectedHistory.instanceId }}</dd><dt>完成时间</dt><dd>{{ formatDisplayDateTime(selectedHistory.endedAt, '尚未完成') }}</dd><dt>执行范围</dt><dd>目标 {{ selectedHistory.targetCount }}，成功 {{ selectedHistory.successCount }}，失败 {{ selectedHistory.failureCount }}，取消 {{ selectedHistory.cancelledCount }}</dd><dt>发布内容</dt><dd>{{ historyArtifact(selectedHistory) }}</dd></dl>
-        <div class="history-detail__nodes">
-          <header><strong>节点最终结果</strong><span>项目侧记录</span></header>
-          <div v-for="target in workflow.historyDetail?.targets ?? []" :key="target.resourceType + ':' + target.resourceKey">
-            <span><strong>{{ nodeName(target.resourceKey) }}</strong><small>{{ target.resourceKey }}</small></span><span>{{ target.resultSummary ?? target.errorSummary ?? '未记录摘要' }}</span><n-tag size="small" :bordered="false" :type="stateTone(target.state)">{{ historyResultLabel(target.state) }}</n-tag>
+        <AioOperationTable class="aio-history-target-table" label="节点最终结果（项目侧记录）" :columns="['一体机名称', 'MAC', '执行结果', '状态']" widths="minmax(130px, 1fr) 136px minmax(180px, 1.4fr) 90px">
+          <div v-for="target in workflow.historyDetail?.targets ?? []" :key="target.resourceType + ':' + target.resourceKey" class="aio-table-row" role="row">
+            <strong role="cell" :title="nodeName(target.resourceKey)">{{ nodeName(target.resourceKey) }}</strong><span role="cell" class="aio-table-address" :title="target.resourceKey">{{ target.resourceKey }}</span><span role="cell" class="aio-table-message" :title="target.resultSummary ?? target.errorSummary ?? '未记录摘要'">{{ target.resultSummary ?? target.errorSummary ?? '未记录摘要' }}</span><span role="cell"><n-tag size="small" :bordered="false" :type="stateTone(target.state)">{{ historyResultLabel(target.state) }}</n-tag></span>
           </div>
           <div v-if="!(workflow.historyDetail?.targets.length)" class="empty-state">此操作没有节点最终结果记录。</div>
-        </div>
+        </AioOperationTable>
       </div>
       <template #footer><n-space justify="end"><n-button size="small" @click="closeHistory">关闭</n-button></n-space></template>
     </n-modal>
@@ -900,30 +958,10 @@ function historyArtifact(record: OperationHistoryItem) {
   gap: 8px;
 }
 
-.service-image-row {
-  display: grid;
-  gap: 5px;
-  padding: 8px;
-  border: 1px solid var(--inx-color-border);
-  border-radius: var(--inx-radius-sm);
-  background: var(--inx-color-surface-subtle);
-}
-
-.service-image-row > strong {
-  font-size: 12px;
-}
-
 .service-image-fields {
   display: grid;
   min-width: 0;
   grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr);
-  gap: 6px;
-}
-
-.image-file-picker {
-  display: grid;
-  min-width: 0;
-  grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px;
 }
 
@@ -932,36 +970,6 @@ function historyArtifact(record: OperationHistoryItem) {
   min-width: 0;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 4px;
-}
-
-.execution-tuning label {
-  display: grid;
-  min-width: 0;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-}
-
-.execution-tuning label > span {
-  white-space: nowrap;
-}
-
-.metric-number {
-  font-style: normal;
-  font-variant-numeric: tabular-nums;
-  font-weight: 700;
-}
-
-.metric-info {
-  color: var(--inx-color-info);
-}
-
-.metric-operation {
-  color: var(--inx-color-operation);
-}
-
-.metric-warning {
-  color: var(--inx-color-warning);
 }
 
 .preflight-status-tag {
@@ -1000,4 +1008,51 @@ function historyArtifact(record: OperationHistoryItem) {
   line-height: 1;
 }
 
+</style>
+
+<style scoped>
+.aio-compact-operations .operation-content { display: flex; overflow: hidden; }
+.aio-compact-operations .operation-stage { flex: 1; min-height: 0; height: 100%; box-sizing: border-box; padding: 10px; gap: 8px; }
+.aio-compact-operations .operation-stage > :is(.stage-heading, .execution-overview, .result-hero, .result-metrics, .render-preview, .stage-footer, .modal-description) { flex: none; }
+.aio-compact-operations :is(.check-stage, .execute-stage, .result-stage) > .empty-state { flex: 1; min-height: 0; }
+.aio-compact-operations .stage-heading { min-height: 44px; padding: 6px 10px; }
+.aio-compact-operations .stage-heading small { margin-top: 2px; }
+.aio-compact-operations .stage-footer { min-height: 34px; padding-top: 6px; margin-top: 0; }
+.aio-compact-operations .render-preview { padding: 6px 10px; }
+.aio-compact-operations .result-hero { padding: 8px 10px; gap: 8px; }
+.aio-compact-operations .result-hero .result-icon { width: 28px; height: 28px; }
+.aio-compact-operations .result-hero .result-icon svg { width: 23px; height: 23px; }
+.aio-compact-operations .result-metrics { display: flex; align-items: center; gap: 16px; padding: 4px 0; }
+.aio-compact-operations .result-metrics > span { display: flex; min-width: 0; align-items: baseline; gap: 6px; padding: 0; border: 0; background: transparent; }
+.aio-compact-operations .result-metrics > span:last-child { flex: 1; }
+.aio-compact-operations .result-metrics small { flex: none; }
+.aio-compact-operations .result-metrics strong { font-size: var(--inx-font-size-base); }
+.aio-compact-operations .result-metrics .result-version { font-weight: 500; }
+.aio-compact-operations .stage-settings { gap: 8px; padding: 10px; }
+.aio-compact-operations .stage-settings h3 { margin: 0; }
+.aio-compact-operations .service-image-list { gap: 0; min-height: 0; overflow: auto; }
+.aio-compact-operations .service-image-row { padding: 6px 0; border: 0; border-bottom: 1px solid var(--inx-color-border); border-radius: 0; background: transparent; }
+.aio-compact-operations .stage-settings > :not(.service-image-list) { flex: none; }
+.aio-compact-operations .execution-summary { gap: 6px; }
+.aio-compact-operations .selection-toolbar { height: auto; min-height: 34px; flex-wrap: wrap; padding: 4px 8px; gap: 4px 6px; }
+.aio-compact-operations .target-selection-notice { flex: none; font-size: var(--inx-font-size-table); }
+.aio-compact-operations .aio-selection-head,
+.aio-compact-operations .node-selection-list label { display: grid; grid-template-columns: 18px minmax(100px, .95fr) minmax(96px, .7fr) minmax(90px, 1fr) 42px; gap: 6px; padding: 4px 8px; }
+.aio-compact-operations .aio-selection-head { flex: none; min-height: 28px; box-sizing: border-box; align-items: center; overflow: hidden; padding-right: 12px; background: var(--inx-color-table-header); color: var(--inx-color-text-secondary); font-size: 11px; }
+.aio-compact-operations .node-selection-list label { min-height: var(--inx-table-row-height, 36px); box-sizing: border-box; }
+.aio-compact-operations .node-selection-name { font-weight: 500; }
+.aio-compact-operations .node-selection-location, .aio-compact-operations .node-selection-ip { color: var(--inx-color-text-secondary); font-size: 11px; }
+</style>
+
+<style>
+/* 历史弹窗由组件库传送到 body，使用业务专用类限定样式。 */
+.aio-operation-history { width: min(1020px, calc(100vw - 64px)); height: min(720px, calc(100vh - 64px)); display: flex; flex-direction: column; }
+.aio-operation-history .n-card-header, .aio-operation-history .n-card__footer { flex: none; padding: 12px 16px; }
+.aio-operation-history .n-card-content { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 8px; padding: 0 16px; overflow: hidden; }
+.aio-operation-history .modal-description { flex: none; margin: 0; }
+.aio-operation-history .history-detail { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 8px; }
+.aio-operation-history .history-detail > .n-button { flex: none; align-self: flex-start; }
+.aio-operation-history .history-detail__summary, .aio-operation-history .history-detail__facts { flex: none; padding: 6px 10px; }
+.aio-operation-history .history-detail__facts { gap: 4px 8px; font-size: 12px; }
+.aio-operation-history .n-pagination { flex: none; justify-content: flex-end; }
 </style>

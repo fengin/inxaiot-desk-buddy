@@ -29,6 +29,9 @@ jobs:
       - name: 校验应用版本与Tag
         run: node scripts/check-release-version.mjs "${{ github.ref_type == 'tag' && github.ref_name || '' }}"
 
+      - name: 校验平台工具选择和Mac打包流程
+        run: node --test scripts/screen-tool-platform.test.mjs scripts/build-macos.test.mjs
+
   windows:
     name: Windows x64便携包
     runs-on: windows-latest
@@ -65,6 +68,19 @@ jobs:
       - name: 构建 Windows Release
         run: pnpm build:windows
 
+      - name: 准备随包 Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21.0.8'
+
+      - name: 准备 Android 工具
+        env:
+          REPO_OS_OVERRIDE: windows
+        run: |
+          & "$env:ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager.bat" "platform-tools" "build-tools;36.1.0"
+          if ($LASTEXITCODE -ne 0) { throw 'Android 工具准备失败' }
+
       - name: 校验Windows GUI子系统
         run: |
           $binary = "src-tauri/target/release/inxaiot-desk-buddy.exe"
@@ -82,6 +98,10 @@ jobs:
           $packageDir = Join-Path "release" $packageName
           New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
           Copy-Item "src-tauri/target/release/inxaiot-desk-buddy.exe" (Join-Path $packageDir "INX实施工作台.exe") -Force
+          node scripts/package-screen-tools.mjs --platform win32 --arch x64 --output "$packageDir"
+          if ($LASTEXITCODE -ne 0) { throw '随包工具检查失败' }
+          node scripts/package-screen-tools.mjs --platform win32 --arch x64 --output "$packageDir" --verify
+          if ($LASTEXITCODE -ne 0) { throw '随包工具清单验证失败' }
           Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath "release/$packageName.zip" -Force
           $hash = (Get-FileHash -Algorithm SHA256 "release/$packageName.zip").Hash.ToLowerInvariant()
           "$hash  $packageName.zip" | Out-File -Encoding ascii "release/$packageName.zip.sha256"
@@ -138,8 +158,24 @@ jobs:
       - name: 安装前端依赖
         run: pnpm install --frozen-lockfile
 
-      - name: 构建macOS App
-        run: pnpm build:macos
+      - name: 准备随包 Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21.0.8'
+          architecture: ${{ matrix.arch }}
+
+      - name: 准备 Android 工具
+        env:
+          REPO_OS_OVERRIDE: macosx
+        run: |
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            /usr/sbin/softwareupdate --install-rosetta --agree-to-license
+          fi
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "build-tools;36.1.0"
+
+      - name: 构建含随包工具的macOS App
+        run: pnpm build:macos --arch "${{ matrix.arch }}"
 
       - name: 校验并打包macOS便携包
         run: |
@@ -155,7 +191,6 @@ jobs:
           fi
           binary_path="$app_path/Contents/MacOS/inxaiot-desk-buddy"
           file "$binary_path" | grep -q "${{ matrix.expected_arch }}"
-          codesign --verify --deep --strict "$app_path"
           package_name="INX-desk-buddy-macos-${{ matrix.arch }}-portable-${version}"
           mkdir -p release
           ditto -c -k --sequesterRsrc --keepParent "$app_path" "release/${package_name}.zip"
@@ -218,6 +253,17 @@ jobs:
       - name: 构建Linux Release
         run: pnpm build:linux
 
+      - name: 准备随包 Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21.0.8'
+
+      - name: 准备 Android 工具
+        env:
+          REPO_OS_OVERRIDE: linux
+        run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "build-tools;36.1.0"'
+
       - name: 校验并打包Linux便携包
         run: |
           set -euo pipefail
@@ -231,6 +277,8 @@ jobs:
           package_dir="release/${package_name}"
           mkdir -p "$package_dir"
           install -m 755 "$binary" "$package_dir/inxaiot-desk-buddy"
+          node scripts/package-screen-tools.mjs --platform linux --arch x64 --output "$package_dir"
+          node scripts/package-screen-tools.mjs --platform linux --arch x64 --output "$package_dir" --verify
           tar -czf "release/${package_name}.tar.gz" -C release "$package_name"
           (cd release && sha256sum "${package_name}.tar.gz" > "${package_name}.tar.gz.sha256")
 

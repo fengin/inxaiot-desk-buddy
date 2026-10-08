@@ -55,6 +55,8 @@ async fn activity_dto_aggregates_real_snapshots_logs_and_running_task_cancel() {
         secret_store: Arc::new(MemorySecretStore::default()),
         runtime_registry: ProjectRuntimeRegistry::default(),
         job_supervisor: job_supervisor.clone(),
+        task_recovery_registry:
+            inxaiot_desk_buddy_lib::infrastructure::task_handlers::built_in_recovery_registry(),
         task_handler_registry,
         task_queue,
         task_event_bus,
@@ -190,7 +192,11 @@ async fn activity_dto_aggregates_real_snapshots_logs_and_running_task_cancel() {
                 .expect("preflight log")
                 .to_string_lossy()
                 .into_owned(),
-            targets: vec![("aio".into(), "A".into()), ("aio".into(), "B".into())],
+            targets: vec![
+                ("preflight_internal".into(), "common".into()),
+                ("aio".into(), "A".into()),
+                ("aio".into(), "B".into()),
+            ],
         })
         .await
         .expect("create preflight task");
@@ -230,6 +236,23 @@ async fn activity_dto_aggregates_real_snapshots_logs_and_running_task_cancel() {
             .await
             .expect("finish preflight target");
     }
+    task_repository
+        .update_target(
+            "preflight-task",
+            TargetUpdate {
+                resource_type: "preflight_internal".into(),
+                resource_key: "common".into(),
+                state: TargetState::Succeeded,
+                stage: "公共检查完成".into(),
+                progress_current: 1,
+                progress_total: 1,
+                fencing_token: None,
+                message_code: Some("PREFLIGHT_TARGET_PASSED".into()),
+                message_params_json: None,
+            },
+        )
+        .await
+        .expect("finish common preflight");
     task_repository
         .transition(
             "preflight-task",

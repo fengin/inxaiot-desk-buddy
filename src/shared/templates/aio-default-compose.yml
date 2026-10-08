@@ -1,0 +1,70 @@
+services:
+  emqx:
+    image: ${EMQX_IMAGE}
+    container_name: inx-edge-emqx
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "18083:18083"
+    volumes:
+      - /opt/data/emqx/data:/opt/emqx/data
+      - /opt/data/emqx/log:/opt/emqx/log
+
+  device-edge:
+    image: ${DEVICE_EDGE_IMAGE}
+    container_name: inx-device-edge
+    restart: unless-stopped
+    depends_on:
+      - emqx
+    ports:
+      - "${DEVICE_EDGE_PORT}:6002"
+    environment:
+      HOST_CONFIG_FILE: ${HOST_CONFIG_FILE}
+      DATA_PATH: ${DEVICE_EDGE_DATA_PATH}
+      LOG_PATH: ${DEVICE_EDGE_LOG_PATH}
+      MQTT_LOCAL_BROKER: ${MQTT_LOCAL_BROKER}
+      MQTT_LOCAL_USER: ${LOCAL_MQTT_USER}
+      MQTT_LOCAL_PASSWORD: ${LOCAL_MQTT_PASSWORD}
+      MQTT_PLATFORM_BROKER: ${MQTT_PLATFORM_BROKER}
+      MQTT_PLATFORM_USER: ${PLATFORM_MQTT_USER}
+      MQTT_PLATFORM_PASSWORD: ${PLATFORM_MQTT_PASSWORD}
+      PLATFORM_HOST: ${PLATFORM_HOST}
+      PLATFORM_PORT: ${PLATFORM_API_PORT}
+      AUTH_KEY: ${AIO_AUTH_KEY}
+    volumes:
+      - /opt/data/device-edge:/data/device-edge
+      - /opt/data/config/host-info.json:/host/config/host-info.json
+
+  rule-engine:
+    image: ${RULE_ENGINE_IMAGE}
+    container_name: inx-rule-engine
+    restart: unless-stopped
+    depends_on:
+      - emqx
+      - device-edge
+    ports:
+      - "${RULE_ENGINE_PORT}:6001"
+    environment:
+      DATA_PATH: ${RULE_ENGINE_DATA_PATH}
+      LOG_PATH: ${RULE_ENGINE_LOG_PATH:-/data/rule-engine/logs}
+      MQTT_SERVER_URIS: ${MQTT_SERVER_URIS}
+      MQTT_CLIENT_PREFIX: ${MQTT_CLIENT_PREFIX}
+      MQTT_SERVER_USER: ${MQTT_SERVER_USER}
+      MQTT_SERVER_PASSWORD: ${MQTT_SERVER_PASSWORD}
+      AIO_AUTH_KEY: ${AIO_AUTH_KEY}
+      DEVICE_STATE_API: http://device-edge:6002/api/aio/device/attrs/value
+      DEVICE_ACTION_SAVE_API: http://device-edge:6002/api/aio/device/ext/action/save
+    volumes:
+      - /opt/data/rule-engine:/data/rule-engine
+
+  device-edge-web:
+    image: ${DEVICE_EDGE_WEB_IMAGE}
+    container_name: inx-device-edge-web
+    restart: unless-stopped
+    depends_on:
+      - device-edge
+    ports:
+      - "${WEB_PORT}:7000"
+    environment:
+      PORT: ${WEB_PORT}
+      DEVICE_EDGE_API_HOST: device-edge:6002

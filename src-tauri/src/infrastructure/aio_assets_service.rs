@@ -14,8 +14,8 @@ use crate::domain::aio::assets::{
     AioImportSession, ImportSelection, OperationRecordSummary, ServiceVersionRecord,
 };
 use crate::domain::aio::inventory::{
-    FieldConflict, ImportClassification, ParsedInventoryRow, PlatformNodeSnapshot,
-    ReconciledImportItem, WorkbenchNodeSnapshot, reconcile_inventory,
+    FieldConflict, ImportClassification, InventoryValues, ParsedInventoryRow, PlatformNodeSnapshot,
+    ReconciledImportItem, WorkbenchNodeSnapshot, reconcile_inventory, validate_inventory_values,
 };
 use crate::domain::aio::mac::MacAddress;
 use crate::domain::aio::service_check::NodeServiceCheckSnapshot;
@@ -23,7 +23,7 @@ use crate::formal::app_state::FormalAppState;
 use crate::infrastructure::csv_inventory::parse_inventory_path;
 use crate::infrastructure::local_sqlite::aio_import_repository::AioImportRepository;
 use crate::infrastructure::platform_aio::PlatformAioRepository;
-use crate::infrastructure::project_context::project_database;
+use crate::infrastructure::project_context::project_aio_database as project_database;
 use crate::infrastructure::service_check_repository::ServiceCheckRepository;
 use crate::infrastructure::workbench_aio::{
     ApplyInventoryWrite, InventoryAssetWrite, WorkbenchAioRepository,
@@ -62,6 +62,14 @@ impl AioAssetsPort for AioAssetsService<'_> {
 
     async fn latest_import(&self, local_project_id: &str) -> AppResult<Option<AioImportSession>> {
         latest_inventory_import(self.state, local_project_id).await
+    }
+
+    async fn preview_create(
+        &self,
+        local_project_id: &str,
+        values: InventoryValues,
+    ) -> AppResult<InventoryPreview> {
+        preview_aio_node_create(self.state, local_project_id, values).await
     }
 
     async fn update_selection(
@@ -247,6 +255,62 @@ pub async fn latest_inventory_import(
     AioImportRepository::new(state.local_store.pool().clone())
         .latest_open_for_project(local_project_id)
         .await
+}
+
+pub async fn preview_aio_node_create(
+    state: &FormalAppState,
+    local_project_id: &str,
+    values: InventoryValues,
+) -> AppResult<InventoryPreview> {
+    let repository = AioImportRepository::new(state.local_store.pool().clone());
+    if repository.latest_open_for_project(local_project_id).await?.is_some() {
+        return Err(AppError::Conflict("当前项目有未处理的导入预览，请先处理或放弃后再新增一体机".into()));
+    }
+    let row = validate_inventory_values(1, values);
+    if !row.errors.is_empty() {
+        return Err(AppError::InvalidConfig(row.errors.join("；")));
+    }
+    let pools = project_database(state, local_project_id).await?;
+    let workbench_repository = WorkbenchAioRepository::new(pools.workbench.clone());
+    let platform_repository = PlatformAioRepository::new(pools.platform.clone());
+    let (workbench, platform) = tokio::try_join!(
+        workbench_repository.list_snapshots(),
+        platform_repository.list_all(),
+    )?;
+    let items = prepare_node_create(row, &workbench, &platform.nodes)?;
+    // 与 CSV 共用一个未处理预览约束；创建失败也不会替换原有预览。
+    let session = repository.create_preview(local_project_id, "单台新增一体机", "manual-entry", &items).await?;
+    Ok(InventoryPreview { session, platform_issues: platform.issues })
+}
+
+fn prepare_node_create(
+    row: ParsedInventoryRow,
+    workbench: &[WorkbenchNodeSnapshot],
+    platform: &[PlatformNodeSnapshot],
+) -> AppResult<Vec<ReconciledImportItem>> {
+    let items = reconcile_inventory(vec![row], workbench, platform);
+    let item = &items[0];
+    match item.classification {
+        ImportClassification::NewPending => {}
+        ImportClassification::PlatformExisting => {
+            if let Some(current) = platform.iter().find(|node| Some(&node.id) == item.platform_aio_id.as_ref())
+                && (current.name.trim() != item.values.name || current.ip.trim() != item.values.ip)
+            {
+                return Err(AppError::Conflict(format!(
+                    "该 MAC 已在平台登记为“{}”（{}），请核对名称和 IP 后再接管，不能通过新增修改已有记录",
+                    current.name, current.ip
+                )));
+            }
+        }
+        ImportClassification::ExistingUnchanged | ImportClassification::ExistingChanged => {
+            return Err(AppError::Conflict("该 MAC 对应的一体机已在工作台中，无需重复新增；如需修改，请使用清单导入核对变更".into()));
+        }
+        ImportClassification::Conflict => {
+            return Err(AppError::Conflict(item.conflicts.iter().map(|conflict| conflict.message.as_str()).collect::<Vec<_>>().join("；")));
+        }
+        ImportClassification::Invalid => return Err(AppError::InvalidConfig(item.errors.join("；"))),
+    }
+    Ok(items)
 }
 
 pub async fn update_inventory_selection(
@@ -703,44 +767,9 @@ fn ensure_session_project(session: &AioImportSession, local_project_id: &str) ->
     Ok(())
 }
 
-pub(crate) async fn project_operator(
-    state: &FormalAppState,
-    local_project_id: &str,
-) -> AppResult<String> {
-    let row = sqlx::query(
-        "SELECT username, expires_at FROM local_project_session WHERE local_project_id = ?",
-    )
-    .bind(local_project_id)
-    .fetch_optional(state.local_store.pool())
-    .await
-    .map_err(|error| AppError::database("读取项目登录用户", &error))?
-    .ok_or_else(|| AppError::Conflict("项目尚未登录，不能应用导入结果".into()))?;
-    let username: String = row
-        .try_get("username")
-        .map_err(|error| AppError::database("解析项目登录用户", &error))?;
-    if username.trim().is_empty() {
-        return Err(AppError::Conflict("项目登录用户无效".into()));
-    }
-    let expires_at = row
-        .try_get::<Option<String>, _>("expires_at")
-        .ok()
-        .flatten();
-    if expires_at.as_deref().is_some_and(session_is_expired) {
-        return Err(AppError::Conflict(
-            "项目登录会话已过期，请重新登录后应用".into(),
-        ));
-    }
-    Ok(username)
-}
-
-fn session_is_expired(value: &str) -> bool {
-    let expires_at = value.parse::<i64>().ok().or_else(|| {
-        OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
-            .ok()
-            .map(|expires| expires.unix_timestamp())
-    });
-    expires_at.is_some_and(|expires| expires <= OffsetDateTime::now_utc().unix_timestamp())
-}
+pub(crate) use crate::infrastructure::project_context::project_operator;
+#[cfg(test)]
+use crate::infrastructure::project_context::session_is_expired;
 
 async fn latest_local_checks(
     state: &FormalAppState,
@@ -786,9 +815,9 @@ fn timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{asset_conflicts, build_node_items, platform_updated_at, session_is_expired};
+    use super::{asset_conflicts, build_node_items, platform_updated_at, prepare_node_create, session_is_expired};
     use crate::domain::aio::assets::ServiceVersionRecord;
-    use crate::domain::aio::inventory::{PlatformNodeSnapshot, WorkbenchNodeSnapshot};
+    use crate::domain::aio::inventory::{ImportClassification, InventoryValues, PlatformNodeSnapshot, WorkbenchNodeSnapshot, validate_inventory_values};
     use std::collections::HashMap;
 
     fn workbench() -> WorkbenchNodeSnapshot {
@@ -808,6 +837,33 @@ mod tests {
             last_operation_id: None,
             version: 1,
         }
+    }
+
+    fn create_values() -> InventoryValues {
+        InventoryValues { name: "node".into(), ip: "192.0.2.1".into(), mac: "00:11:22:33:44:55".into(), ..InventoryValues::default() }
+    }
+
+    #[test]
+    fn manual_create_and_csv_share_field_validation() {
+        let csv = crate::infrastructure::csv_inventory::parse_inventory_text("name,ip,mac\n node ,192.0.2.1,00:11:22:33:44:55\n").unwrap();
+        let mut values = create_values();
+        values.name = " node ".into();
+        assert_eq!(validate_inventory_values(2, values), csv[0]);
+        let mut invalid = create_values();
+        invalid.name = " ".into(); invalid.ip = "192.0.2.999".into(); invalid.mac = "invalid".into();
+        assert_eq!(validate_inventory_values(1, invalid).errors.len(), 3);
+    }
+
+    #[test]
+    fn manual_create_only_allows_new_node_or_matching_platform_takeover() {
+        let row = || validate_inventory_values(1, create_values());
+        assert_eq!(prepare_node_create(row(), &[], &[]).unwrap()[0].classification, ImportClassification::NewPending);
+        assert_eq!(prepare_node_create(row(), &[], &[platform()]).unwrap()[0].classification, ImportClassification::PlatformExisting);
+        assert!(prepare_node_create(row(), &[workbench()], &[platform()]).is_err());
+        let mut changed = create_values(); changed.name = "changed".into();
+        assert!(prepare_node_create(validate_inventory_values(1, changed.clone()), &[workbench()], &[platform()]).is_err());
+        assert!(prepare_node_create(validate_inventory_values(1, changed), &[], &[platform()]).is_err());
+        assert!(prepare_node_create(row(), &[], &[platform(), platform()]).is_err());
     }
 
     #[test]

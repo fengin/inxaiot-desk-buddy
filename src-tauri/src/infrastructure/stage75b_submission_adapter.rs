@@ -118,6 +118,7 @@ impl Stage75BSubmissionAdapter<'_> {
             .task_repository
             .create_queued_from_preflight(
                 preflight_task_id,
+                "deployment_preflight",
                 &snapshot_sha256,
                 CreateTask {
                     id: task_id.clone(),
@@ -314,6 +315,8 @@ mod tests {
                 secret_store: Arc::new(MemorySecretStore::default()),
                 runtime_registry: ProjectRuntimeRegistry::default(),
                 job_supervisor,
+                task_recovery_registry:
+                    crate::infrastructure::task_handlers::built_in_recovery_registry(),
                 task_handler_registry,
                 task_queue,
                 task_event_bus,
@@ -439,6 +442,7 @@ mod tests {
             .bind_preflight_snapshot(
                 task_id,
                 "project",
+                "deployment_preflight",
                 &snapshot.integrity_sha256().expect("snapshot hash"),
             )
             .await

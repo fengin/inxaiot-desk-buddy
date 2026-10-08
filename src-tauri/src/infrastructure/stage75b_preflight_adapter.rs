@@ -39,7 +39,9 @@ use crate::infrastructure::deployment_preflight_probes::{
 };
 use crate::infrastructure::local_sqlite::host_key_repository::{HostKeyRecord, HostKeyRepository};
 use crate::infrastructure::local_sqlite::task_repository::{CreateTask, TargetUpdate};
-use crate::infrastructure::project_context::{map_formal_error, project_database};
+use crate::infrastructure::project_context::{
+    map_formal_error, project_aio_database as project_database,
+};
 use crate::infrastructure::release_remote_auth::release_remote_auth;
 use crate::infrastructure::release_template::render_release_templates;
 use crate::infrastructure::remote::RusshConnector;
@@ -291,6 +293,10 @@ impl Stage75BPreflightAdapter<'_> {
             HostKeyRepository::new(self.state.local_store.pool().clone()),
             project_id,
         );
+        let platform_inventory =
+            crate::infrastructure::platform_aio::PlatformAioRepository::new(pools.platform.clone())
+                .list_all()
+                .await?;
         let mut target_snapshots = Vec::with_capacity(normalized.target_macs.len());
         for mac in &normalized.target_macs {
             let node = nodes.get(mac);
@@ -347,6 +353,56 @@ impl Stage75BPreflightAdapter<'_> {
                         .await?;
                 }
                 continue;
+            };
+            let deployment_mac = match platform_inventory.deployment_mac(mac) {
+                Ok(value) => value,
+                Err(error) => {
+                    checks.push(failed(
+                        "platform_identity",
+                        "平台一体机记录",
+                        Some(mac),
+                        error.to_string(),
+                        remediation(
+                            "open_aio_nodes",
+                            "返回一体机列表",
+                            Some("/aio/nodes"),
+                            Some(mac),
+                        ),
+                    ));
+                    if let Some(tracker) = tracker {
+                        tracker
+                            .target_work_finished(
+                                mac,
+                                Some(&node.name),
+                                Some(&node.ip),
+                                TargetWork::Runtime,
+                                &checks[target_check_start..],
+                                None,
+                            )
+                            .await?;
+                        if normalized.mode != DeploymentMode::ServiceUpgrade {
+                            tracker
+                                .target_work_finished(
+                                    mac,
+                                    Some(&node.name),
+                                    Some(&node.ip),
+                                    TargetWork::Render,
+                                    &[],
+                                    Some("平台一体机记录重复，未继续渲染部署配置"),
+                                )
+                                .await?;
+                        }
+                        tracker
+                            .target_finished(
+                                mac,
+                                Some(&node.name),
+                                Some(&node.ip),
+                                &checks[target_check_start..],
+                            )
+                            .await?;
+                    }
+                    continue;
+                }
             };
             checks.push(passed(
                 "deployment_target",
@@ -426,7 +482,8 @@ impl Stage75BPreflightAdapter<'_> {
                         .await?;
                 }
                 let render_check_start = checks.len();
-                let context = render_context(node, &profile, &normalized);
+                let mut context = render_context(node, &profile, &normalized);
+                context.node_mac = deployment_mac;
                 match render_release_templates(
                     &profile.values.env_template,
                     &profile.values.host_info_template,
@@ -1144,6 +1201,7 @@ impl<'a> PreflightTaskTracker<'a> {
                 .bind_preflight_snapshot(
                     &self.task_id,
                     &self.project_id,
+                    "deployment_preflight",
                     &snapshot.integrity_sha256()?,
                 )
                 .await?;
@@ -2114,6 +2172,8 @@ mod tests {
             secret_store: Arc::new(MemorySecretStore::default()),
             runtime_registry: ProjectRuntimeRegistry::default(),
             job_supervisor,
+            task_recovery_registry:
+                crate::infrastructure::task_handlers::built_in_recovery_registry(),
             task_handler_registry,
             task_queue,
             task_event_bus,

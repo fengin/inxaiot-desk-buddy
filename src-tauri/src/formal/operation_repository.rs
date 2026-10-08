@@ -131,6 +131,10 @@ impl OperationRepository {
         page: u32,
         page_size: u32,
     ) -> FormalResult<(Vec<OperationHistoryRecord>, u64)> {
+        self.list_history_scoped(domain_type,None,operation_type,state,page,page_size).await
+    }
+
+    pub async fn list_history_scoped(&self,domain_type:&str,business_project_id:Option<&str>,operation_type:Option<&str>,state:Option<&str>,page:u32,page_size:u32)->FormalResult<(Vec<OperationHistoryRecord>,u64)>{
         if domain_type.trim().is_empty()
             || page == 0
             || !(1..=100).contains(&page_size)
@@ -140,10 +144,12 @@ impl OperationRepository {
             return Err(FormalError::InvalidConfig("操作历史查询参数无效".into()));
         }
         let total = sqlx::query_scalar::<_, i64>(concat!(
-            "SELECT COUNT(*) FROM operation_record WHERE domain_type = ? ",
+            "SELECT COUNT(*) FROM operation_record WHERE domain_type = ? AND (? IS NULL OR business_project_id = ?) ",
             "AND (? IS NULL OR operation_type = ?) AND (? IS NULL OR state = ?)"
         ))
         .bind(domain_type)
+        .bind(business_project_id)
+        .bind(business_project_id)
         .bind(operation_type)
         .bind(operation_type)
         .bind(state)
@@ -156,11 +162,13 @@ impl OperationRepository {
             "SELECT id, domain_type, operation_type, operation_name, operator_name, instance_id, ",
             "state, target_count, success_count, failure_count, cancelled_count, artifact_name, ",
             "artifact_version, started_at, ended_at, result_summary, error_code, error_summary ",
-            "FROM operation_record WHERE domain_type = ? ",
+            "FROM operation_record WHERE domain_type = ? AND (? IS NULL OR business_project_id = ?) ",
             "AND (? IS NULL OR operation_type = ?) AND (? IS NULL OR state = ?) ",
             "ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?"
         ))
         .bind(domain_type)
+        .bind(business_project_id)
+        .bind(business_project_id)
         .bind(operation_type)
         .bind(operation_type)
         .bind(state)
@@ -185,6 +193,10 @@ impl OperationRepository {
         domain_type: &str,
         operation_id: &str,
     ) -> FormalResult<(OperationHistoryRecord, Vec<OperationHistoryTargetRecord>)> {
+        self.history_detail_scoped(domain_type,None,operation_id).await
+    }
+
+    pub async fn history_detail_scoped(&self,domain_type:&str,business_project_id:Option<&str>,operation_id:&str)->FormalResult<(OperationHistoryRecord,Vec<OperationHistoryTargetRecord>)>{
         if domain_type.trim().is_empty() || operation_id.trim().is_empty() {
             return Err(FormalError::InvalidConfig("操作历史详情参数无效".into()));
         }
@@ -192,10 +204,12 @@ impl OperationRepository {
             "SELECT id, domain_type, operation_type, operation_name, operator_name, instance_id, ",
             "state, target_count, success_count, failure_count, cancelled_count, artifact_name, ",
             "artifact_version, started_at, ended_at, result_summary, error_code, error_summary ",
-            "FROM operation_record WHERE id = ? AND domain_type = ?"
+            "FROM operation_record WHERE id = ? AND domain_type = ? AND (? IS NULL OR business_project_id = ?)"
         ))
         .bind(operation_id)
         .bind(domain_type)
+        .bind(business_project_id)
+        .bind(business_project_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| map_error("读取操作历史详情", error))?

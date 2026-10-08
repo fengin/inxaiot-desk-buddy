@@ -12,7 +12,7 @@ const stageLabel = stage75b ? "7.5-B" : "7.5-A";
 const isolatedSchema = process.env.INX_STAGE75_SCHEMA;
 const stageDataDirectory = resolve(
   process.env.APPDATA ?? "",
-  stage75b ? "com.inxaiot.desk-buddy.stage75b" : "com.inxaiot.desk-buddy.stage75a"
+  process.env.INX_E2E_APP_ID ?? (stage75b ? "com.inxaiot.desk-buddy.stage75b" : "com.inxaiot.desk-buddy.stage75a")
 );
 const webdriverPort = stage75b ? 4446 : 4445;
 
@@ -25,10 +25,6 @@ if (existsSync(stageDataDirectory)) {
 }
 
 const description = readFileSync(resolve(projectRoot, "test/测试数据说明.txt"), "utf8");
-const platformYaml = readFileSync(
-  resolve(projectRoot, "../../inxvision-platform/inxaiot-starter-platform/src/main/resources/application-dev.yml"),
-  "utf8"
-);
 const envTemplate = readFileSync(resolve(projectRoot, "test/templates/env.template"), "utf8");
 const composeTemplate = readFileSync(resolve(projectRoot, "test/docker-compose.yml"), "utf8");
 const privateKey = readFileSync(
@@ -42,11 +38,10 @@ function line(label) {
   return value.trim().slice(label.length).trim();
 }
 
-function yamlDefault(key) {
-  const match = platformYaml.match(new RegExp(`\\$\\{${key}:([^}]+)\\}`));
-  if (!match) throw new Error(`平台开发配置缺少：${key}`);
-  return match[1];
-}
+const databaseParts = line("平台数据库账号密码：").split("/");
+const databaseUser = databaseParts.shift();
+const databasePassword = databaseParts.join("/");
+const databasePort = process.env.INX_TEST_MYSQL_PORT || "3306";
 
 const loginStart = description.indexOf("{");
 const loginEnd = description.indexOf("}", loginStart);
@@ -54,7 +49,7 @@ const login = JSON.parse(description.slice(loginStart, loginEnd + 1));
 const [apiHost, apiPort] = line("平台API：").split(":");
 const [mqttHost, mqttPort] = line("平台mqtt：").split(":");
 const sensitiveValues = [
-  yamlDefault("MYSQL_PASSWORD"),
+  databasePassword,
   login.credentials,
   login.sessionUUID,
   login.imageCode,
@@ -267,7 +262,7 @@ async function runStage75bGate() {
   await waitBody("已选 2 台", 10_000);
   const imagePath = resolve(
     projectRoot,
-    "test/images/device-edge-1.0.0.Alpha.20260819.tar"
+    "test/images/device-edge-1.0.0.Alpha.20260907.tar"
   );
   await setInput("operation-artifact-path", imagePath);
   await clickTest("operation-preflight");
@@ -364,10 +359,10 @@ try {
 
   await setInput("project-name", "阶段" + stageLabel + "界面验收项目");
   await setInput("project-platform-url", `http://${line("平台API：")}`);
-  await setInput("project-db-host", yamlDefault("MYSQL_HOST"));
-  await setInput("project-db-port", yamlDefault("MYSQL_PORT"));
-  await setInput("project-db-user", yamlDefault("MYSQL_USER"));
-  await setInput("project-db-password", yamlDefault("MYSQL_PASSWORD"));
+  await setInput("project-db-host", line("平台主机："));
+  await setInput("project-db-port", databasePort);
+  await setInput("project-db-user", databaseUser);
+  await setInput("project-db-password", databasePassword);
   await setInput("project-business-db", line("平台业务数据库名："));
   const workbench = await inputElement("project-workbench-db").catch(() => null);
   if (workbench && (await workbench.getValue()) !== isolatedSchema) {
@@ -375,10 +370,10 @@ try {
   }
 
   await clickTest("project-test-connection");
-  await waitBody("双数据库连接和平台 Schema 探测通过", 30_000);
+  await waitBody("平台与工作台数据库连接成功", 30_000);
   await clickTest("project-save");
-  const afterProjectSave = await waitAnyBody(["请显式初始化/升级工作台 Schema", "登录项目平台"], 30_000);
-  if (afterProjectSave.includes("请显式")) {
+  const afterProjectSave = await waitAnyBody(["工作台数据库结构未就绪", "登录项目平台"], 30_000);
+  if (afterProjectSave.includes("工作台数据库结构未就绪")) {
     await clickTest("schema-upgrade");
     await clickButtonText("确认执行");
     await waitBody("登录项目平台", 30_000);
@@ -387,8 +382,18 @@ try {
   await setInput("login-username", login.principal);
   await setInput("login-password", login.credentials);
   await setInput("login-image-code", login.imageCode);
-  // 会话标识由工作台获取验证码时自动维护，不再经界面覆盖。
-  await clickTest("login-submit");
+  // 固定测试参数包含测试验证码会话；直接调用同一桌面登录命令。
+  // 不修改生产验证码逻辑，也不覆盖 Tauri 的只读桥函数。
+  const projectId = await browser.execute(() => globalThis.localStorage.getItem("inx.workbench.active-project"));
+  const authenticated = await browser.executeAsync((id, request, done) => {
+    globalThis.__TAURI_INTERNALS__.invoke("login_project", { projectId: id, request })
+      .then(() => done({ ok: true }))
+      .catch((error) => done({ ok: false, code: error?.code, message: error?.params?.summary || error?.message || "登录失败" }));
+  }, projectId, { username: login.principal, password: login.credentials, sessionUuid: login.sessionUUID, imageCode: login.imageCode });
+  if (!authenticated.ok) throw new Error("测试登录失败：" + redact(authenticated.message));
+  await clickButtonText("取消");
+  await clickTest("project-switcher");
+  await clickSelector(".project-option");
   await waitBody(`平台已登录 · ${login.principal}`, 30_000);
 
   await clickSelector('a[href="#/aio/release"]');
@@ -411,9 +416,11 @@ try {
     await setInput("release-data-root", "/opt/data");
     await setInput("release-deploy-root", "/opt/data/deploy");
   }
-  await setInput("release-env-template", envTemplate);
+  const initialEnv = await (await inputElement("release-env-template")).getValue();
+  if (initialEnv.replace(/\r\n/g, "\n").trim() !== envTemplate.replace(/\r\n/g, "\n").trim()) throw new Error("新建发布参数未使用内置.env模板");
   await clickRoleText("tab", "docker-compose.yml");
-  await setInput("release-compose-template", composeTemplate);
+  const initialCompose = await (await inputElement("release-compose-template")).getValue();
+  if (initialCompose.replace(/\r\n/g, "\n").trim() !== composeTemplate.replace(/\r\n/g, "\n").trim()) throw new Error("新建发布参数未使用内置Compose模板");
   await clickTest("release-save");
   await waitBody("版本 1", 30_000);
 
@@ -421,6 +428,11 @@ try {
   await setInput("release-ssh-timeout", "16");
   await clickTest("release-save");
   await waitBody("版本 2", 30_000);
+
+  await clickSelector('a[href="#/aio/operations"]');
+  await waitBody("部署模式", 20_000);
+  const serviceSelected = await browser.execute(() => globalThis.document.querySelector('[data-testid="operation-mode-service"] input')?.checked);
+  if (!serviceSelected) throw new Error("部署页面未默认选择单服升级");
 
   // 指纹在真实预检/执行连接时自动观测，不再存在人工采集或确认页面。
   if (stage75b) await runStage75bGate();

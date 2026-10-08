@@ -7,7 +7,7 @@ use crate::domain::aio::assets::{
     AioImportSession, ImportSelection, InventoryApplyResult, OperationRecordSummary,
     PlatformRecordIssue, ServiceVersionRecord,
 };
-use crate::domain::aio::inventory::{FieldConflict, PlatformNodeSnapshot};
+use crate::domain::aio::inventory::{FieldConflict, InventoryValues, PlatformNodeSnapshot};
 use crate::domain::aio::service_check::NodeServiceCheckSnapshot;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +112,11 @@ pub trait AioAssetsPort: Send + Sync {
         local_project_id: &str,
         file_path: &Path,
     ) -> AppResult<InventoryPreview>;
+    async fn preview_create(
+        &self,
+        local_project_id: &str,
+        values: InventoryValues,
+    ) -> AppResult<InventoryPreview>;
     async fn latest_import(&self, local_project_id: &str) -> AppResult<Option<AioImportSession>>;
     async fn update_selection(
         &self,
@@ -156,6 +161,14 @@ pub async fn latest_inventory_import<P: AioAssetsPort>(
     local_project_id: &str,
 ) -> AppResult<Option<AioImportSession>> {
     port.latest_import(local_project_id).await
+}
+
+pub async fn preview_aio_node_create<P: AioAssetsPort>(
+    port: &P,
+    local_project_id: &str,
+    values: InventoryValues,
+) -> AppResult<InventoryPreview> {
+    port.preview_create(local_project_id, values).await
 }
 
 pub async fn update_inventory_selection<P: AioAssetsPort>(

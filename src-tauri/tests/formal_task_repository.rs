@@ -111,7 +111,7 @@ async fn succeeded_preflight(
             .expect("complete target preflight");
     }
     repository
-        .bind_preflight_snapshot(task_id, project, snapshot_sha256)
+        .bind_preflight_snapshot(task_id, project, "deployment_preflight", snapshot_sha256)
         .await
         .expect("bind preflight snapshot");
     repository
@@ -148,7 +148,12 @@ async fn succeeded_preflight_is_bound_and_consumed_once_when_queued_task_is_crea
     let mut deployment = task("deployment-a", "project-a");
     deployment.remote_operation_record_id = None;
     let created = repository
-        .create_queued_from_preflight("preflight-once", &snapshot_sha256, deployment.clone())
+        .create_queued_from_preflight(
+            "preflight-once",
+            "deployment_preflight",
+            &snapshot_sha256,
+            deployment.clone(),
+        )
         .await
         .expect("create queued task from preflight");
     assert_eq!(created.state, TaskState::Queued);
@@ -166,7 +171,7 @@ async fn succeeded_preflight_is_bound_and_consumed_once_when_queued_task_is_crea
     deployment.id = "deployment-duplicate".into();
     assert!(matches!(
         repository
-            .create_queued_from_preflight("preflight-once", &snapshot_sha256, deployment)
+            .create_queued_from_preflight("preflight-once", "deployment_preflight", &snapshot_sha256, deployment)
             .await,
         Err(AppError::Conflict(message)) if message.contains("不能重复提交")
     ));
@@ -234,14 +239,14 @@ async fn preflight_submission_rejects_wrong_project_snapshot_or_targets() {
     let wrong_project = task("wrong-project", "project-b");
     assert!(matches!(
         repository
-            .create_queued_from_preflight("preflight-guard", &snapshot_sha256, wrong_project)
+            .create_queued_from_preflight("preflight-guard", "deployment_preflight", &snapshot_sha256, wrong_project)
             .await,
         Err(AppError::Conflict(message)) if message.contains("不属于当前项目")
     ));
     let wrong_snapshot = task("wrong-snapshot", "project-a");
     assert!(matches!(
         repository
-            .create_queued_from_preflight("preflight-guard", &"c".repeat(64), wrong_snapshot)
+            .create_queued_from_preflight("preflight-guard", "deployment_preflight", &"c".repeat(64), wrong_snapshot)
             .await,
         Err(AppError::Conflict(message)) if message.contains("执行内容")
     ));
@@ -251,7 +256,7 @@ async fn preflight_submission_rejects_wrong_project_snapshot_or_targets() {
     wrong_targets.concurrency = 1;
     assert!(matches!(
         repository
-            .create_queued_from_preflight("preflight-guard", &snapshot_sha256, wrong_targets)
+            .create_queued_from_preflight("preflight-guard", "deployment_preflight", &snapshot_sha256, wrong_targets)
             .await,
         Err(AppError::Conflict(message)) if message.contains("目标")
     ));
@@ -698,7 +703,12 @@ async fn clearing_terminal_tasks_preserves_unsubmitted_successful_preflight_unti
     let mut deployment = task("deployment-from-preserved-preflight", "project-a");
     deployment.remote_operation_record_id = None;
     repository
-        .create_queued_from_preflight("preflight-pending-submission", &snapshot_sha256, deployment)
+        .create_queued_from_preflight(
+            "preflight-pending-submission",
+            "deployment_preflight",
+            &snapshot_sha256,
+            deployment,
+        )
         .await
         .expect("consume successful preflight");
     assert_eq!(

@@ -16,6 +16,7 @@ pub struct FormalAppState {
     pub runtime_registry: ProjectRuntimeRegistry,
     pub job_supervisor: JobSupervisor,
     pub task_handler_registry: TaskHandlerRegistry,
+    pub task_recovery_registry: crate::infrastructure::task_recovery::TaskRecoveryRegistry,
     pub task_queue: TaskQueue,
     pub task_event_bus: TaskEventBus,
     pub task_repository: TaskRepository,

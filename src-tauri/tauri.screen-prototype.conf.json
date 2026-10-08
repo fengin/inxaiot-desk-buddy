@@ -1,0 +1,24 @@
+{
+  "productName": "INX 实施工作台 · 智能屏原型",
+  "identifier": "com.inxaiot.desk-buddy.screenprototype",
+  "build": {
+    "beforeDevCommand": "node scripts/dev-screen-desktop.mjs --frontend",
+    "devUrl": "http://127.0.0.1:1421"
+  },
+  "app": {
+    "windows": [{
+      "label": "main",
+      "title": "INX 实施工作台 · 智能屏原型（开发）",
+      "width": 1280,
+      "height": 800,
+      "minWidth": 1024,
+      "minHeight": 640,
+      "center": true,
+      "resizable": true,
+      "fullscreen": false,
+      "decorations": false,
+      "transparent": false,
+      "useHttpsScheme": true
+    }]
+  }
+}

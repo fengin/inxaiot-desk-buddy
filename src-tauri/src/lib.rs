@@ -6,6 +6,9 @@ pub mod infrastructure;
 pub mod interface;
 pub mod runtime;
 
+use crate::interface::commands::operation_history::{
+    get_business_operation_history_detail, list_business_operation_history,
+};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -33,7 +36,7 @@ use crate::infrastructure::task_runtime::{
 };
 use crate::interface::commands::aio_assets::{
     apply_inventory_import, discard_inventory_import, get_edge_node_detail,
-    get_latest_inventory_import, list_edge_nodes, preview_inventory_import,
+    get_latest_inventory_import, list_edge_nodes, preview_inventory_import, preview_aio_node_create,
     update_inventory_import_selection,
 };
 use crate::interface::commands::application_lifecycle::{
@@ -167,6 +170,7 @@ pub fn run() {
                     secret_store: Arc::new(OsSecretStore::new("inxaiot-desk-buddy")?),
                     runtime_registry: ProjectRuntimeRegistry::default(),
                     job_supervisor,
+                    task_recovery_registry: crate::infrastructure::task_handlers::built_in_recovery_registry(),
                     task_handler_registry,
                     task_queue,
                     task_event_bus: task_event_bus.clone(),
@@ -247,6 +251,33 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            interface::commands::smart_screen::screen_load,
+            interface::commands::smart_screen::screen_lock_preview,
+            interface::commands::smart_screen::screen_takeover_release,
+            interface::commands::smart_screen::screen_lock_release,
+            interface::commands::smart_screen::screen_preflight,
+            interface::commands::smart_screen::screen_execute,
+            interface::commands::smart_screen::screen_cancel,
+            interface::commands::smart_screen::screen_verify,
+            interface::commands::smart_screen::screen_registration_preview,
+            interface::commands::smart_screen::screen_registration_submit,
+            interface::commands::smart_screen::screen_merge,
+            interface::commands::smart_screen::screen_parse_apk,
+            interface::commands::smart_screen::screen_version_preview,
+            interface::commands::smart_screen::screen_version_submit,
+            interface::commands::smart_screen::screen_cover_status,
+            interface::commands::smart_screen::screen_read_diagnostics,
+            interface::commands::smart_screen::screen_app_config_read,
+            interface::commands::smart_screen::screen_app_config_draft_load,
+            interface::commands::smart_screen::screen_app_config_draft_save,
+            interface::commands::smart_screen::screen_app_config_preflight,
+            interface::commands::smart_screen::screen_export_diagnostics,
+            interface::commands::smart_screen::screen_select_project,
+            interface::commands::smart_screen::screen_save_local,
+            interface::commands::smart_screen::screen_import_local,
+            interface::commands::smart_screen::screen_remove_local,
+            interface::commands::smart_screen::screen_save_draft,
+            interface::commands::smart_screen::screen_discard_draft,
             list_local_projects,
             create_local_project,
             update_local_project,
@@ -270,6 +301,7 @@ pub fn run() {
             get_edge_node_detail,
             check_edge_node_services,
             preview_inventory_import,
+            preview_aio_node_create,
             get_latest_inventory_import,
             update_inventory_import_selection,
             apply_inventory_import,
@@ -281,6 +313,8 @@ pub fn run() {
             submit_deployment,
             get_deployment_task,
             list_operation_history,
+            list_business_operation_history,
+            get_business_operation_history_detail,
             get_operation_history_detail,
             list_local_tasks,
             list_task_logs,

@@ -143,11 +143,18 @@ try {
 
     $portableTarget = Join-Path $staging "inxaiot-desk-buddy-$version-x64.exe"
     Copy-Item -LiteralPath $portableSource -Destination $portableTarget
+    Invoke-NativeStep "生成并验证智能屏随包工具" {
+        node (Join-Path $PSScriptRoot 'package-screen-tools.mjs') --platform win32 --arch x64 --output $staging
+    }
     $roles = [ordered]@{
         (Split-Path -Leaf $portableTarget) = "portable"
         "sbom.cdx.json" = "sbom"
     }
     $files = @()
+    foreach ($tool in Get-ChildItem -LiteralPath (Join-Path $staging 'tools') -File -Recurse) {
+        $relativeName = [IO.Path]::GetRelativePath($staging, $tool.FullName).Replace('\', '/')
+        $roles[$relativeName] = 'screen-tool'
+    }
     foreach ($name in $roles.Keys) {
         $file = Get-Item -LiteralPath (Join-Path $staging $name)
         $files += [ordered]@{
@@ -158,14 +165,14 @@ try {
         }
     }
     $manifest = [ordered]@{
-        schemaVersion = 3
+        schemaVersion = 4
         product = "INX 实施工作台"
         identifier = "com.inxaiot.desk-buddy"
         version = $version
         distribution = [ordered]@{
             os = "windows"
             architecture = "x64"
-            package = "portable-exe"
+            package = "portable-directory"
             runtime = "Microsoft Edge WebView2 Evergreen Runtime"
             applicationData = "per-user-standard-app-data"
         }
@@ -190,13 +197,14 @@ try {
     }
     $manifestPath = Join-Path $staging "release-manifest.json"
     [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 20), [System.Text.UTF8Encoding]::new($false))
-    $checksumFiles = Get-ChildItem $staging -File | Sort-Object Name
+    $checksumFiles = Get-ChildItem $staging -File -Recurse | Sort-Object FullName
     $checksumLines = foreach ($file in $checksumFiles) {
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
-        "$hash  $($file.Name)"
+        $relativeName = [IO.Path]::GetRelativePath($staging, $file.FullName).Replace('\', '/')
+        "$hash  $relativeName"
     }
     [System.IO.File]::WriteAllLines((Join-Path $staging "checksums.sha256"), $checksumLines, [System.Text.UTF8Encoding]::new($false))
-    foreach ($file in Get-ChildItem $staging -File) {
+    foreach ($file in Get-ChildItem $staging -File -Recurse) {
         $file.IsReadOnly = $true
     }
     Move-Item -LiteralPath $staging -Destination $finalDirectory

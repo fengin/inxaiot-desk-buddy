@@ -32,3 +32,9 @@ pub mod task_data_lifecycle;
 pub mod task_handlers;
 pub mod task_runtime;
 pub mod workbench_aio;
+
+pub mod aio_task_recovery;
+pub mod task_recovery;
+
+pub mod operation_history;
+pub mod smart_screen;

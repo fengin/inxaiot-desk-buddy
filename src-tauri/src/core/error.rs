@@ -12,6 +12,8 @@ pub enum AppError {
     InvalidFields(BTreeMap<String, String>),
     #[error("资源状态冲突：{0}")]
     Conflict(String),
+    #[error("该智能屏正在由其他电脑操作，请确认是否接手")]
+    ConfirmationRequired { code: &'static str, details: serde_json::Value },
     #[error("未找到资源：{0}")]
     NotFound(String),
     #[error("数据库操作失败：{operation}")]

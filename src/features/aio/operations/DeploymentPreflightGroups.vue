@@ -1,15 +1,15 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { NButton } from "naive-ui";
-import { CheckCircle2, CircleAlert, ChevronRight } from "lucide-vue-next";
 import type { DeploymentPreflightCheck, DeploymentPreflightReport } from "@/shared/model/deploymentWorkflow";
 import { preflightGroups, preflightGroupPassed, type PreflightNodeIdentity } from "./preflightPresentation";
+import DeploymentPreflightRow from "./DeploymentPreflightRow.vue";
 
 const props = defineProps<{ report?: DeploymentPreflightReport; nodes: PreflightNodeIdentity[] }>();
 const emit = defineEmits<{ remediate: [check: DeploymentPreflightCheck] }>();
 const groups = computed(() => preflightGroups(props.report, props.nodes));
 const expandedGroups = ref(new Set<string>());
-const statusLabels = { passed: "通过", warning: "有提示", failed: "需处理", pending: "未检查" };
+const commonGroup = computed(() => groups.value.find(group => group.key === "common"));
+const nodeGroups = computed(() => groups.value.filter(group => group.key !== "common"));
 
 watch(() => props.report, () => {
   expandedGroups.value = new Set(groups.value.filter((group) => !preflightGroupPassed(group)).map((group) => group.key));
@@ -22,30 +22,18 @@ function toggleGroup(key: string) {
 </script>
 
 <template>
-  <div class="preflight-groups">
-    <section v-for="group in groups" :key="group.key" class="preflight-group" :data-testid="'preflight-group-' + group.key">
-      <h3 class="preflight-group-heading">
-        <button type="button" class="preflight-group-toggle" :aria-expanded="expandedGroups.has(group.key)" :aria-controls="'preflight-details-' + group.key" @click="toggleGroup(group.key)">
-          <CheckCircle2 v-if="preflightGroupPassed(group)" class="preflight-group-status-icon success" :size="18" aria-hidden="true" data-state="passed" />
-          <CircleAlert v-else class="preflight-group-status-icon error" :size="18" aria-hidden="true" data-state="failed" />
-          <span class="preflight-group-identity"><span class="preflight-group-title">{{ group.title }}</span><span v-if="group.subtitle" class="preflight-group-address">{{ group.subtitle }}</span></span>
-          <span v-if="group.items.some((item) => item.issues.some((issue) => issue.status === 'warning'))" class="preflight-group-note">有提示</span>
-          <span class="preflight-group-status" :class="preflightGroupPassed(group) ? 'success' : 'error'">{{ preflightGroupPassed(group) ? '通过' : '不通过' }}</span>
-          <ChevronRight :size="15" class="preflight-group-chevron" :class="{ expanded: expandedGroups.has(group.key) }" aria-hidden="true" />
-        </button>
-      </h3>
-      <div v-if="expandedGroups.has(group.key)" :id="'preflight-details-' + group.key" class="preflight-group-details">
-        <div v-for="item in group.items" :key="item.key" class="preflight-item-row" data-testid="preflight-business-check">
-          <span class="preflight-item-label">{{ item.label }}</span>
-          <div class="preflight-item-description"><span v-if="item.message">{{ item.message }}</span>
-            <span v-for="issue in item.issues" :key="issue.code" class="preflight-issue" :class="issue.status">
-              <span>{{ issue.code === 'host_key_changed' ? '连接信息与上次不同，已自动记录并继续，无需操作。' : issue.message }}</span>
-              <n-button v-if="issue.remediation" size="tiny" quaternary @click="emit('remediate', issue)">{{ issue.remediation.label }}</n-button>
-            </span>
-          </div>
-          <span class="preflight-item-status" :class="item.status">{{ statusLabels[item.status] }}</span>
-        </div>
-      </div>
-    </section>
+  <div class="preflight-groups aio-preflight-table">
+    <DeploymentPreflightRow v-if="commonGroup" :group="commonGroup" :expanded="expandedGroups.has('common')" @toggle="toggleGroup('common')" @remediate="emit('remediate', $event)" />
+    <div class="aio-preflight-head" aria-hidden="true"><span></span><span>一体机名称</span><span>IP 地址</span><span>检查结果</span><span>状态</span><span></span></div>
+    <div class="aio-preflight-rows inx-scroll-area" tabindex="0" aria-label="一体机检查结果列表">
+      <DeploymentPreflightRow v-for="group in nodeGroups" :key="group.key" :group="group" :expanded="expandedGroups.has(group.key)" @toggle="toggleGroup(group.key)" @remediate="emit('remediate', $event)" />
+    </div>
   </div>
 </template>
+
+<style scoped>
+.aio-preflight-table { --aio-preflight-columns: 16px minmax(130px, 1fr) 126px minmax(200px, 1.6fr) 100px 14px; display: flex; flex: 1; min-height: 0; flex-direction: column; border: 1px solid var(--inx-color-border); border-radius: var(--inx-radius-sm); overflow: hidden; }
+.aio-preflight-head { display: grid; grid-template-columns: var(--aio-preflight-columns); align-items: center; gap: 8px; min-height: 30px; padding: 0 14px 0 10px; border-bottom: 1px solid var(--inx-color-border); background: var(--inx-color-table-header); color: var(--inx-color-text-secondary); font-size: 11px; overflow: hidden; }
+.aio-preflight-table > :first-child, .aio-preflight-head { flex: none; }
+.aio-preflight-rows { flex: 1; min-height: 0; overflow: auto; }
+</style>

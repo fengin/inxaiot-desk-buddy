@@ -90,7 +90,9 @@ fn distribution_has_explicit_windows_macos_and_linux_entries() {
         .unwrap();
     let release = std::fs::read_to_string(root.join("scripts/release-internal.ps1")).unwrap();
     assert!(release.contains("tauri build --no-bundle"));
-    assert!(release.contains("schemaVersion = 3"));
+    assert!(release.contains("schemaVersion = 4"));
+    assert!(release.contains("portable-directory"));
+    assert!(release.contains("package-screen-tools.mjs"));
     assert!(!release.contains("--bundles nsis"));
     assert!(!release.contains("-setup.exe"));
     let windows: serde_json::Value =
@@ -127,7 +129,7 @@ fn distribution_has_explicit_windows_macos_and_linux_entries() {
     assert!(workflow.contains("runs-on: windows-latest"));
     assert!(workflow.contains("APPLE_SIGNING_IDENTITY: \"-\""));
     assert!(workflow.contains("pnpm install --frozen-lockfile"));
-    assert!(workflow.contains("softprops/action-gh-release@v2"));
+    assert!(workflow.contains("softprops/action-gh-release@v3"));
     assert!(root.join("scripts/check-release-version.mjs").is_file());
 }
 

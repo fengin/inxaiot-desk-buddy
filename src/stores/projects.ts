@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 
+import { isLocalProject, projectAllowsAccess, type ProjectAccess } from "@/shared/model/project";
 import { commandErrorText } from "@/shared/api/errors";
 import { useWorkbenchAdapter } from "@/shared/api/workbenchAdapter";
 import type {
@@ -37,6 +38,7 @@ export const useProjectStore = defineStore("projects", () => {
   const isReady = computed(() => activeProject.value?.connectionState === "ready");
   const databaseConnected = computed(() => activeProject.value?.databaseState === "connected");
   const businessMenuEnabled = computed(() => isReady.value);
+  const allowsAccess = (access: ProjectAccess) => projectAllowsAccess(activeProject.value, access);
 
   function replaceProject(project: ProjectOverview) {
     const index = projects.value.findIndex((item) => item.id === project.id);
@@ -141,6 +143,13 @@ export const useProjectStore = defineStore("projects", () => {
     if (persist) localStorage.setItem(ACTIVE_PROJECT_KEY, projectId);
     try {
       const project = await useWorkbenchAdapter().switchProject(projectId);
+      if (isLocalProject(project)) {
+        if (request === switchRequest && activeProjectId.value === projectId) {
+          replaceProject(project);
+          schemaStatus.value = undefined;
+        }
+        return project;
+      }
       const schema = await useWorkbenchAdapter().getWorkbenchSchemaStatus(projectId);
       project.schemaState = schema.state;
       if (schema.state !== "ready") {
@@ -193,7 +202,15 @@ export const useProjectStore = defineStore("projects", () => {
 
   async function login(projectId: string, request: PlatformLoginRequest) {
     const nextSession = await useWorkbenchAdapter().loginProject(projectId, request);
-    await switchProject(projectId);
+    const project = projects.value.find((item) => item.id === projectId);
+    if (project) project.session = nextSession;
+    if (activeProjectId.value === projectId) {
+      try {
+        await switchProject(projectId);
+      } catch {
+        // 登录已经成功。共享库错误保留在项目状态中，不将有效会话丢弃或误报为登录失败。
+      }
+    }
     return nextSession;
   }
 
@@ -254,6 +271,7 @@ export const useProjectStore = defineStore("projects", () => {
     isReady,
     databaseConnected,
     businessMenuEnabled,
+    allowsAccess,
     initialized,
     loading,
     switching,

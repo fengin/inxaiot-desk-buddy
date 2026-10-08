@@ -24,7 +24,7 @@ pub struct ProjectInput {
 impl ProjectInput {
     pub fn validate_for_create(&self) -> AppResult<()> {
         self.validate_common()?;
-        if self.db_password.as_deref().is_none_or(str::is_empty) {
+        if !self.is_local_only() && self.db_password.as_deref().is_none_or(str::is_empty) {
             return Err(AppError::InvalidConfig("数据库密码不能为空".into()));
         }
         Ok(())
@@ -36,6 +36,9 @@ impl ProjectInput {
 
     pub fn validate_for_test(&self, existing_project_id: Option<&str>) -> AppResult<()> {
         self.validate_common()?;
+        if self.is_local_only() {
+            return Err(AppError::InvalidConfig("本机项目尚未配置远端连接".into()));
+        }
         if existing_project_id.is_none() && self.db_password.as_deref().is_none_or(str::is_empty) {
             return Err(AppError::InvalidConfig(
                 "测试未保存项目时必须填写数据库密码".into(),
@@ -44,7 +47,29 @@ impl ProjectInput {
         Ok(())
     }
 
+    pub fn is_local_only(&self) -> bool {
+        local_project_only(
+            &self.platform_url,
+            &self.db_host,
+            &self.db_user,
+            &self.business_db,
+        )
+    }
+
     fn validate_common(&self) -> AppResult<()> {
+        if self.is_local_only() {
+            if self.name.trim().is_empty() || self.db_port == 0 {
+                return Err(AppError::InvalidConfig("项目名称不能为空".into()));
+            }
+            if self
+                .db_password
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            {
+                return Err(AppError::InvalidConfig("本机项目不保存数据库密码".into()));
+            }
+            return Ok(());
+        }
         if self.name.trim().is_empty()
             || self.platform_url.trim().is_empty()
             || self.db_host.trim().is_empty()
@@ -91,6 +116,17 @@ impl ProjectInput {
         }
         Ok(())
     }
+}
+
+pub fn local_project_only(
+    platform_url: &str,
+    db_host: &str,
+    db_user: &str,
+    business_db: &str,
+) -> bool {
+    [platform_url, db_host, db_user, business_db]
+        .iter()
+        .all(|value| value.trim().is_empty())
 }
 
 pub fn is_private_network_host(host: &str) -> bool {

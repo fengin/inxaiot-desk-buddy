@@ -26,6 +26,7 @@ export interface ActivityTask {
   completedCount: number;
   updatedAt: string;
   cancellable: boolean;
+  clearable?: boolean;
 }
 
 export interface FinalizationRetryResult {

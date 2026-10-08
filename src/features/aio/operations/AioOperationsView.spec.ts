@@ -15,6 +15,7 @@ import { configureOperationsAdapter } from "@/shared/api/operationsAdapter";
 import { configureSystemDialogAdapter } from "@/shared/api/systemDialogAdapter";
 import { useActivityStore } from "@/stores/activity";
 import { useDeploymentWorkflowStore } from "@/stores/deploymentWorkflow";
+import { useReleaseProfileStore } from "@/stores/releaseProfile";
 
 const recoveredTaskId = "fixture-recovered-deployment";
 
@@ -63,7 +64,8 @@ class RecoveryOperationsAdapter extends FixtureOperationsAdapter {
         mac: "000C293BB931",
         state: this.completed ? this.finalState : "running",
         stage: this.completed ? "completed" : "upload",
-        progress: this.completed ? 100 : 35
+        progress: this.completed ? 100 : 35,
+        updatedAt: new Date().toISOString()
       }],
       steps: []
     };
@@ -215,7 +217,7 @@ class PausedSubmitOperationsAdapter extends FixtureOperationsAdapter {
     this.submittedExecutionSnapshot = executionSnapshot;
     this.markStarted();
     await this.gate;
-    return { taskId: "paused-submit-task", state: "queued", submittedAt: new Date().toISOString() };
+    return { taskId: "paused-submit-task", state: "queued" as const, submittedAt: new Date().toISOString() };
   }
 
   override async getTask(projectId: string, taskId: string) {
@@ -268,7 +270,7 @@ class SubmittedTaskActivityAdapter extends FixtureActivityAdapter {
 }
 
 class FailingSubmitOperationsAdapter extends FixtureOperationsAdapter {
-  override async submit() {
+  override async submit(): Promise<never> {
     throw {
       code: "NOT_FOUND",
       messageKey: "error.not_found",
@@ -371,6 +373,10 @@ describe("部署页面活动任务恢复", () => {
     });
     try {
       await flushPromises();
+      expect(wrapper.get('[data-testid="operation-mode-service"] input').element).toHaveProperty("checked", true);
+      expect(wrapper.findAll(".service-image-row")).toHaveLength(1);
+      await wrapper.get('[data-testid="operation-mode-full"]').trigger("click");
+      await flushPromises();
       expect(wrapper.find('[data-testid="release-directory-structure"]').exists()).toBe(false);
       expect(wrapper.text()).not.toContain("本地Release目录");
       const flowBar = wrapper.get(".operation-flow-bar");
@@ -427,6 +433,13 @@ describe("部署页面活动任务恢复", () => {
       await flushPromises();
       expect(wrapper.findAll(".service-image-row")).toHaveLength(1);
       expect(wrapper.text()).toContain("目标服务");
+      useReleaseProfileStore(pinia).profile = undefined;
+      await flushPromises();
+      const configureButton = wrapper.get('.compose-missing-alert button');
+      expect(configureButton.text()).toBe('前往配置');
+      await configureButton.trigger('click');
+      await flushPromises();
+      await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/aio/release'));
     } finally {
       wrapper.unmount();
     }
@@ -495,6 +508,8 @@ describe("部署页面活动任务恢复", () => {
       global: { plugins: [createPinia(), router, i18n], stubs: { teleport: true } }
     });
     try {
+      await flushPromises();
+      await wrapper.get('[data-testid="operation-mode-full"]').trigger("click");
       await flushPromises();
       await wrapper.get('[data-testid="operation-image-select-device-edge"]').trigger("click");
       await wrapper.get('[data-testid="operation-image-select-rule-engine"]').trigger("click");
@@ -729,15 +744,23 @@ describe("部署页面活动任务恢复", () => {
     expect(wrapper.get('[data-testid="operation-execution-percentage"]').text()).toBe("35%");
     expect(wrapper.get('[data-testid="operation-execution-result-count"]').text()).toBe("0/1 台形成最终结果");
     expect(wrapper.get('[data-testid="operation-execution-progress"]').findComponent(NProgress).props("percentage")).toBe(35);
-    expect(wrapper.get('.execution-nodes strong').text()).toBe("AIO-1F-弱电间");
-    expect(wrapper.get('.execution-nodes').text()).toContain("上传发布文件");
-    expect(wrapper.get('.execution-nodes').text()).not.toContain("upload");
+    expect(wrapper.get('.aio-execution-table strong').text()).toBe("AIO-1F-弱电间");
+    expect(wrapper.get('.aio-execution-table').text()).toContain("上传发布文件");
+    expect(wrapper.get('.aio-execution-table').text()).not.toContain("upload");
     const historyButton = wrapper.findAll('button').find((button) => button.text() === '查看历史记录');
     expect(historyButton).toBeDefined();
     await historyButton!.trigger('click');
     await flushPromises();
-    expect(wrapper.findAll('.history-list button').length).toBeGreaterThan(0);
+    expect(wrapper.findAll('.aio-history-table button').length).toBeGreaterThan(0);
     expect(wrapper.text()).not.toContain('当前项目没有共享部署操作记录。');
+    await wrapper.get('.aio-history-table button').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.aio-history-target-table').exists()).toBe(true);
+    expect(wrapper.get('.history-detail__facts').text()).toContain('操作人员');
+    const backToHistory = wrapper.findAll('button').find(button => button.text() === '返回历史列表');
+    await backToHistory!.trigger('click');
+    await flushPromises();
+    expect(wrapper.find('.aio-history-table').exists()).toBe(true);
 
     const activity = useActivityStore(pinia);
     const workflow = useDeploymentWorkflowStore(pinia);
@@ -752,19 +775,19 @@ describe("部署页面活动任务恢复", () => {
     expect(wrapper.get('.result-hero-summary').text()).not.toContain("Task");
     expect(wrapper.get('.result-hero-summary').text()).not.toContain("执行摘要");
     const resultStep = wrapper.findAll('.process-step')[3]!;
-    expect(wrapper.get('.result-list strong').text()).toBe("AIO-1F-弱电间");
+    expect(wrapper.get('.aio-result-table strong').text()).toBe("AIO-1F-弱电间");
     if (finalState === "succeeded") {
       expect(resultStep.classes()).toContain("result-success");
       expect(resultStep.find('.lucide-check').exists()).toBe(true);
-      expect(wrapper.get('.result-list').text()).toContain("已完成");
+      expect(wrapper.get('.aio-result-table').text()).toContain("已完成");
       expect(wrapper.find('.result-hero.result-not-success').exists()).toBe(false);
     } else {
       expect(resultStep.classes()).toContain("result-warning");
       expect(resultStep.find('.lucide-circle-alert').exists()).toBe(true);
-      expect(wrapper.get('.result-list').text()).toContain("失败");
-      expect(wrapper.get('.result-list').text()).not.toContain("已完成");
+      expect(wrapper.get('.aio-result-table').text()).toContain("失败");
+      expect(wrapper.get('.aio-result-table').text()).not.toContain("已完成");
       expect(wrapper.find('.result-hero.result-not-success').exists()).toBe(true);
-      expect(wrapper.find('.result-list .lucide-circle-alert').exists()).toBe(true);
+      expect(wrapper.find('.aio-result-table .lucide-circle-alert').exists()).toBe(true);
     }
     wrapper.unmount();
   }, 30000);

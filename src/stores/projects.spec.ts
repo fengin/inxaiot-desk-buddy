@@ -44,6 +44,26 @@ describe("project store", () => {
     expect(store.session?.username).toBe("operator");
   });
 
+  it("本机项目切换不访问远端库，平台读取不被共享库错误阻断", async () => {
+    const adapter = new FixtureWorkbenchAdapter();
+    const schema = vi.spyOn(adapter, "getWorkbenchSchemaStatus");
+    configureWorkbenchAdapter(adapter);
+    const store = useProjectStore();
+    const local = await store.createProject({ ...input, platformUrl: "", dbHost: "", dbUser: "", businessDb: "", dbPassword: undefined });
+    await store.switchProject(local.id);
+    expect(schema).not.toHaveBeenCalled();
+    expect(store.allowsAccess("local")).toBe(true);
+    expect(store.allowsAccess("shared")).toBe(false);
+    expect(store.allowsAccess("platform")).toBe(false);
+    const remote = await store.createProject(input);
+    Object.assign(store.activeProject!, {
+      session: { localProjectId: remote.id, state: "active", username: "tester" },
+      connectionState: "connection_failed", databaseState: "failed"
+    });
+    expect(store.allowsAccess("platform")).toBe(true);
+    expect(store.allowsAccess("shared")).toBe(false);
+  });
+
   it("deletes only the local project entry", async () => {
     const store = useProjectStore();
     await store.initialize();
@@ -52,13 +72,27 @@ describe("project store", () => {
     expect(store.projects.some((project) => project.id === created.id)).toBe(false);
   });
 
+  it("平台登录成功后共享库故障不丢失会话", async () => {
+    const adapter = new FixtureWorkbenchAdapter();
+    configureWorkbenchAdapter(adapter);
+    const store = useProjectStore();
+    const project = await store.createProject(input);
+    vi.spyOn(adapter, "switchProject").mockRejectedValue(new Error("共享库暂不可用"));
+    const session = await store.login(project.id, { username: "operator", password: "fixture-password", sessionUuid: "fixture-session", imageCode: "111" });
+    expect(session.state).toBe("active");
+    expect(store.session?.state).toBe("active");
+    expect(store.allowsAccess("platform")).toBe(true);
+    expect(store.allowsAccess("shared")).toBe(false);
+    expect(store.error).toContain("共享库暂不可用");
+  });
+
   it("在项目入口提示Schema未就绪，登录状态刷新不能重新开放业务入口", async () => {
     const adapter = new FixtureWorkbenchAdapter();
     configureWorkbenchAdapter(adapter);
     const store = useProjectStore();
     await store.initialize();
     const projectId = store.activeProjectId;
-    const schema = await adapter.getWorkbenchSchemaStatus(projectId);
+    const schema = await adapter.getWorkbenchSchemaStatus();
     vi.spyOn(adapter, "getWorkbenchSchemaStatus").mockResolvedValue({ ...schema, state: "upgrade_required", message: "请先升级工作台数据库" });
     await store.switchProject(projectId);
     expect(store.activeProject?.connectionState).toBe("schema_required");

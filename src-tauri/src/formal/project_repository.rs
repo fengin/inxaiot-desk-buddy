@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use super::error::{FormalError, FormalResult};
 use super::secret_store::SecretStore;
+use crate::domain::common::project::local_project_only;
 
 const ACTIVE_PROJECT_TASK_CONSTRAINT: &str = "ACTIVE_PROJECT_TASK";
 
@@ -40,6 +41,16 @@ pub struct UpdateLocalProject {
 
 impl CreateLocalProject {
     fn validate(&self) -> FormalResult<()> {
+        if local_project_only(
+            &self.platform_url,
+            &self.db_host,
+            &self.db_user,
+            &self.business_db,
+        ) && !self.name.trim().is_empty()
+            && self.db_port > 0
+        {
+            return Ok(());
+        }
         if self.name.trim().is_empty()
             || self.platform_url.trim().is_empty()
             || self.db_host.trim().is_empty()
@@ -57,6 +68,16 @@ impl CreateLocalProject {
 
 impl UpdateLocalProject {
     fn validate(&self) -> FormalResult<()> {
+        if local_project_only(
+            &self.platform_url,
+            &self.db_host,
+            &self.db_user,
+            &self.business_db,
+        ) && !self.name.trim().is_empty()
+            && self.db_port > 0
+        {
+            return Ok(());
+        }
         if self.name.trim().is_empty()
             || self.platform_url.trim().is_empty()
             || self.db_host.trim().is_empty()
@@ -203,6 +224,9 @@ impl LocalProjectRepository {
         secret_ref: &str,
         reason: &str,
     ) -> FormalResult<()> {
+        if secret_ref.is_empty() {
+            return Ok(());
+        }
         if self.secrets.delete(secret_ref).is_ok() {
             sqlx::query("DELETE FROM local_secret_cleanup WHERE secret_ref = ?")
                 .bind(secret_ref)
@@ -262,9 +286,20 @@ impl LocalProjectRepository {
     pub async fn create(&self, input: CreateLocalProject) -> FormalResult<LocalProjectRecord> {
         input.validate()?;
         let id = Uuid::now_v7().to_string();
-        let secret_ref = format!("project/{id}/database-password/{}", Uuid::now_v7());
-        self.secrets
-            .save(&secret_ref, input.db_password.as_bytes())?;
+        let local_only = local_project_only(
+            &input.platform_url,
+            &input.db_host,
+            &input.db_user,
+            &input.business_db,
+        );
+        let secret_ref = if local_only {
+            String::new()
+        } else {
+            let reference = format!("project/{id}/database-password/{}", Uuid::now_v7());
+            self.secrets
+                .save(&reference, input.db_password.as_bytes())?;
+            reference
+        };
         let now = timestamp();
         let result = sqlx::query(
             "INSERT INTO local_project \
@@ -346,7 +381,19 @@ impl LocalProjectRepository {
             .as_ref()
             .filter(|password| !password.is_empty())
             .map(|_| format!("project/{project_id}/database-password/{}", Uuid::now_v7()));
-        if let (Some(password), Some(secret_ref)) = (&input.db_password, &new_secret_ref) {
+        let new_secret_ref = if local_project_only(
+            &input.platform_url,
+            &input.db_host,
+            &input.db_user,
+            &input.business_db,
+        ) {
+            Some(String::new())
+        } else {
+            new_secret_ref
+        };
+        if let (Some(password), Some(secret_ref)) = (&input.db_password, &new_secret_ref)
+            && !secret_ref.is_empty()
+        {
             self.secrets.save(secret_ref, password.as_bytes())?;
         }
         let secret_ref = new_secret_ref.as_deref().unwrap_or(&old_secret_ref);
@@ -505,6 +552,11 @@ impl LocalProjectRepository {
             .try_get("db_password_secret_ref")
             .map_err(|_| FormalError::LocalDatabase("解析数据库凭据引用"))?;
         let project = map_project(row)?;
+        if secret_ref.is_empty() {
+            return Err(FormalError::InvalidConfig(
+                "本机项目尚未配置数据库连接".into(),
+            ));
+        }
         let password = self.secrets.load(&secret_ref)?;
         let db_password = String::from_utf8(password)
             .map_err(|_| FormalError::SecretStore("数据库密码不是UTF-8文本"))?;
@@ -516,7 +568,9 @@ impl LocalProjectRepository {
 
     pub async fn touch_opened(&self, project_id: &str) -> FormalResult<()> {
         let result =
-            sqlx::query("UPDATE local_project SET last_opened_at = ?, updated_at = ? WHERE id = ?")
+            sqlx::query("UPDATE local_project SET last_opened_at = ?, updated_at = ? WHERE id = ? \
+                AND NOT EXISTS (SELECT 1 FROM local_task WHERE local_project_id = local_project.id \
+                AND state IN ('draft', 'checking', 'ready', 'queued', 'running', 'cancelling', 'finalizing_failed'))")
                 .bind(timestamp())
                 .bind(timestamp())
                 .bind(project_id)
@@ -527,7 +581,8 @@ impl LocalProjectRepository {
                     FormalError::LocalDatabase("更新项目打开时间")
                 })?;
         if result.rows_affected() == 0 {
-            return Err(FormalError::NotFound(format!("项目不存在：{project_id}")));
+            // 活动任务期间不修改项目行，但仍允许重新进入项目查看或处理结果。
+            self.get(project_id).await?;
         }
         Ok(())
     }

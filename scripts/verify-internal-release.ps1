@@ -34,18 +34,19 @@ if ((Test-Path -LiteralPath (Join-Path $root "release-manifest.p7s")) -or
     throw "内部无签名产物集不得混入历史签名文件"
 }
 $manifest = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
-if ($manifest.schemaVersion -notin @(2, 3) -or $manifest.integrity.policy -ne "internal-unsigned-sha256" -or
+if ($manifest.schemaVersion -notin @(2, 3, 4) -or $manifest.integrity.policy -ne "internal-unsigned-sha256" -or
     $manifest.integrity.authenticodeRequired -ne $false -or $manifest.git.dirty -ne $false) {
     throw "内部产物清单策略或Git状态无效"
 }
 $requiredRoles = @("portable", "sbom")
+if ($manifest.schemaVersion -eq 4) { $requiredRoles += 'screen-tool' }
 if ($manifest.schemaVersion -eq 2) {
     # 保留历史NSIS产物的复验能力，不将旧安装包当成新便携版。
     $requiredRoles += "installer"
 }
 elseif ($manifest.distribution.os -ne "windows" -or
     $manifest.distribution.architecture -ne "x64" -or
-    $manifest.distribution.package -ne "portable-exe") {
+    $manifest.distribution.package -ne $(if ($manifest.schemaVersion -eq 4) { 'portable-directory' } else { 'portable-exe' })) {
     throw "免安装产物平台或分发类型无效"
 }
 $commit = ([string]$manifest.git.commit).ToLowerInvariant()
@@ -59,10 +60,18 @@ if ((Split-Path -Leaf $root) -ne $expectedDirectory) {
 }
 
 $manifestNames = @{}
+function Assert-RelativeArtifactName([string]$Name) {
+    if ([string]::IsNullOrWhiteSpace($Name) -or [IO.Path]::IsPathRooted($Name) -or $Name.Contains('\') -or $Name.Contains(':') -or ($Name.Split('/') | Where-Object { $_ -in @('', '.', '..') })) {
+        throw "产物相对路径非法：$Name"
+    }
+    $resolved = [IO.Path]::GetFullPath((Join-Path $root $Name))
+    if (-not $resolved.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw '产物路径越界' }
+}
 $roleCounts = @{}
 foreach ($entry in $manifest.files) {
     $name = [string]$entry.name
-    if ([System.IO.Path]::GetFileName($name) -ne $name -or $manifestNames.ContainsKey($name)) {
+    Assert-RelativeArtifactName $name
+    if (($manifest.schemaVersion -lt 4 -and [System.IO.Path]::GetFileName($name) -ne $name) -or $manifestNames.ContainsKey($name)) {
         throw "清单文件名非法或重复：$name"
     }
     $manifestNames[$name] = $true
@@ -94,6 +103,7 @@ foreach ($entry in $manifest.files) {
     }
 }
 foreach ($requiredRole in $requiredRoles) {
+    if ($requiredRole -eq 'screen-tool' -and $roleCounts.ContainsKey($requiredRole) -and $roleCounts[$requiredRole] -gt 0) { continue }
     if (-not $roleCounts.ContainsKey($requiredRole) -or $roleCounts[$requiredRole] -ne 1) {
         throw "清单必须且只能包含一个$requiredRole文件"
     }
@@ -101,11 +111,12 @@ foreach ($requiredRole in $requiredRoles) {
 
 $checksumNames = @{}
 foreach ($line in [System.IO.File]::ReadAllLines($checksumsPath)) {
-    if ($line -notmatch "^([0-9a-f]{64})  ([^\\/]+)$") {
+    if ($line -notmatch "^([0-9a-f]{64})  (.+)$") {
         throw "checksums.sha256行格式无效"
     }
     $hash = $matches[1]
     $name = $matches[2]
+    Assert-RelativeArtifactName $name
     if ($checksumNames.ContainsKey($name)) {
         throw "checksums.sha256文件名重复：$name"
     }
@@ -124,18 +135,23 @@ foreach ($required in @($manifestNames.Keys) + @("release-manifest.json")) {
         throw "checksums.sha256未覆盖：$required"
     }
 }
-$actualCoveredNames = @(Get-ChildItem $root -File |
+$actualCoveredNames = @(Get-ChildItem $root -File -Recurse |
     Where-Object { $_.Name -ne "checksums.sha256" } |
-    ForEach-Object { $_.Name } |
+    ForEach-Object { [IO.Path]::GetRelativePath($root, $_.FullName).Replace('\', '/') } |
     Sort-Object)
 $declaredCoveredNames = @($checksumNames.Keys | Sort-Object)
 if (($actualCoveredNames -join [Environment]::NewLine) -ne ($declaredCoveredNames -join [Environment]::NewLine)) {
     throw "checksums.sha256与产物目录文件集合不一致"
 }
-foreach ($file in Get-ChildItem $root -File) {
+foreach ($file in Get-ChildItem $root -File -Recurse) {
     if (-not $file.IsReadOnly) {
         throw "产物文件未设置只读属性：$($file.Name)"
     }
+}
+
+if ($manifest.schemaVersion -eq 4) {
+    & node (Join-Path $PSScriptRoot 'package-screen-tools.mjs') --platform win32 --arch x64 --output $root --verify
+    if ($LASTEXITCODE -ne 0) { throw '智能屏工具不完整或无法运行' }
 }
 
 $projectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))

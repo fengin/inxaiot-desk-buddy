@@ -22,6 +22,10 @@ pub fn register_production_task_handlers(
     registry: &TaskHandlerRegistry,
     app_handle: AppHandle,
 ) -> AppResult<()> {
+    crate::infrastructure::smart_screen::tasks::register(registry, app_handle.clone())?;
+    crate::infrastructure::smart_screen::registration::register(registry, app_handle.clone())?;
+    crate::infrastructure::smart_screen::value_updates::register(registry, app_handle.clone())?;
+    crate::infrastructure::smart_screen::maintenance::register(registry, app_handle.clone())?;
     let inspection_app = app_handle.clone();
     registry.register(
         "aio",
@@ -351,6 +355,8 @@ mod tests {
                 secret_store: Arc::new(MemorySecretStore::default()),
                 runtime_registry: ProjectRuntimeRegistry::default(),
                 job_supervisor,
+                task_recovery_registry:
+                    crate::infrastructure::task_handlers::built_in_recovery_registry(),
                 task_handler_registry,
                 task_queue,
                 task_event_bus,
@@ -456,4 +462,34 @@ mod tests {
         assert!(log.contains("TASK_HANDLER_FAILED"));
         assert!(log.contains("payload_ref"));
     }
+}
+
+pub fn built_in_recovery_registry() -> crate::infrastructure::task_recovery::TaskRecoveryRegistry {
+    let registry = crate::infrastructure::task_recovery::TaskRecoveryRegistry::default();
+    registry.register("smart_screen", "register", crate::infrastructure::smart_screen::registration::recover)
+        .expect("登记结果处理方法不能重复注册");
+    registry.register("smart_screen", "merge", crate::infrastructure::smart_screen::registration::recover)
+        .expect("合并结果处理方法不能重复注册");
+    for operation in ["version_sync","status"] {
+        registry.register("smart_screen", operation, crate::infrastructure::smart_screen::value_updates::recover)
+            .expect("业务结果处理方法不能重复注册");
+    }
+    for operation in crate::domain::smart_screen::operation::WRITE_ACTIONS {
+        registry.register("smart_screen", operation, crate::infrastructure::smart_screen::maintenance::recover)
+            .expect("设备写操作结果处理方法不能重复注册");
+    }
+    for operation in crate::domain::smart_screen::operation::READ_ACTIONS {
+        registry.register("smart_screen", operation, crate::infrastructure::smart_screen::tasks::recover)
+            .expect("屏结果处理方法不能重复注册");
+    }
+    for operation in AIO_OPERATIONS {
+        registry
+            .register(
+                "aio",
+                operation,
+                crate::infrastructure::aio_task_recovery::recover,
+            )
+            .expect("内置结果处理方法不能重复注册");
+    }
+    registry
 }

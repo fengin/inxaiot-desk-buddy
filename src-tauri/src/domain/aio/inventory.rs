@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
+use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
+
+use super::mac::MacAddress;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +47,33 @@ pub struct ParsedInventoryRow {
     pub values: InventoryValues,
     pub mac_normalized: Option<String>,
     pub errors: Vec<String>,
+}
+
+/// CSV 导入与单台新增使用相同的字段规范和校验。
+pub fn validate_inventory_values(row_number: u32, mut values: InventoryValues) -> ParsedInventoryRow {
+    values.normalize_text();
+    let mut errors = Vec::new();
+    if values.name.is_empty() {
+        errors.push(format!("第 {row_number} 行：名称不能为空"));
+    }
+    if values.ip.is_empty() {
+        errors.push(format!("第 {row_number} 行：IP 不能为空"));
+    } else if values.ip.parse::<IpAddr>().is_err() {
+        errors.push(format!("第 {row_number} 行：IP 格式无效"));
+    }
+    let mac_normalized = if values.mac.is_empty() {
+        errors.push(format!("第 {row_number} 行：MAC 不能为空"));
+        None
+    } else {
+        match MacAddress::parse(&values.mac) {
+            Ok(mac) => Some(mac.normalized().to_string()),
+            Err(_) => {
+                errors.push(format!("第 {row_number} 行：MAC 格式无效"));
+                None
+            }
+        }
+    };
+    ParsedInventoryRow { row_number, values, mac_normalized, errors }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

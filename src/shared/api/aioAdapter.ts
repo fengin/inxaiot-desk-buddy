@@ -5,7 +5,8 @@ import type {
   AioNodeListPage,
   ImportSelection,
   InventoryApplyOutcome,
-  InventoryPreview
+  InventoryPreview,
+  InventoryValues
 } from "@/shared/model/aio";
 
 export interface AioAdapter {
@@ -14,6 +15,7 @@ export interface AioAdapter {
   getNodeDetail(projectId: string, mac: string): Promise<AioNodeDetail>;
   checkServices(projectId: string, mac: string): Promise<{ taskId: string }>;
   previewImport(projectId: string, filePath: string): Promise<InventoryPreview>;
+  previewCreate(projectId: string, values: InventoryValues): Promise<InventoryPreview>;
   getLatestImport(projectId: string): Promise<AioImportSession | null>;
   updateImportSelection(projectId: string, sessionId: string, selections: ImportSelection[]): Promise<AioImportSession>;
   applyImport(projectId: string, sessionId: string): Promise<InventoryApplyOutcome>;

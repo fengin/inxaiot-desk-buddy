@@ -3,6 +3,7 @@ import { NButton, NEmpty, NInput, NPopconfirm, NProgress, NSelect, NTag, useMess
 import { ChevronDown, ListRestart, RotateCw, Trash2, X } from "lucide-vue-next";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
+import { taskStageLabel, canRetryTaskResult } from "@/app/taskPresentation";
 import type { ActivityTask, ActivityTaskState } from "@/shared/model/activity";
 import { formatDisplayDateTime } from "@/shared/format/dateTime";
 import { useActivityStore } from "@/stores/activity";
@@ -64,58 +65,6 @@ function stateLabel(task: ActivityTask) {
     finalizing_failed: "结果待补写"
   };
   return labels[task.state];
-}
-
-function taskStageLabel(task: ActivityTask) {
-  if (task.state === "queued") return "排队中";
-  if (task.state === "failed") return "执行失败";
-  if (task.state === "cancelled") return "已取消";
-  if (task.state === "interrupted") return "已中断";
-  if (task.state === "succeeded" || task.state === "partially_succeeded") return "已完成";
-  if (task.state === "finalizing_failed") return "等待补写结果";
-  const labels: Record<string, string> = {
-    draft: "准备任务",
-    checking: "检查中",
-    check_failed: "检查失败",
-    ready: "等待执行",
-    queued: "排队中",
-    prepare_config: "读取发布配置",
-    prepare_artifact: "准备镜像文件",
-    prepare_release: "生成发布包",
-    prepare_target: "准备一体机配置",
-    prepare_lease: "确认任务可执行",
-    prepare_lease_failed: "任务执行条件确认失败",
-    prepare_local: "准备发布文件",
-    prepare_remote: "准备一体机",
-    lease_acquired: "已确认可以执行",
-    ssh_connect: "连接一体机",
-    ssh_connected: "连接完成",
-    upload: "上传发布文件",
-    prepare_agent: "准备执行脚本",
-    precheck: "检查运行环境",
-    backup: "备份现有数据",
-    install: "安装发布包",
-    register: "确认平台注册",
-    health: "检查服务状态",
-    service_check: "检查目标服务",
-    service_inspection: "读取服务和镜像",
-    inspect_services: "读取服务和镜像",
-    service_upgrade: "升级目标服务",
-    service_health: "检查目标服务状态",
-    remote_complete: "一体机操作完成",
-    finalizing: "保存执行结果",
-    completed: "已完成",
-    cancelling: "正在取消",
-    cancelled: "已取消",
-    failed: "执行失败",
-    preparation_failed: "准备失败",
-    submission_failed: "任务提交失败",
-    handler_failed: "任务处理失败",
-    needs_reconcile: "等待结果确认",
-    interrupted: "执行中断",
-    preflight_target: "检查一体机"
-  };
-  return labels[task.stage] ?? (/[㐀-鿿]/u.test(task.stage) ? task.stage : "处理中");
 }
 
 function handleLogScroll() {
@@ -210,7 +159,7 @@ watch(
         <n-empty v-else :description="activity.error || '暂无任务'" />
       </template>
       <div v-else ref="logLines" class="log-view" @scroll="handleLogScroll">
-          <div class="log-scope"><strong>{{ activity.selectedTask?.name ?? '未选择任务' }}</strong><span>完整过程仅保存在当前电脑</span><n-button v-if="!followLatest" size="tiny" quaternary @click="returnToLatest">回到最新</n-button><n-select v-model:value="activity.logLevels" class="log-filter-level" size="tiny" multiple clearable :options="levelOptions" placeholder="级别" @update:value="activity.refreshLogs" /><n-input v-model:value="activity.logKeyword" class="log-filter-keyword" size="tiny" clearable placeholder="筛选日志" @update:value="activity.refreshLogs" /><n-button v-if="activity.selectedTask?.state === 'finalizing_failed'" size="tiny" type="warning" secondary :loading="activity.finalizationRetrying" @click="retryFinalization">补写结果</n-button><n-button v-if="activity.selectedTask?.cancellable" size="tiny" type="warning" secondary @click="activity.cancelSelectedTask">取消任务</n-button></div>
+          <div class="log-scope"><strong>{{ activity.selectedTask?.name ?? '未选择任务' }}</strong><span>完整过程仅保存在当前电脑</span><n-button v-if="!followLatest" size="tiny" quaternary @click="returnToLatest">回到最新</n-button><n-select v-model:value="activity.logLevels" class="log-filter-level" size="tiny" multiple clearable :options="levelOptions" placeholder="级别" @update:value="activity.refreshLogs" /><n-input v-model:value="activity.logKeyword" class="log-filter-keyword" size="tiny" clearable placeholder="筛选日志" @update:value="activity.refreshLogs" /><n-button v-if="canRetryTaskResult(activity.selectedTask)" size="tiny" type="warning" secondary :loading="activity.finalizationRetrying" @click="retryFinalization">补写结果</n-button><n-button v-if="activity.selectedTask?.cancellable" size="tiny" type="warning" secondary @click="activity.cancelSelectedTask">取消任务</n-button></div>
           <div v-if="activity.logs.length" class="log-lines" role="log">
             <n-button v-if="activity.logHasMore" class="log-load-older" size="tiny" quaternary @click="activity.loadOlderLogs">加载更早日志</n-button>
             <div v-for="entry in activity.logs" :key="entry.id" class="log-line" :class="entry.level.toLowerCase()">

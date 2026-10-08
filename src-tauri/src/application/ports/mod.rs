@@ -10,3 +10,4 @@ pub mod remote_session;
 pub mod service_inspection;
 pub mod task_event;
 pub mod task_log;
+pub mod smart_screen;

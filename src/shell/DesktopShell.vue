@@ -31,6 +31,7 @@ import { usePreferencesStore } from "@/stores/preferences";
 import { useProjectStore } from "@/stores/projects";
 import { useDataDirectoryStore } from "@/stores/dataDirectory";
 import { useDiagnosticsStore } from "@/stores/diagnostics";
+import type { ProjectAccess } from "@/shared/model/project";
 
 const activity = useActivityStore();
 const preferences = usePreferencesStore();
@@ -47,6 +48,7 @@ const dataDirectoryStatusLabel = computed(() => {
 const preferencesOpen = ref(false);
 const aboutOpen = ref(false);
 const aioExpanded = ref(true);
+const screenExpanded = ref(true);
 const route = useRoute();
 const exitImpact = ref<ApplicationExitImpact>();
 const exitConfirming = ref(false);
@@ -118,11 +120,12 @@ const toggleAioNavigation = () => {
   aioExpanded.value = !aioExpanded.value;
 };
 const businessRouteBlocked = computed(
-  () => route.path.startsWith("/aio/") && !projects.businessMenuEnabled
+  () => Boolean(route.meta.projectAccess) && !projects.allowsAccess(route.meta.projectAccess as ProjectAccess)
 );
 const businessRouteMessage = computed(() => {
   if (!projects.activeProject) return "请先在顶部项目切换器中新建或选择项目。";
   if (!projects.databaseConnected) return projects.activeProject.statusMessage || "当前项目数据库尚未就绪。";
+  if (projects.activeProject.connectionState === "schema_required") return "工作台数据库尚未就绪，请在项目设置中处理。";
   if (projects.session?.state === "expired") return "平台会话已过期，请在项目切换器中重新登录。";
   return "当前项目尚未登录平台，请在项目切换器中完成登录。";
 });
@@ -164,7 +167,13 @@ const businessRouteMessage = computed(() => {
           <router-link to="/aio/release" class="sub-link" :aria-disabled="!projects.businessMenuEnabled" @click="!projects.businessMenuEnabled && $event.preventDefault()"><span>发布参数</span></router-link>
           <router-link to="/aio/operations" class="sub-link" :aria-disabled="!projects.businessMenuEnabled" @click="!projects.businessMenuEnabled && $event.preventDefault()"><span>部署升级</span></router-link>
         </div>
-        <button class="side-link planned" type="button" disabled><MonitorSmartphone :size="18" /><span>智能屏管理</span><em>规划中</em></button>
+          <button class="side-link nav-parent" :class="{ active: route.path.startsWith('/screen') }" type="button" @click="preferences.navigationCollapsed ? preferences.toggleNavigation() : screenExpanded = !screenExpanded">
+            <MonitorSmartphone :size="18" /><span>智能屏管理</span><ChevronRight class="nav-parent__arrow" :class="{ expanded: screenExpanded }" :size="15" />
+          </button>
+          <div v-show="screenExpanded && !preferences.navigationCollapsed" class="sub-nav">
+            <router-link to="/screen/nodes" class="sub-link"><span>智能屏列表</span></router-link>
+            <router-link to="/screen/operations" class="sub-link"><span>智能屏操作</span></router-link>
+          </div>
         <button class="side-link planned" type="button" disabled><Cpu :size="18" /><span>网关管理</span><em>规划中</em></button>
       </nav>
       <button class="navigation-collapse" type="button" @click="preferences.toggleNavigation"><ChevronLeft :size="18" /><span>折叠导航</span></button>

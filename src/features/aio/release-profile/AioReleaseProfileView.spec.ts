@@ -1,6 +1,7 @@
 import { createPinia } from "pinia";
 import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
+import type { ComponentPublicInstance } from "vue";
 
 import { i18n } from "@/app/i18n";
 import { router } from "@/app/router";
@@ -8,6 +9,8 @@ import { FixtureWorkbenchAdapter } from "@/dev-fixtures/workbenchFixtureAdapter"
 import { configureSystemDialogAdapter } from "@/shared/api/systemDialogAdapter";
 import { configureWorkbenchAdapter } from "@/shared/api/workbenchAdapter";
 import { useReleaseProfileStore } from "@/stores/releaseProfile";
+
+type StatusInput = ComponentPublicInstance<{ status?: string }>;
 
 class CredentialsResetRequiredAdapter extends FixtureWorkbenchAdapter {
   override async getReleaseProfile(projectId: string) {
@@ -118,24 +121,24 @@ describe("发布参数页面", () => {
       await wrapper.get('[data-testid="release-validate"]').trigger("click");
       await flushPromises();
       for (const id of ["release-auth-key", "release-api-port", "release-env-template"]) {
-        expect(wrapper.getComponent(`[data-testid="${id}"]`).props("status")).toBe("error");
+        expect(wrapper.getComponent<StatusInput>(`[data-testid="${id}"]`).props("status")).toBe("error");
       }
-      expect(wrapper.getComponent('[data-testid="release-platform-host"]').props("status")).toBeUndefined();
+      expect(wrapper.getComponent<StatusInput>('[data-testid="release-platform-host"]').props("status")).toBeUndefined();
       expect(wrapper.get('[data-testid="release-auth-key"] input').attributes("aria-invalid")).toBe("true");
       expect(wrapper.get('[id="release-error-credentials.platformAuthKey"]').text()).toBe("请填写平台 API AuthKey");
       expect(wrapper.get(".template-footer").text()).toContain(".env 模板存在未知变量");
 
       await wrapper.get('[data-testid="release-auth-key"] input').setValue("corrected-test-key");
-      expect(wrapper.getComponent('[data-testid="release-auth-key"]').props("status")).toBeUndefined();
+      expect(wrapper.getComponent<StatusInput>('[data-testid="release-auth-key"]').props("status")).toBeUndefined();
       expect(wrapper.find('[id="release-error-credentials.platformAuthKey"]').exists()).toBe(false);
-      expect(wrapper.getComponent('[data-testid="release-api-port"]').props("status")).toBe("error");
+      expect(wrapper.getComponent<StatusInput>('[data-testid="release-api-port"]').props("status")).toBe("error");
 
       const release = useReleaseProfileStore(pinia);
       release.resetDraft();
       release.draft.credentials.sshPrivateKey = "invalid-test-private-key";
       await wrapper.get('[data-testid="release-save"]').trigger("click");
       await flushPromises();
-      expect(wrapper.getComponent('[data-testid="release-ssh-private-key"]').props("status")).toBe("error");
+      expect(wrapper.getComponent<StatusInput>('[data-testid="release-ssh-private-key"]').props("status")).toBe("error");
       expect(wrapper.get('[id="release-error-credentials.sshPrivateKey"]').text()).toContain("私钥格式或算法不正确");
     } finally {
       wrapper.unmount();

@@ -1,3 +1,6 @@
+#[path = "common/project_test_config.rs"]
+mod project_test_config;
+
 use std::path::Path;
 use std::time::Duration;
 
@@ -20,13 +23,8 @@ fn line<'a>(text: &'a str, label: &str) -> &'a str {
         .unwrap_or_else(|| panic!("missing {label}"))
 }
 
-fn default<'a>(text: &'a str, key: &str) -> &'a str {
-    let marker = format!("${{{key}:");
-    let rest = &text[text.find(&marker).expect("config default") + marker.len()..];
-    &rest[..rest.find('}').expect("config default end")]
-}
-
 fn config() -> TestConfig {
+    let database = project_test_config::database();
     let project = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("project");
@@ -35,17 +33,12 @@ fn config() -> TestConfig {
     let start = description.find('{').expect("login json");
     let end = start + description[start..].find('}').expect("login json end") + 1;
     let login: Value = serde_json::from_str(&description[start..end]).expect("login json parse");
-    let workspace = project.parent().and_then(Path::parent).expect("workspace");
-    let yaml = std::fs::read_to_string(workspace.join(
-        "inxvision-platform/inxaiot-starter-platform/src/main/resources/application-dev.yml",
-    ))
-    .expect("platform config");
     TestConfig {
         mysql: MySqlProjectConfig {
-            host: default(&yaml, "MYSQL_HOST").into(),
-            port: default(&yaml, "MYSQL_PORT").parse().expect("mysql port"),
-            username: default(&yaml, "MYSQL_USER").into(),
-            password: SecretValue::new(default(&yaml, "MYSQL_PASSWORD")),
+            host: database.host,
+            port: database.port,
+            username: database.username,
+            password: SecretValue::new(database.password),
             platform_schema: line(&description, "平台业务数据库名：").into(),
             workbench_schema: line(&description, "工作台数据库：").into(),
             tls_mode: DatabaseTlsMode::Disabled,
@@ -104,7 +97,9 @@ async fn production_dual_pool_and_schema_capabilities() {
         .expect("schema capabilities");
     assert!(!capabilities.server_version.is_empty());
     assert!(capabilities.tls_cipher.is_none());
-    assert!(capabilities.missing_required_columns.is_empty());
+    inxaiot_desk_buddy_lib::infrastructure::platform_aio::require_aio_schema(&pools.platform)
+        .await
+        .expect("一体机表结构");
     assert!(capabilities.workbench_charset.is_some());
     let platform_read_only = session_read_only(&pools.platform).await;
     let workbench_read_only = session_read_only(&pools.workbench).await;

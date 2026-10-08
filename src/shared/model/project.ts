@@ -108,3 +108,19 @@ export interface ConfirmHostKeyRequest {
 }
 
 export type { WorkbenchSchemaStatus };
+
+/** 本机项目没有远端连接，仍可管理本机资料和任务。 */
+export function isLocalProject(project: Pick<ProjectInput, "platformUrl" | "dbHost" | "dbUser" | "businessDb">): boolean {
+  return [project.platformUrl, project.dbHost, project.dbUser, project.businessDb].every((value) => !value.trim());
+}
+
+export type ProjectAccess = "local" | "platform" | "shared";
+
+export function projectAllowsAccess(project: ProjectOverview | undefined, access: ProjectAccess): boolean {
+  if (!project) return false;
+  if (access === "local") return true;
+  // databaseState 当前表示共享连接结果，不能据此屏蔽独立的平台读取。
+  // 这里只判断是否可以发起读取，实际连接与会话由后端再次检查。
+  if (access === "platform") return project.session?.state === "active" && !isLocalProject(project);
+  return project.connectionState === "ready";
+}

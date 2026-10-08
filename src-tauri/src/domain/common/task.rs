@@ -97,11 +97,13 @@ impl TaskState {
                 )
                 | (
                     Self::Cancelling,
-                    Self::Cancelled | Self::Failed | Self::Interrupted
+                    Self::Cancelled | Self::Failed | Self::Interrupted | Self::Succeeded
+                        | Self::PartiallySucceeded | Self::FinalizingFailed
                 )
+                | (Self::Interrupted, Self::FinalizingFailed)
                 | (
                     Self::FinalizingFailed,
-                    Self::Succeeded | Self::PartiallySucceeded | Self::Failed | Self::Interrupted
+                    Self::Succeeded | Self::PartiallySucceeded | Self::Failed | Self::Interrupted | Self::Cancelled
                 )
         )
     }
@@ -268,4 +270,12 @@ pub struct TaskEvent {
     pub message_params: BTreeMap<String, String>,
     pub message: Option<String>,
     pub timestamp: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct TaskRecoveryConflict {
+    pub resource_key: String,
+    pub owner_instance_id: String,
+    pub operation_id: String,
+    pub takeover_allowed: bool,
 }

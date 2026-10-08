@@ -1,6 +1,20 @@
 import type { ActivityAdapter } from "@/shared/api/activityAdapter";
 import { demoLogs, demoTasks } from "@/shared/fixtures/demoData";
 import type { ActivityLogEntry, ActivityTask, TaskEventPayload } from "@/shared/model/activity";
+import type { ScreenAdapter } from "@/shared/api/screenAdapter";
+import { screenActionLabel } from "@/shared/model/screen";
+import type { ScreenTask } from "@/shared/model/screen";
+
+function screenActivity(task: ScreenTask): ActivityTask {
+  const completed = task.targets.filter((t) => !["queued", "running"].includes(t.state)).length;
+  return {
+    id: task.id, projectId: task.projectId, domainType: "screen", operationType: task.action,
+    name: `${screenActionLabel(task.action)} · 原型`, state: task.state === "needs_review" ? "interrupted" : task.state,
+    stage: task.state === "needs_review" ? "等待结果核实" : "模拟屏端操作", targetCount: task.targets.length,
+    completedCount: completed, progress: task.targets.length ? Math.round(task.targets.reduce((sum, t) => sum + (t.state === "cancelled" ? 100 : t.progress), 0) / task.targets.length) : 0,
+    updatedAt: task.updatedAt, cancellable: task.state === "running"
+  };
+}
 
 const taskEventListeners = new Set<(event: TaskEventPayload) => void>();
 
@@ -38,12 +52,28 @@ export class FixtureActivityAdapter implements ActivityAdapter {
   private tasks = structuredClone(fixtureTasks);
   private logs = structuredClone(fixtureLogs);
   private readonly completedPreflightTargets = new Map<string, Set<string>>();
+  private readonly screenProjects = new Map<string, string>();
+  private readonly hiddenScreenTasks = new Set<string>();
+  private readonly clearedScreenLogs = new Set<string>();
+  constructor(private readonly screen?: ScreenAdapter) {}
 
-  async listTasks(projectId: string, limit: number) {
-    return structuredClone(this.tasks.filter((task) => task.projectId === projectId).slice(0, limit));
+  async listTasks(projectId: string, limit: number): Promise<ActivityTask[]> {
+    const screenTasks = this.screen ? (await this.screen.load(projectId)).tasks.map(screenActivity) : [];
+    for (const task of screenTasks) this.screenProjects.set(task.id, projectId);
+    return structuredClone([...screenTasks.filter((task) => !this.hiddenScreenTasks.has(task.id)), ...this.tasks.filter((task) => task.projectId === projectId)].slice(0, limit))
+      .map((task) => ({ ...task, clearable: !(task.operationType === "deployment_preflight" && task.state === "succeeded") }));
   }
   async listLogs(taskId: string, levels: Parameters<ActivityAdapter["listLogs"]>[1], keyword: string | null, offset: number, limit: number) {
     const normalized = keyword?.toLocaleLowerCase();
+    const screenProject = this.screenProjects.get(taskId);
+    if (screenProject && this.screen) {
+      const task = (await this.screen.load(screenProject)).tasks.find((t) => t.id === taskId);
+      const entries: ActivityLogEntry[] = this.clearedScreenLogs.has(taskId) ? [] : (task?.logs ?? []).map((entry, index) => ({
+        id: `${taskId}-${index}`, taskId, sequence: index, timestamp: entry.time, level: entry.level, source: "智能屏原型", message: entry.message
+      }));
+      const filtered = entries.filter((e) => (!levels.length || levels.includes(e.level)) && (!normalized || e.message.toLocaleLowerCase().includes(normalized)));
+      return { items: filtered.slice(offset, offset + limit), nextOffset: Math.min(filtered.length, offset + limit), hasMore: offset + limit < filtered.length };
+    }
     const filtered = this.logs
       .filter((entry) => entry.taskId === taskId)
       .filter((entry) => !levels.length || levels.includes(entry.level))
@@ -51,6 +81,11 @@ export class FixtureActivityAdapter implements ActivityAdapter {
     return { items: structuredClone(filtered.slice(offset, offset + limit)), nextOffset: filtered.length, hasMore: false };
   }
   async cancelTask(taskId: string) {
+    const projectId = this.screenProjects.get(taskId);
+    if (projectId && this.screen) {
+      await this.screen.cancel(projectId, taskId);
+      return screenActivity((await this.screen.load(projectId)).tasks.find((task) => task.id === taskId)!);
+    }
     const task = this.tasks.find((item) => item.id === taskId);
     if (!task) throw new Error(`Fixture 任务不存在：${taskId}`);
     return structuredClone(task);
@@ -70,9 +105,14 @@ export class FixtureActivityAdapter implements ActivityAdapter {
       this.tasks.filter((task) => task.projectId === projectId && terminal.has(task.state)).map((task) => task.id)
     );
     this.tasks = this.tasks.filter((task) => !clearedIds.has(task.id));
-    return clearedIds.size;
+    let screenCount = 0;
+    if (this.screen) for (const task of (await this.screen.load(projectId)).tasks) {
+      if (terminal.has(task.state) && !this.hiddenScreenTasks.has(task.id)) { this.hiddenScreenTasks.add(task.id); screenCount++; }
+    }
+    return clearedIds.size + screenCount;
   }
   async clearTaskLogs(taskId: string) {
+    if (this.screenProjects.has(taskId)) this.clearedScreenLogs.add(taskId);
     this.logs = this.logs.filter((entry) => entry.taskId !== taskId);
   }
   async listen(handler: (event: TaskEventPayload) => void) {
@@ -81,7 +121,17 @@ export class FixtureActivityAdapter implements ActivityAdapter {
       handler(event);
     };
     taskEventListeners.add(listener);
-    return () => taskEventListeners.delete(listener);
+    const offScreen = this.screen?.subscribe((projectId, task) => {
+      if (!task) return;
+      this.screenProjects.set(task.id, projectId);
+      const projected = screenActivity(task);
+      handler({
+        eventId: `${task.id}-${task.updatedAt}-${task.logs.length}`, localTaskId: task.id, localProjectId: projectId, domainType: "screen",
+        sequence: Date.now(), stage: projected.stage, status: projected.state, progressCurrent: projected.completedCount, progressTotal: projected.targetCount,
+        level: "info", messageCode: "SCREEN_PROTOTYPE_CHANGED", messageParams: {}, timestamp: task.updatedAt
+      });
+    });
+    return () => { taskEventListeners.delete(listener); offScreen?.(); };
   }
 
   private applyTaskEvent(event: TaskEventPayload) {

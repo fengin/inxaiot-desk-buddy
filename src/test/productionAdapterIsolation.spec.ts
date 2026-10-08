@@ -23,7 +23,8 @@ describe("Tauri真实模式物理隔离门禁", () => {
       "RealOperationsAdapter",
       "RealDataDirectoryAdapter",
       "RealDiagnosticsAdapter",
-      "RealSystemDialogAdapter"
+      "RealSystemDialogAdapter",
+      "RealScreenAdapter"
     ]) {
       expect(main).toContain(`new ${adapter}()`);
     }
@@ -50,7 +51,7 @@ describe("Tauri真实模式物理隔离门禁", () => {
     const violations: string[] = [];
     for (const path of productionFiles(sourceRoot).filter((value) => value.endsWith(".vue"))) {
       const source = readFileSync(path, "utf8");
-      for (const match of source.matchAll(/<(?:n-button|button)\b[^>]*>/gs)) {
+      for (const match of source.matchAll(/<(?:n-button|button)\b(?:[^>"']|"[^"]*"|'[^']*')*>/gs)) {
         const tag = match[0];
         if (
           !/@click(?:\.[\w-]+)*=|\bdisabled\b|:disabled=|type="submit"|\bto=|\bhref=|data-action-owner=/.test(tag)

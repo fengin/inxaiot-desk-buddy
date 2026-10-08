@@ -218,8 +218,10 @@ describe("desktop demo shell", () => {
     try {
       await flushPromises();
       await openCurrentProjectEditor(wrapper);
-      expect(document.body.textContent).toContain("工作台版本和平台表结构不兼容");
+      expect(document.body.textContent).toContain("工作台数据库结构未就绪");
       expect(document.body.textContent).toContain("初始化/升级");
+      expect(document.body.textContent).toContain("工作台数据库尚未就绪，请在项目设置中处理。");
+      expect(document.body.textContent).not.toContain("当前项目尚未登录平台，请在项目切换器中完成登录。");
       expect(document.body.textContent).not.toContain("当前版本");
       expect(document.body.textContent).not.toContain("可用版本");
       expect(document.body.textContent).not.toContain("仅供测试的内部结构信息");
@@ -240,7 +242,7 @@ describe("desktop demo shell", () => {
     try {
       await flushPromises();
       await openCurrentProjectEditor(wrapper);
-      expect(document.body.textContent).toContain("工作台版本和平台表结构不兼容");
+      expect(document.body.textContent).toContain("工作台数据库结构未就绪");
       expect(document.querySelector('[data-testid="schema-upgrade"]')).toBeNull();
       expect(document.body.textContent).toContain("重新检查");
     } finally {

@@ -1,0 +1,5 @@
+{
+  "productName": "INX 实施工作台 · 智能屏验收",
+  "identifier": "com.inxaiot.desk-buddy.screen-test",
+  "build": { "beforeBuildCommand": null }
+}

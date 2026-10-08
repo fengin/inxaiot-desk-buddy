@@ -29,6 +29,7 @@ import {
 import { computed, onMounted, reactive, ref } from "vue";
 
 import { commandErrorText } from "@/shared/api/errors";
+import { isLocalProject } from "@/shared/model/project";
 import type { ProjectInput, ProjectOverview } from "@/shared/model/project";
 import { useProjectStore } from "@/stores/projects";
 
@@ -43,6 +44,7 @@ const connectionTesting = ref(false);
 const loginLoading = ref(false);
 const schemaLoading = ref(false);
 const editingProjectId = ref<string>();
+const localOnly = ref(false);
 const loginProjectId = ref<string>();
 const loginForm = reactive({ username: "", password: "", sessionUuid: "", imageCode: "" });
 const projectForm = reactive<ProjectInput>({
@@ -65,6 +67,7 @@ async function retryInitialize() {
 }
 
 function connectionTag(project: ProjectOverview) {
+  if (isLocalProject(project)) return { type: "default" as const, label: "本机项目" };
   if (project.connectionState === "ready") return { type: "success" as const, label: "已就绪" };
   if (project.connectionState === "login_required") return { type: "warning" as const, label: "需登录" };
   if (project.connectionState === "session_expired") return { type: "warning" as const, label: "会话过期" };
@@ -121,6 +124,7 @@ async function chooseProject(project: ProjectOverview) {
 
 async function openLogin(projectId = projects.activeProjectId) {
   if (!projectId) return;
+  popoverOpen.value = false;
   loginProjectId.value = projectId;
   Object.assign(loginForm, { username: "", password: "", sessionUuid: "", imageCode: "" });
   loginOpen.value = true;
@@ -164,6 +168,7 @@ async function logout() {
 }
 
 function resetProjectForm() {
+  localOnly.value = false;
   Object.assign(projectForm, {
     name: "",
     platformUrl: "",
@@ -190,6 +195,7 @@ function openEditProject() {
   const project = projects.activeProject;
   if (!project) return;
   editingProjectId.value = project.id;
+  localOnly.value = isLocalProject(project);
   Object.assign(projectForm, {
     name: project.name,
     platformUrl: project.platformUrl,
@@ -203,7 +209,7 @@ function openEditProject() {
   });
   projects.lastConnectionTest = undefined;
   projectDialogOpen.value = true;
-  void loadSchemaStatus(project.id);
+  if (!localOnly.value) void loadSchemaStatus(project.id);
   popoverOpen.value = false;
 }
 
@@ -228,9 +234,14 @@ async function testConnection() {
 async function saveProject() {
   savingProject.value = true;
   try {
-    const test = await testConnection();
-    if (!test?.successful) return;
-    const input = { ...projectForm };
+    if (!projectForm.name.trim()) { message.error("请填写项目名称"); return; }
+    if (!localOnly.value) {
+      const test = await testConnection();
+      if (!test?.successful) return;
+    }
+    const input = localOnly.value
+      ? { ...projectForm, platformUrl: "", dbHost: "", dbUser: "", businessDb: "", dbPassword: undefined, dbTlsEnabled: false }
+      : { ...projectForm };
     if (!input.dbPassword) input.dbPassword = undefined;
     const project = editingProjectId.value
       ? await projects.updateProject(editingProjectId.value, input)
@@ -329,7 +340,7 @@ async function upgradeSchema() {
         <span class="project-avatar">{{ projectInitials(project) }}</span>
         <span class="project-option__copy">
           <strong>{{ project.name }}</strong>
-          <small>{{ project.dbHost }}:{{ project.dbPort }} · {{ project.businessDb }}</small>
+          <small>{{ isLocalProject(project) ? "仅保存在本机，尚未配置平台" : `${project.dbHost}:${project.dbPort} · ${project.businessDb}` }}</small>
         </span>
         <n-tag size="small" :bordered="false" :type="connectionTag(project).type">
           {{ connectionTag(project).label }}
@@ -338,6 +349,7 @@ async function upgradeSchema() {
       </button>
       <div class="project-popover__footer">
         <n-button size="small" secondary :disabled="!projects.activeProject" @click="openEditProject"><template #icon><Pencil /></template>编辑当前项目</n-button>
+        <n-button v-if="projects.activeProject && !isLocalProject(projects.activeProject) && projects.session?.state !== 'active'" size="small" quaternary @click="openLogin()"><template #icon><LogIn /></template>登录平台</n-button>
         <n-button v-if="projects.session?.state === 'active'" size="small" quaternary @click="logout"><template #icon><LogOut /></template>退出登录</n-button>
       </div>
     </div>
@@ -372,8 +384,10 @@ async function upgradeSchema() {
   <n-modal v-model:show="projectDialogOpen" preset="card" :title="editingProjectId ? '编辑项目' : '新增项目'" class="project-editor-modal" :bordered="false">
     <n-form label-placement="left" label-width="108" size="small">
       <n-form-item label="项目名称"><n-input v-model:value="projectForm.name" data-testid="project-name" placeholder="例如：深圳湾智慧园区" /></n-form-item>
-      <n-form-item label="平台访问地址"><n-input v-model:value="projectForm.platformUrl" data-testid="project-platform-url" placeholder="http://192.168.3.6:8055" /></n-form-item>
-      <n-form-item label="数据库主机"><n-input v-model:value="projectForm.dbHost" data-testid="project-db-host" placeholder="192.168.3.6" /></n-form-item>
+      <n-form-item label="管理方式"><n-checkbox v-model:checked="localOnly" data-testid="project-local-only">仅本机管理，暂不配置平台</n-checkbox></n-form-item>
+      <template v-if="!localOnly">
+      <n-form-item label="平台访问地址"><n-input v-model:value="projectForm.platformUrl" data-testid="project-platform-url" placeholder="http://192.168.3.142:8055" /></n-form-item>
+      <n-form-item label="数据库主机"><n-input v-model:value="projectForm.dbHost" data-testid="project-db-host" placeholder="192.168.3.142" /></n-form-item>
       <n-form-item label="数据库端口"><n-input-number v-model:value="projectForm.dbPort" data-testid="project-db-port" placeholder="请输入端口" :show-button="false" :min="1" :max="65535" /></n-form-item>
       <n-form-item label="数据库账号"><n-input v-model:value="projectForm.dbUser" data-testid="project-db-user" placeholder="请输入数据库账号" /></n-form-item>
       <n-form-item label="数据库密码"><n-input v-model:value="projectForm.dbPassword" data-testid="project-db-password" type="password" show-password-on="click" :placeholder="editingProjectId ? '留空表示保持原密码' : '请输入数据库密码'" /></n-form-item>
@@ -382,14 +396,15 @@ async function upgradeSchema() {
       </n-form-item>
       <n-form-item label="平台业务库"><n-input v-model:value="projectForm.businessDb" data-testid="project-business-db" placeholder="inxvision_iot_dev" /></n-form-item>
       <n-form-item label="工作台库"><n-input v-model:value="projectForm.workbenchDb" data-testid="project-workbench-db" readonly /></n-form-item>
+      </template>
     </n-form>
-    <div class="connection-preview"><Server :size="16" /><span>连接测试只读探测平台库；TLS关闭时连接未加密，建议仅用于可信内网</span></div>
-    <n-alert v-if="projects.lastConnectionTest" :type="projects.lastConnectionTest.successful ? 'success' : 'error'" :show-icon="false">
+    <div v-if="!localOnly" class="connection-preview"><Server :size="16" /><span>连接测试只读探测平台库；TLS关闭时连接未加密，建议仅用于可信内网</span></div>
+    <n-alert v-if="!localOnly && projects.lastConnectionTest" :type="projects.lastConnectionTest.successful ? 'success' : 'error'" :show-icon="false">
       {{ projects.lastConnectionTest.message }} · {{ projects.lastConnectionTest.connectionEncrypted ? '连接已加密' : '连接未加密' }}
     </n-alert>
-    <div v-if="schemaMaintenanceVisible" class="schema-maintenance" data-testid="schema-maintenance">
+    <div v-if="!localOnly && schemaMaintenanceVisible" class="schema-maintenance" data-testid="schema-maintenance">
       <div class="schema-maintenance__copy">
-        <strong>工作台版本和平台表结构不兼容</strong>
+        <strong>工作台数据库结构未就绪</strong>
         <span>{{ schemaMaintenanceMessage }}</span>
       </div>
       <n-button size="small" secondary :loading="schemaLoading" @click="loadSchemaStatus()">重新检查</n-button>
@@ -411,7 +426,7 @@ async function upgradeSchema() {
         </n-popconfirm>
         <n-space justify="end">
           <n-button size="small" @click="projectDialogOpen = false">取消</n-button>
-          <n-button size="small" secondary data-testid="project-test-connection" :loading="connectionTesting" @click="testConnection">测试连接</n-button>
+          <n-button size="small" v-if="!localOnly" secondary data-testid="project-test-connection" :loading="connectionTesting" @click="testConnection">测试连接</n-button>
           <n-button size="small" type="primary" data-testid="project-save" :loading="savingProject" @click="saveProject">保存项目</n-button>
         </n-space>
       </div>

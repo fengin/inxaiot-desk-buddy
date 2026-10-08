@@ -1,6 +1,8 @@
+use sqlx::Row;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
+use time::OffsetDateTime;
 
 use crate::core::error::{AppError, AppResult};
 use crate::core::secret::SecretValue;
@@ -18,6 +20,15 @@ pub async fn project_database(
     local_project_id: &str,
 ) -> AppResult<Arc<DualMySqlPools>> {
     project_database_with_recovery(state, local_project_id, true).await
+}
+
+pub async fn project_aio_database(
+    state: &FormalAppState,
+    local_project_id: &str,
+) -> AppResult<Arc<DualMySqlPools>> {
+    let pools = project_database(state, local_project_id).await?;
+    crate::infrastructure::platform_aio::require_aio_schema(&pools.platform).await?;
+    Ok(pools)
 }
 
 pub async fn project_database_for_finalization(
@@ -159,7 +170,7 @@ pub async fn initialize_or_upgrade_workbench_schema(
     }
 }
 
-async fn project_pools(
+pub async fn project_pools(
     state: &FormalAppState,
     local_project_id: &str,
 ) -> AppResult<Arc<DualMySqlPools>> {
@@ -199,21 +210,7 @@ async fn project_pools(
             state
                 .task_event_pipeline
                 .register_secrets([config.password.expose().to_string()])?;
-            let pools = DualMySqlPools::connect(&config).await?;
-            let report = match pools.probe(&config).await {
-                Ok(report) => report,
-                Err(error) => {
-                    pools.close().await;
-                    return Err(error);
-                }
-            };
-            if !report.missing_required_columns.is_empty() {
-                pools.close().await;
-                return Err(AppError::InvalidConfig(format!(
-                    "平台一体机表缺少字段：{}",
-                    report.missing_required_columns.join("、")
-                )));
-            }
+            let pools = DualMySqlPools::connect_platform_first(&config).await?;
             repository
                 .touch_opened(local_project_id)
                 .await
@@ -256,4 +253,43 @@ pub fn map_formal_error(error: FormalError) -> AppError {
         FormalError::SecretStore(operation) => AppError::Io { operation },
         FormalError::LocalIo(operation) => AppError::Io { operation },
     }
+}
+
+pub(crate) async fn project_operator(
+    state: &FormalAppState,
+    local_project_id: &str,
+) -> AppResult<String> {
+    let row = sqlx::query(
+        "SELECT username, expires_at FROM local_project_session WHERE local_project_id = ?",
+    )
+    .bind(local_project_id)
+    .fetch_optional(state.local_store.pool())
+    .await
+    .map_err(|error| AppError::database("读取项目登录用户", &error))?
+    .ok_or_else(|| AppError::Conflict("项目尚未登录，不能访问共享业务".into()))?;
+    let username: String = row
+        .try_get("username")
+        .map_err(|error| AppError::database("解析项目登录用户", &error))?;
+    if username.trim().is_empty() {
+        return Err(AppError::Conflict("项目登录用户无效".into()));
+    }
+    let expires_at = row
+        .try_get::<Option<String>, _>("expires_at")
+        .ok()
+        .flatten();
+    if expires_at.as_deref().is_some_and(session_is_expired) {
+        return Err(AppError::Conflict(
+            "项目登录会话已过期，请重新登录后继续".into(),
+        ));
+    }
+    Ok(username)
+}
+
+pub(crate) fn session_is_expired(value: &str) -> bool {
+    let expires_at = value.parse::<i64>().ok().or_else(|| {
+        OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+            .ok()
+            .map(|expires| expires.unix_timestamp())
+    });
+    expires_at.is_some_and(|expires| expires <= OffsetDateTime::now_utc().unix_timestamp())
 }

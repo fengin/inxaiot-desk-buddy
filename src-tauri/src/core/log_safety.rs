@@ -95,6 +95,7 @@ fn app_error_detail(error: &AppError) -> String {
         AppError::HostKeyChanged { .. } => "code=host_key_changed".into(),
         AppError::Integrity { operation } => format!("code=integrity; operation={operation}"),
         AppError::Cancelled => "code=cancelled".into(),
+        AppError::ConfirmationRequired { code, .. } => format!("code={code}"),
     }
 }
 

@@ -31,6 +31,12 @@ button {
   color: inherit;
 }
 
+/* 多选容器内置固定 14px，恢复标签自身的主题字号，保留日志筛选等 tiny 标签的 12px。 */
+.n-base-selection.n-base-selection--multiple .n-base-selection-tag-wrapper .n-tag,
+.n-base-selection-popover .n-base-selection-tag-wrapper .n-tag {
+  font-size: var(--n-font-size);
+}
+
 a {
   color: var(--inx-color-info);
   cursor: pointer;
@@ -533,7 +539,7 @@ a {
 
 .route-guard-empty strong {
   color: var(--inx-text-primary);
-  font-size: 16px;
+  font-size: 14px;
 }
 
 .route-guard-empty p {
@@ -942,6 +948,25 @@ a {
   margin: 0;
   word-break: break-word;
 }
+
+.device-detail-drawer {
+  color: var(--inx-color-text);
+  font-family: var(--inx-font-ui);
+}
+
+.n-drawer.device-detail-drawer .n-drawer-body-content-wrapper { padding: 12px 16px; }
+.n-drawer.device-detail-drawer .n-drawer-footer { padding: 12px 20px; }
+.device-detail-drawer .drawer-identity { margin-bottom: 8px; }
+.device-detail-section-title { display: flex; align-items: center; gap: 8px; margin: 14px 0 8px; font-size: 14px; }
+.device-detail-section-title small { color: var(--inx-color-text-secondary); font-size: 11px; font-weight: 400; }
+.device-detail-facts {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 16px;
+  margin: 0; padding: 2px 12px; border: 1px solid var(--inx-color-border); border-radius: 6px; background: var(--inx-color-surface-subtle);
+}
+.device-detail-facts > div { display: grid; grid-template-columns: 84px minmax(0, 1fr); align-items: baseline; gap: 8px; padding: 6px 0; min-width: 0; }
+.device-detail-facts dt { margin: 0; color: var(--inx-color-text-secondary); font-size: 11px; white-space: nowrap; }
+.device-detail-facts dd { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--inx-font-size-base); }
+.device-detail-full-row { grid-column: 1 / -1; }
 
 .service-version-list {
   display: grid;
@@ -1466,7 +1491,12 @@ a {
 }
 
 .log-scope {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
   align-items: center;
   justify-content: space-between;
   padding: 6px 12px;
@@ -1477,7 +1507,8 @@ a {
 
 .log-scope strong {
   overflow: hidden;
-  flex: 1;
+  flex: 0 1 180px;
+  min-width: 100px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1487,12 +1518,14 @@ a {
   white-space: nowrap;
 }
 
-.log-filter-level {
+.log-scope .log-filter-level {
   width: 132px;
+  flex: 0 0 132px;
 }
 
-.log-filter-keyword {
+.log-scope .log-filter-keyword {
   width: 176px;
+  flex: 0 0 176px;
 }
 
 .log-lines {
@@ -1691,11 +1724,13 @@ a {
 }
 
 .form-grid label,
-.stage-settings > label {
+.stage-settings > label,
+.operation-setting-label {
   display: grid;
   gap: 5px;
   color: var(--inx-color-text-secondary);
-  font-size: 10px;
+  font-size: var(--inx-font-size-base);
+  font-weight: 400;
 }
 
 .form-grid .span-2 {
@@ -1731,7 +1766,8 @@ a {
 .code-editor .n-input__textarea-el {
   padding: 10px !important;
   font-family: var(--inx-font-mono);
-  font-size: 11px;
+  font-size: var(--inx-font-size-base);
+  font-weight: 400;
   line-height: 1.55;
 }
 
@@ -1744,7 +1780,8 @@ a {
   padding: 0 10px;
   border-top: 1px solid var(--inx-color-border);
   color: var(--inx-color-operation);
-  font-size: 10px;
+  font-size: var(--inx-font-size-table);
+  font-weight: 400;
 }
 
 .template-footer span {
@@ -1785,6 +1822,8 @@ a {
 
 .operation-mode-bar > strong {
   align-self: center;
+  font-size: var(--inx-font-size-base);
+  font-weight: 400;
 }
 
 .operation-mode-options {
@@ -1803,7 +1842,8 @@ a {
   gap: 8px;
   color: var(--inx-color-text-secondary);
   cursor: pointer;
-  font-size: 11px;
+  font-size: var(--inx-font-size-base);
+  font-weight: 400;
 }
 
 .operation-mode-option .n-radio__label {
@@ -1975,6 +2015,67 @@ a {
   flex-direction: column;
   gap: 11px;
   padding: 12px;
+}
+
+/* 运维参数中的文件卡、选择行与统计由各设备业务共同复用。 */
+.service-image-row,
+.operation-file-card {
+  display: grid;
+  gap: 5px;
+  padding: 8px;
+  border: 1px solid var(--inx-color-border);
+  border-radius: var(--inx-radius-sm);
+  background: var(--inx-color-surface-subtle);
+}
+
+.operation-file-label {
+  font-size: var(--inx-font-size-base);
+  font-weight: 400;
+}
+
+.image-file-picker,
+.operation-file-picker {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.operation-file-meta {
+  color: var(--inx-color-text-secondary);
+  font-size: var(--inx-font-size-table);
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.execution-tuning label {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.execution-tuning label > span {
+  white-space: nowrap;
+}
+
+.metric-number {
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.metric-info {
+  color: var(--inx-color-info);
+}
+
+.metric-operation {
+  color: var(--inx-color-operation);
+}
+
+.metric-warning {
+  color: var(--inx-color-warning);
 }
 
 .selection-toolbar {
@@ -2366,6 +2467,10 @@ a {
   font-size: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.result-metrics .result-version {
+  font-size: var(--inx-font-size-base);
 }
 
 .success-text {
@@ -2893,30 +2998,30 @@ a {
   border-bottom: 0;
 }
 
-:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view) {
+:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view, .inx-scroll-area) {
   scrollbar-width: none;
 }
 
-:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view):hover {
+:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view, .inx-scroll-area):hover {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--inx-color-text-tertiary) 32%, transparent) transparent;
 }
 
-:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view)::-webkit-scrollbar {
+:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view, .inx-scroll-area)::-webkit-scrollbar {
   width: 4px;
   height: 4px;
 }
 
-:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view)::-webkit-scrollbar-track {
+:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view, .inx-scroll-area)::-webkit-scrollbar-track {
   background: transparent;
 }
 
-:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view)::-webkit-scrollbar-thumb {
+:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view, .inx-scroll-area)::-webkit-scrollbar-thumb {
   border-radius: 999px;
   background: transparent;
 }
 
-:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view):hover::-webkit-scrollbar-thumb {
+:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view, .inx-scroll-area):hover::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--inx-color-text-tertiary) 28%, transparent);
 }
 
@@ -2954,7 +3059,7 @@ a {
 /* demo.3：第二轮评审反馈 */
 .parameter-panel .form-grid label,
 .parameter-panel .form-grid label.span-2 {
-  grid-template-columns: 84px minmax(0, 1fr);
+  grid-template-columns: 8em minmax(0, 1fr);
   gap: 5px;
   text-align: left;
 }
@@ -3034,13 +3139,13 @@ a {
   min-height: 0;
 }
 
-:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view) {
+:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view, .inx-scroll-area) {
   scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;
 }
 
-:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view):hover {
+:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view, .inx-scroll-area):hover {
   scrollbar-color: color-mix(in srgb, var(--inx-color-text-tertiary) 32%, transparent) transparent;
 }
 /* demo.4：第三轮评审反馈 */
@@ -3092,10 +3197,19 @@ a {
   overflow-y: auto;
 }
 
-:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view)::-webkit-scrollbar-button {
+:is(.workspace-page, .table-scroll, .parameter-scroll, .operation-content, .node-selection-list, .task-table, .log-view, .inx-scroll-area)::-webkit-scrollbar-button {
   display: none;
   width: 0;
   height: 0;
+}
+
+/* WebView 使用上面的细滚动条规则，避免标准属性覆盖4px宽度和隐藏按钮的设置。 */
+@supports selector(::-webkit-scrollbar) {
+  .inx-scroll-area,
+  .inx-scroll-area:hover {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
 }
 
 .parameter-panel .form-grid label,

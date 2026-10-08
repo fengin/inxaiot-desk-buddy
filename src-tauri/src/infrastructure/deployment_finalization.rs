@@ -87,13 +87,7 @@ pub struct AtomicDeploymentFinalization {
     pub leases: Vec<LeaseGrant>,
 }
 
-#[derive(Clone, Debug)]
-pub struct FinalizationLeaseConflict {
-    pub resource_key: String,
-    pub owner_instance_id: String,
-    pub operation_id: String,
-    pub takeover_allowed: bool,
-}
+pub use crate::domain::common::task::TaskRecoveryConflict as FinalizationLeaseConflict;
 
 pub async fn finalization_lease_conflicts(
     pool: &MySqlPool,

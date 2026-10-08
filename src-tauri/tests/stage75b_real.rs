@@ -1,3 +1,6 @@
+#[path = "common/project_test_config.rs"]
+mod project_test_config;
+
 use inxaiot_desk_buddy_lib::application::ports::deployment_workflow::{
     DeploymentPreflightPort, DeploymentSubmissionPort, DeploymentTaskQueryPort,
     OperationHistoryQueryPort,
@@ -106,13 +109,8 @@ fn line<'a>(text: &'a str, label: &str) -> &'a str {
         .unwrap_or_else(|| panic!("missing {label}"))
 }
 
-fn config_default<'a>(text: &'a str, key: &str) -> &'a str {
-    let marker = String::from("$") + "{" + key + ":";
-    let rest = &text[text.find(&marker).expect("config default") + marker.len()..];
-    &rest[..rest.find('}').expect("config default end")]
-}
-
 fn config() -> TestConfig {
+    let database = project_test_config::database();
     let project_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("project")
@@ -122,25 +120,15 @@ fn config() -> TestConfig {
     let start = description.find('{').expect("login json");
     let end = start + description[start..].find('}').expect("login json end") + 1;
     let login = serde_json::from_str(&description[start..end]).expect("login json parse");
-    let workspace = project_root
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace");
-    let yaml = std::fs::read_to_string(workspace.join(
-        "inxvision-platform/inxaiot-starter-platform/src/main/resources/application-dev.yml",
-    ))
-    .expect("platform config");
     let suffix = Uuid::now_v7().simple().to_string();
     TestConfig {
         project_root,
         platform_schema: line(&description, "平台业务数据库名：").into(),
         platform_url: format!("http://{}", line(&description, "平台API：")),
-        host: config_default(&yaml, "MYSQL_HOST").into(),
-        port: config_default(&yaml, "MYSQL_PORT")
-            .parse()
-            .expect("mysql port"),
-        username: config_default(&yaml, "MYSQL_USER").into(),
-        password: config_default(&yaml, "MYSQL_PASSWORD").into(),
+        host: database.host,
+        port: database.port,
+        username: database.username,
+        password: database.password,
         schema: format!("inxaiot_desk_buddy_stage75b_{}", &suffix[..12]),
         description,
         login,
@@ -277,6 +265,8 @@ async fn state_at(path: &Path) -> Arc<FormalAppState> {
         secret_store: Arc::new(MemorySecretStore::default()),
         runtime_registry: ProjectRuntimeRegistry::default(),
         job_supervisor,
+        task_recovery_registry:
+            inxaiot_desk_buddy_lib::infrastructure::task_handlers::built_in_recovery_registry(),
         task_handler_registry,
         task_queue,
         task_event_bus: task_event_bus.clone(),
@@ -337,7 +327,7 @@ fn deployment_input(
         vec![deployment_image(
             config,
             "device-edge",
-            "device-edge-1.0.0.Alpha.20260819.tar",
+            "device-edge-1.0.0.Alpha.20260907.tar",
         )]
     } else {
         vec![
@@ -345,12 +335,12 @@ fn deployment_input(
             deployment_image(
                 config,
                 "device-edge",
-                "device-edge-1.0.0.Alpha.20260819.tar",
+                "device-edge-1.0.0.Alpha.20260907.tar",
             ),
             deployment_image(
                 config,
                 "rule-engine",
-                "rule-engine-1.0.0.Alpha.20260810.tar",
+                "rule-engine-1.0.0.Alpha.20260814.tar",
             ),
             deployment_image(
                 config,
@@ -985,7 +975,24 @@ async fn stage75b_real_preflight_async_progress_cancel_history_and_cleanup() {
         let cancelled_view = Stage75BQueryAdapter::new(&state)
             .task(&project_id, &cancel_task_id)
             .await?;
-        let cancelled_operation_id = cancelled_view.operation_id.expect("cancel operation id");
+        let cancelled_operation_id = cancelled_view.operation_id;
+        if cancelled_operation_id.is_none() {
+            assert_eq!(cancelled.state, TaskState::Cancelled);
+            assert!(
+                state
+                    .task_repository
+                    .targets(&cancel_task_id)
+                    .await?
+                    .iter()
+                    .all(|target| target.state == TargetState::Cancelled)
+            );
+            let shared_for_cancel: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM operation_record WHERE id=?")
+                    .bind(&cancel_task_id)
+                    .fetch_one(&pools.workbench)
+                    .await?;
+            assert_eq!(shared_for_cancel, 0, "执行前取消不应创建共享操作");
+        }
         let private_key = read_private_key(&config)?;
         for (node, identity) in confirmed {
             let session = RusshConnector::default()
@@ -1003,7 +1010,9 @@ async fn stage75b_real_preflight_async_progress_cancel_history_and_cleanup() {
                     HostKeyPolicy::Require(identity),
                 )
                 .await?;
-            for current_operation_id in [&operation_id, &cancelled_operation_id] {
+            for current_operation_id in
+                std::iter::once(&operation_id).chain(cancelled_operation_id.as_ref())
+            {
                 let staging = format!(
                     "/opt/data/.inxaiot-desk-buddy/{current_operation_id}/{}",
                     node.mac_normalized
@@ -1092,6 +1101,7 @@ async fn stage75b_real_preflight_async_progress_cancel_history_and_cleanup() {
 #[ignore = "runs Compose-driven first deploy, full upgrade and service upgrade on authorized nodes 79/121 and drops its isolated workbench schema"]
 async fn compose_driven_three_mode_e2e_on_79_and_121() {
     let config = config();
+    println!("COMPOSE_DRIVEN_E2E schema={}", config.schema);
     let admin = admin_pool(&config).await;
     create_schema(&admin, &config.schema).await;
     let result: Result<(), Box<dyn std::error::Error>> = async {
@@ -1131,6 +1141,12 @@ async fn compose_driven_three_mode_e2e_on_79_and_121() {
         assert!(!saved_profile.values.host_info_template.is_empty());
 
         let nodes = real_nodes();
+        let platform_baseline =
+            inxaiot_desk_buddy_lib::infrastructure::platform_aio::PlatformAioRepository::new(
+                pools.platform.clone(),
+            )
+            .list_all()
+            .await?;
         WorkbenchAioRepository::new(pools.workbench.clone())
             .apply_inventory(ApplyInventoryWrite {
                 file_name: "compose-driven-three-mode-e2e.csv".into(),
@@ -1139,21 +1155,29 @@ async fn compose_driven_three_mode_e2e_on_79_and_121() {
                 classification_counts: serde_json::json!({"managed": 2}),
                 assets: nodes
                     .iter()
-                    .map(|node| InventoryAssetWrite {
-                        mac_normalized: node.mac_normalized.clone(),
-                        display_mac: node.mac_normalized.clone(),
-                        name: node.name.clone(),
-                        ip: node.ip.clone(),
-                        building_id: None,
-                        region_id: None,
-                        addr_alias: None,
-                        floor: None,
-                        location: Some("compose-driven-three-mode-e2e".into()),
-                        remark: None,
-                        platform_aio_id: None,
-                        management_state: "managed".into(),
-                        source: "platform".into(),
-                        expected_version: None,
+                    .map(|node| {
+                        let original = platform_baseline
+                            .nodes
+                            .iter()
+                            .find(|item| item.mac_normalized == node.mac_normalized);
+                        InventoryAssetWrite {
+                            mac_normalized: node.mac_normalized.clone(),
+                            display_mac: node.mac_normalized.clone(),
+                            name: original
+                                .map(|item| item.name.clone())
+                                .unwrap_or_else(|| node.name.clone()),
+                            ip: node.ip.clone(),
+                            building_id: original.and_then(|item| item.building_id.clone()),
+                            region_id: None,
+                            addr_alias: original.and_then(|item| item.addr_alias.clone()),
+                            floor: None,
+                            location: Some("compose-driven-three-mode-e2e".into()),
+                            remark: None,
+                            platform_aio_id: original.map(|item| item.id.clone()),
+                            management_state: "managed".into(),
+                            source: "platform".into(),
+                            expected_version: None,
+                        }
                     })
                     .collect(),
             })
@@ -1188,6 +1212,29 @@ async fn compose_driven_three_mode_e2e_on_79_and_121() {
         .fetch_one(&pools.platform)
         .await?;
         assert_eq!(platform_targets, 2);
+        let platform_after =
+            inxaiot_desk_buddy_lib::infrastructure::platform_aio::PlatformAioRepository::new(
+                pools.platform.clone(),
+            )
+            .list_all()
+            .await?;
+        for original in platform_baseline
+            .nodes
+            .iter()
+            .filter(|node| macs.contains(&node.mac_normalized))
+        {
+            let current = platform_after
+                .nodes
+                .iter()
+                .find(|node| node.id == original.id)
+                .expect("original platform AIO id remains");
+            assert_eq!(
+                current.mac_raw, original.mac_raw,
+                "deployment must preserve the platform MAC format"
+            );
+            assert_eq!(current.building_id, original.building_id);
+            assert_eq!(current.addr_alias, original.addr_alias);
+        }
 
         let (_, full_operation) = execute_compose_driven_mode(
             &state,
@@ -1205,6 +1252,36 @@ async fn compose_driven_three_mode_e2e_on_79_and_121() {
             DeploymentMode::ServiceUpgrade,
         )
         .await?;
+
+        let platform_after_upgrades =
+            inxaiot_desk_buddy_lib::infrastructure::platform_aio::PlatformAioRepository::new(
+                pools.platform.clone(),
+            )
+            .list_all()
+            .await?;
+        assert_eq!(
+            platform_after_upgrades
+                .nodes
+                .iter()
+                .filter(|node| macs.contains(&node.mac_normalized))
+                .count(),
+            2,
+            "full and service upgrades must not create duplicate platform AIO records"
+        );
+        for original in platform_baseline
+            .nodes
+            .iter()
+            .filter(|node| macs.contains(&node.mac_normalized))
+        {
+            let current = platform_after_upgrades
+                .nodes
+                .iter()
+                .find(|node| node.id == original.id)
+                .expect("original platform AIO id remains after both upgrades");
+            assert_eq!(current.mac_raw, original.mac_raw);
+            assert_eq!(current.building_id, original.building_id);
+            assert_eq!(current.addr_alias, original.addr_alias);
+        }
 
         let operation_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM operation_record \

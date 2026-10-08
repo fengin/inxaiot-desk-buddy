@@ -5,6 +5,9 @@ use crate::core::error::{AppError, AppResult};
 pub enum ProjectAccessRequirement {
     Configured,
     ActiveSession,
+    /// 平台只读操作，不要求共享库可用。
+    PlatformRead,
+    /// 平台会话和共享数据库可用；业务表由各业务检查。
     Ready,
 }
 

@@ -8,3 +8,6 @@ pub mod project_management;
 pub mod release_artifacts;
 pub mod service_inspection;
 pub mod task_activity;
+
+pub mod operation_history;
+pub mod smart_screen;

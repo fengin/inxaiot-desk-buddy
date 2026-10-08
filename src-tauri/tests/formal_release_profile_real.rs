@@ -1,7 +1,6 @@
-use std::path::Path;
-use std::time::Duration;
+#[path = "common/aio_test_config.rs"]
+mod aio_test_config;
 
-use inxaiot_desk_buddy_lib::core::secret::SecretValue;
 use inxaiot_desk_buddy_lib::formal::credential_crypto::{
     INXVISION_CREDENTIAL_SCHEME, ReleaseCredentials,
 };
@@ -10,47 +9,9 @@ use inxaiot_desk_buddy_lib::formal::release_profile_repository::{
     ReleaseProfileRepository, ReleaseProfileValues, ReleaseProfileWrite,
 };
 use inxaiot_desk_buddy_lib::formal::workbench_store::WorkbenchStore;
-use inxaiot_desk_buddy_lib::infrastructure::database::{
-    DatabaseTlsMode, DualMySqlPools, MySqlProjectConfig,
-};
+use inxaiot_desk_buddy_lib::infrastructure::database::DualMySqlPools;
 use sqlx::Row;
 use uuid::Uuid;
-
-fn line<'a>(text: &'a str, label: &str) -> &'a str {
-    text.lines()
-        .find_map(|item| item.trim().strip_prefix(label))
-        .map(str::trim)
-        .unwrap_or_else(|| panic!("missing {label}"))
-}
-
-fn default<'a>(text: &'a str, key: &str) -> &'a str {
-    let marker = format!("${{{key}:");
-    let rest = &text[text.find(&marker).expect("config default") + marker.len()..];
-    &rest[..rest.find('}').expect("config default end")]
-}
-
-fn config() -> MySqlProjectConfig {
-    let project = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("project");
-    let description =
-        std::fs::read_to_string(project.join("test/测试数据说明.txt")).expect("test data");
-    let workspace = project.parent().and_then(Path::parent).expect("workspace");
-    let yaml = std::fs::read_to_string(workspace.join(
-        "inxvision-platform/inxaiot-starter-platform/src/main/resources/application-dev.yml",
-    ))
-    .expect("platform config");
-    MySqlProjectConfig {
-        host: default(&yaml, "MYSQL_HOST").into(),
-        port: default(&yaml, "MYSQL_PORT").parse().expect("mysql port"),
-        username: default(&yaml, "MYSQL_USER").into(),
-        password: SecretValue::new(default(&yaml, "MYSQL_PASSWORD")),
-        platform_schema: line(&description, "平台业务数据库名：").into(),
-        workbench_schema: line(&description, "工作台数据库：").into(),
-        tls_mode: DatabaseTlsMode::Disabled,
-        connect_timeout: Duration::from_secs(10),
-    }
-}
 
 fn values() -> ReleaseProfileValues {
     ReleaseProfileValues {
@@ -84,7 +45,7 @@ fn credentials() -> ReleaseCredentials {
 #[tokio::test]
 #[ignore = "writes and removes exactly one isolated release profile"]
 async fn encrypted_profile_version_audit_and_exact_cleanup() {
-    let config = config();
+    let config = aio_test_config::isolated_project();
     let pools = DualMySqlPools::connect(&config)
         .await
         .expect("connect project mysql");
@@ -187,7 +148,7 @@ async fn encrypted_profile_version_audit_and_exact_cleanup() {
 #[tokio::test]
 #[ignore = "reads and exactly removes one isolated fixed-key release profile"]
 async fn fixed_credential_profile_reads_from_an_independent_client() {
-    let config = config();
+    let config = aio_test_config::isolated_project();
     let pools = DualMySqlPools::connect(&config)
         .await
         .expect("connect project mysql");
@@ -196,7 +157,7 @@ async fn fixed_credential_profile_reads_from_an_independent_client() {
         .await
         .expect("workbench migration");
     let repository = ReleaseProfileRepository::new(pools.workbench.clone());
-    let suffix = &Uuid::now_v7().simple().to_string()[..20];
+    let suffix = &Uuid::now_v7().simple().to_string()[..16];
     let profile_key = format!("fixed-key-poc-{suffix}");
     let credentials = credentials();
     let created = repository

@@ -1,3 +1,6 @@
+import defaultEnvTemplate from "@/shared/templates/aio-default.env?raw";
+import defaultComposeTemplate from "@/shared/templates/aio-default-compose.yml?raw";
+
 export interface ReleaseProfileValues {
   envTemplate: string;
   composeTemplate: string;
@@ -78,8 +81,8 @@ export interface ReleaseProfileValidation {
 
 export const emptyReleaseProfileDraft = (): ReleaseProfileDraft => ({
   values: {
-    envTemplate: "",
-    composeTemplate: "services:\n",
+    envTemplate: defaultEnvTemplate,
+    composeTemplate: defaultComposeTemplate,
     hostInfoTemplate: [
       "{",
       '  "mac": "{{ node.mac }}",',

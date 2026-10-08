@@ -30,6 +30,7 @@ pub struct ActivityTaskDto {
     pub completed_count: u32,
     pub updated_at: String,
     pub cancellable: bool,
+    pub clearable: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -130,9 +131,9 @@ pub async fn clear_task_logs(
         .get(&task_id)
         .await
         .map_err(CommandErrorDto::from)?;
-    if !task.state.is_terminal() {
+    if !task.state.is_terminal() || state.task_repository.results_protected(&task.id).await.map_err(CommandErrorDto::from)? {
         return Err(CommandErrorDto::from(
-            crate::core::error::AppError::Conflict("只能清空已结束任务的日志".into()),
+            crate::core::error::AppError::Conflict("任务仍在执行或有结果待核实，暂不能清空日志".into()),
         ));
     }
     TaskDataLifecycle::new(&state.paths)
@@ -208,9 +209,9 @@ pub async fn retry_local_task_finalization(
             task,
             takeover_required: false,
             message: if force_takeover {
-                "已强制接管并补写部署结果；原占用任务后续写入会被租约拒绝".into()
+                "已强制接管并补写操作结果；原占用任务后续写入会被租约拒绝".into()
             } else {
-                "部署结果已补写完成".into()
+                "操作结果已补写完成".into()
             },
         }),
         FinalizationRetryOutcome::TakeoverRequired(conflicts) => {
@@ -239,101 +240,66 @@ pub async fn request_task_cancel(
     state: &FormalAppState,
     task_id: &str,
 ) -> Result<ActivityTaskDto, CommandErrorDto> {
-    let task = state
-        .task_repository
-        .get(task_id)
-        .await
-        .map_err(CommandErrorDto::from)?;
-    let (task, stage, status, message_code, message) = match task.state {
-        TaskState::Queued => {
-            state
-                .task_queue
-                .cancel(task_id)
-                .await
-                .map_err(CommandErrorDto::from)?;
-            let task = state
-                .task_repository
-                .transition(
-                    task_id,
-                    TaskState::Queued,
-                    TaskState::Cancelled,
-                    Some("QUEUE_CANCELLED"),
-                    Some("用户取消了排队任务，未执行远端步骤"),
-                )
-                .await
-                .map_err(CommandErrorDto::from)?;
-            if let Ok(targets) = state.task_repository.targets(task_id).await {
-                for target in targets {
-                    if target.state == TargetState::Pending {
-                        let _ = state
-                            .task_repository
-                            .update_target(
-                                task_id,
-                                TargetUpdate {
-                                    resource_type: target.resource_type,
-                                    resource_key: target.resource_key,
-                                    state: TargetState::Cancelled,
-                                    stage: "cancelled".into(),
-                                    progress_current: 100,
-                                    progress_total: 100,
-                                    fencing_token: target.fencing_token,
-                                    message_code: Some("QUEUE_CANCELLED".into()),
-                                    message_params_json: None,
-                                },
-                            )
-                            .await;
-                    }
+    let initial = state.task_repository.get(task_id).await.map_err(CommandErrorDto::from)?;
+    if initial.state == TaskState::Cancelling {
+        return activity_task(state, initial).await;
+    }
+    if !matches!(initial.state, TaskState::Queued | TaskState::Running) {
+        return Err(CommandErrorDto::from(crate::core::error::AppError::Conflict(format!(
+            "当前任务状态不允许取消：{}", initial.state.as_str()
+        ))));
+    }
+    // 取消信号与执行器推进状态是并行的；信号送达后以最新状态收敛，
+    // 已完成的实际结果不能被旧的“排队/执行中”快照覆盖。
+    if let Err(error) = state.task_queue.cancel(task_id).await {
+        let current = state.task_repository.get(task_id).await.map_err(CommandErrorDto::from)?;
+        if current.state.is_terminal() || current.state == TaskState::FinalizingFailed {
+            return activity_task(state, current).await;
+        }
+        return Err(CommandErrorDto::from(error));
+    }
+    let mut task = initial;
+    for _ in 0..5 {
+        task = state.task_repository.get(task_id).await.map_err(CommandErrorDto::from)?;
+        let (next, code, message) = match task.state {
+            TaskState::Queued => (TaskState::Cancelled, Some("QUEUE_CANCELLED"), "用户取消了排队任务，未执行远端步骤"),
+            TaskState::Running => (TaskState::Cancelling, None, "正在等待当前安全步骤结束"),
+            _ => break,
+        };
+        match state.task_repository.transition(task_id, task.state, next, code, Some(message)).await {
+            Ok(updated) => { task = updated; break; }
+            Err(crate::core::error::AppError::Conflict(_)) => continue,
+            Err(error) => return Err(CommandErrorDto::from(error)),
+        }
+    }
+    if matches!(task.state, TaskState::Queued | TaskState::Running) {
+        return Err(CommandErrorDto::from(crate::core::error::AppError::Conflict(
+            "取消已请求，任务状态正在更新，请刷新后查看".into()
+        )));
+    }
+    if task.state == TaskState::Cancelled {
+        if let Ok(targets) = state.task_repository.targets(task_id).await {
+            for target in targets {
+                if target.state == TargetState::Pending {
+                    let _ = state.task_repository.update_target(task_id, TargetUpdate {
+                        resource_type: target.resource_type,
+                        resource_key: target.resource_key,
+                        state: TargetState::Cancelled,
+                        stage: "cancelled".into(),
+                        progress_current: 100,
+                        progress_total: 100,
+                        fencing_token: target.fencing_token,
+                        message_code: Some("QUEUE_CANCELLED".into()),
+                        message_params_json: None,
+                    }).await;
                 }
             }
-            (
-                task,
-                "cancelled",
-                "cancelled",
-                "QUEUE_CANCELLED",
-                "用户取消了排队任务，未执行远端步骤",
-            )
         }
-        TaskState::Running => {
-            let task = state
-                .task_repository
-                .transition(
-                    task_id,
-                    TaskState::Running,
-                    TaskState::Cancelling,
-                    None,
-                    Some("正在等待当前安全步骤结束"),
-                )
-                .await
-                .map_err(CommandErrorDto::from)?;
-            if let Err(error) = state.task_queue.cancel(task_id).await {
-                let _ = state
-                    .task_repository
-                    .transition(
-                        task_id,
-                        TaskState::Cancelling,
-                        TaskState::Interrupted,
-                        Some("CANCELLATION_SIGNAL_FAILED"),
-                        Some(&error.to_string()),
-                    )
-                    .await;
-                return Err(CommandErrorDto::from(error));
-            }
-            (
-                task,
-                "cancelling",
-                "cancelling",
-                "TASK_CANCELLING",
-                "用户请求取消，等待当前安全步骤结束",
-            )
-        }
-        _ => {
-            return Err(CommandErrorDto::from(
-                crate::core::error::AppError::Conflict(format!(
-                    "当前任务状态不允许取消：{}",
-                    task.state.as_str()
-                )),
-            ));
-        }
+    }
+    let (stage, status, message_code, message) = match task.state {
+        TaskState::Cancelled => ("cancelled", "cancelled", "QUEUE_CANCELLED", "用户取消了后续执行，结果已保存"),
+        TaskState::Cancelling => ("cancelling", "cancelling", "TASK_CANCELLING", "用户请求取消，等待当前安全步骤结束"),
+        _ => ("completed", task.state.as_str(), "TASK_CANCEL_RESULT_PRESERVED", "任务已结束，保留实际执行结果"),
     };
     if let Err(error) = state
         .task_event_pipeline
@@ -356,7 +322,7 @@ pub async fn request_task_cancel(
     {
         tracing::error!(task_id, error = ?crate::core::log_safety::safe_error(&error), "persist cancellation event failed");
     }
-    if task.state.is_terminal() {
+    if task.state.is_terminal() && !state.task_repository.results_protected(&task.id).await.map_err(CommandErrorDto::from)? {
         let _ = TaskDataLifecycle::new(&state.paths).finalize_task(
             &task.local_project_id,
             &task.id,
@@ -377,10 +343,7 @@ async fn activity_task(
         .map_err(CommandErrorDto::from)?;
     let visible_targets = targets
         .iter()
-        .filter(|target| {
-            task.operation_type != "deployment_preflight"
-                || target.resource_type != "preflight_internal"
-        })
+        .filter(|target| target.resource_type != "preflight_internal")
         .collect::<Vec<_>>();
     let target_count = u32::try_from(visible_targets.len()).unwrap_or(u32::MAX);
     let completed_count = u32::try_from(
@@ -412,7 +375,20 @@ async fn activity_task(
             .unwrap_or(100)
             .min(100)
     });
-    let stage = if task.operation_type == "deployment_preflight" {
+    let is_preflight = targets
+        .iter()
+        .any(|target| target.resource_type == "preflight_internal");
+    let results_protected=state.task_repository.results_protected(&task.id).await.map_err(CommandErrorDto::from)?;
+    let clearable = task.state.is_terminal()
+        && !results_protected
+        && !(task.state == TaskState::Succeeded
+            && targets.iter().any(|target| {
+                target.resource_type == "preflight_internal"
+                    && target.resource_key == "common"
+                    && target.state == TargetState::Succeeded
+                    && target.message_code.as_deref() == Some("PREFLIGHT_TARGET_PASSED")
+            }));
+    let stage = if is_preflight {
         match task.state {
             TaskState::Checking => "正在检查".into(),
             TaskState::Succeeded => "检查完成".into(),
@@ -434,20 +410,20 @@ async fn activity_task(
         domain_type: task.domain_type,
         operation_type: task.operation_type,
         name: task.name,
-        state: task.state.as_str().into(),
+        state: if results_protected && task.state.is_terminal() { "finalizing_failed".into() } else { task.state.as_str().into() },
         stage,
         progress,
         target_count,
         completed_count,
         updated_at: task.updated_at,
         cancellable: matches!(task.state, TaskState::Queued | TaskState::Running),
+        clearable,
     })
 }
 
 fn activity_log(event: TaskEvent) -> ActivityLogDto {
-    let source = event
-        .resource_key
-        .clone()
+    let source = event.message_params.get("targetName").cloned()
+        .or(event.resource_key.clone())
         .or(event.resource_type.clone())
         .unwrap_or_else(|| event.stage.clone());
     let message = event.message.clone().unwrap_or_else(|| {

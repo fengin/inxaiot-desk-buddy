@@ -1,15 +1,10 @@
-use std::path::Path;
+#[path = "common/project_test_config.rs"]
+mod project_test_config;
 
 use sqlx::Executor;
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode};
 
 const PREFIX: &str = "inxaiot_desk_buddy_stage75_";
-
-fn default<'a>(text: &'a str, key: &str) -> &'a str {
-    let marker = format!("${{{key}:");
-    let rest = &text[text.find(&marker).expect("config default") + marker.len()..];
-    &rest[..rest.find('}').expect("config default end")]
-}
 
 fn schema_name() -> String {
     let value = std::env::var("INX_STAGE75_SCHEMA").expect("INX_STAGE75_SCHEMA");
@@ -24,22 +19,12 @@ fn schema_name() -> String {
 }
 
 async fn admin_pool() -> sqlx::MySqlPool {
-    let project_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("project");
-    let workspace = project_root
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace");
-    let yaml = std::fs::read_to_string(workspace.join(
-        "inxvision-platform/inxaiot-starter-platform/src/main/resources/application-dev.yml",
-    ))
-    .expect("platform config");
+    let database = project_test_config::database();
     let options = MySqlConnectOptions::new()
-        .host(default(&yaml, "MYSQL_HOST"))
-        .port(default(&yaml, "MYSQL_PORT").parse().expect("mysql port"))
-        .username(default(&yaml, "MYSQL_USER"))
-        .password(default(&yaml, "MYSQL_PASSWORD"))
+        .host(&database.host)
+        .port(database.port)
+        .username(&database.username)
+        .password(&database.password)
         .ssl_mode(MySqlSslMode::Disabled);
     MySqlPoolOptions::new()
         .max_connections(1)

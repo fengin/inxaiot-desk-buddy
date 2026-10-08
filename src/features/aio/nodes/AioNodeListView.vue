@@ -21,9 +21,11 @@ import {
   CheckCircle2,
   ChevronRight,
   CircleAlert,
+  CircleHelp,
   Download,
   FileSpreadsheet,
   GitCompareArrows,
+  Plus,
   RefreshCw,
   Search,
   ServerCog,
@@ -47,6 +49,8 @@ import type {
 import { useAioNodesStore } from "@/stores/aioNodes";
 import { useProjectStore } from "@/stores/projects";
 import { useActivityStore } from "@/stores/activity";
+import AioNodeCreateDialog from "./AioNodeCreateDialog.vue";
+import AssetListFooter from "@/shared/components/AssetListFooter.vue";
 
 const aio = useAioNodesStore();
 const projects = useProjectStore();
@@ -61,6 +65,8 @@ const issuePage = ref(1);
 const selectedNode = ref<AioNodeListItem>();
 const versionOpen = ref(false);
 const importOpen = ref(false);
+const createOpen = ref(false);
+const selectedMacs = ref<string[]>([]);
 const importStage = ref<"select" | "preview" | "done">("select");
 let refreshTimer: number | undefined;
 
@@ -68,6 +74,26 @@ const filteredNodes = computed(() => aio.nodes);
 const stats = computed(() => aio.stats);
 const platformIssueCount = computed(() => aio.platformIssues.length);
 const showingPlatformIssues = computed(() => viewMode.value === "platform_issues");
+function canSelectNode(node: AioNodeListItem) { return /^[0-9a-f]{12}$/i.test(node.macNormalized) && node.managementState !== "conflict" && !node.conflicts.length; }
+const selectablePage = computed(() => showingPlatformIssues.value ? [] : filteredNodes.value.filter(canSelectNode));
+const allPageSelected = computed(() => selectablePage.value.length > 0 && selectablePage.value.every(node => selectedMacs.value.includes(node.macNormalized)));
+const somePageSelected = computed(() => !allPageSelected.value && selectablePage.value.some(node => selectedMacs.value.includes(node.macNormalized)));
+function selectNode(node: AioNodeListItem, checked: boolean) {
+  if (!canSelectNode(node)) return;
+  selectedMacs.value = checked ? [...new Set([...selectedMacs.value, node.macNormalized])] : selectedMacs.value.filter(mac => mac !== node.macNormalized);
+}
+function selectPage(checked: boolean) {
+  const pageMacs = new Set(selectablePage.value.map(node => node.macNormalized));
+  selectedMacs.value = checked ? [...new Set([...selectedMacs.value, ...pageMacs])] : selectedMacs.value.filter(mac => !pageMacs.has(mac));
+}
+async function openBatchOperations() {
+  if (!selectedMacs.value.length || !projects.isReady || aio.loading) return;
+  await router.push({ name: "aio-operations", query: { targets: [...selectedMacs.value], project: projects.activeProjectId } });
+}
+async function createdNode() {
+  viewMode.value = "nodes"; search.value = ""; stateFilter.value = "all"; aio.page = 1;
+  await refresh();
+}
 const filteredPlatformIssues = computed(() => {
   const keyword = search.value.trim().toLocaleLowerCase();
   if (!keyword) return aio.platformIssues;
@@ -284,12 +310,17 @@ watch(
   () => projects.activeProjectId,
   () => {
     viewMode.value = "nodes";
+    selectedMacs.value = []; createOpen.value = false;
     selectedNode.value = undefined;
     versionOpen.value = false;
     aio.page = 1;
     void refresh();
   }
 );
+watch(() => aio.nodes, (nodes) => {
+  const blocked = new Set(nodes.filter(node => !canSelectNode(node)).map(node => node.macNormalized));
+  selectedMacs.value = selectedMacs.value.filter(mac => !blocked.has(mac));
+});
 onMounted(async () => {
   await projects.initialize();
   await refresh();
@@ -311,6 +342,9 @@ onBeforeUnmount(() => {
         <n-button size="small" type="primary" @click="openImport">
           <template #icon><Upload /></template>
           导入清单
+        </n-button>
+        <n-button size="small" type="primary" :disabled="!projects.isReady" data-testid="aio-create-node" @click="createOpen = true">
+          <template #icon><Plus /></template>新增一体机
         </n-button>
       </div>
     </header>
@@ -415,17 +449,19 @@ onBeforeUnmount(() => {
       <div class="node-table-header">
         <table class="workbench-table node-table">
           <colgroup>
+            <col v-if="!showingPlatformIssues" class="node-col-select" />
             <col class="node-col-name" /><col class="node-col-ip" /><col class="node-col-mac" />
             <col class="node-col-location" /><col class="node-col-deploy" /><col class="node-col-platform" />
             <col class="node-col-service" /><col class="node-col-action" />
           </colgroup>
-          <thead><tr><th>名称</th><th>IP</th><th>MAC地址</th><th>位置</th><th>部署状态</th><th>平台状态</th><th>最近服务检查</th><th></th></tr></thead>
+          <thead><tr><th v-if="!showingPlatformIssues" class="node-select-cell"><n-checkbox aria-label="选择当前页一体机" :checked="allPageSelected" :indeterminate="somePageSelected" :disabled="aio.loading || !selectablePage.length" @update:checked="selectPage" /></th><th>名称</th><th>IP</th><th>MAC地址</th><th>位置</th><th>部署状态</th><th>平台状态</th><th>最近服务检查</th><th></th></tr></thead>
         </table>
       </div>
       <div class="table-scroll">
         <n-spin :show="aio.loading">
           <table class="workbench-table node-table">
             <colgroup>
+              <col v-if="!showingPlatformIssues" class="node-col-select" />
               <col class="node-col-name" /><col class="node-col-ip" /><col class="node-col-mac" />
               <col class="node-col-location" /><col class="node-col-deploy" /><col class="node-col-platform" />
               <col class="node-col-service" /><col class="node-col-action" />
@@ -447,10 +483,13 @@ onBeforeUnmount(() => {
                 <tr
                   v-for="node in filteredNodes"
                   :key="node.macNormalized"
+                  :data-node-mac="node.macNormalized"
+                  :class="{ 'node-selected': selectedMacs.includes(node.macNormalized) }"
                   tabindex="0"
                   @click="openNode(node)"
                   @keydown.enter="openNode(node)"
                 >
+                  <td class="node-select-cell" @click.stop @keydown.stop><n-checkbox :aria-label="`选择${node.name}`" :checked="selectedMacs.includes(node.macNormalized)" :disabled="aio.loading || !canSelectNode(node)" :title="!canSelectNode(node) ? '请先处理资料冲突或补齐 MAC' : `选择${node.name}`" @update:checked="selectNode(node, $event)" /></td>
                   <td><strong>{{ node.name }}</strong><small>{{ lastOperationLabel(node) }}</small></td>
                   <td class="mono">{{ node.ip }}</td>
                   <td class="mono muted-cell">{{ node.mac }}</td>
@@ -478,52 +517,61 @@ onBeforeUnmount(() => {
           </div>
         </n-spin>
       </div>
-      <footer class="table-footer">
-        <span>{{ showingPlatformIssues ? `每页 ${aio.pageSize} 条 · 共 ${filteredPlatformIssues.length} 条平台待处理记录` : `每页 ${aio.pageSize} 条 · 共 ${aio.total} 条` }}</span>
-        <n-pagination v-if="showingPlatformIssues && filteredPlatformIssues.length > aio.pageSize" v-model:page="issuePage" :page-size="aio.pageSize" :item-count="filteredPlatformIssues.length" size="small" />
-        <n-pagination v-else-if="aio.total > aio.pageSize" v-model:page="aio.page" :page-size="aio.pageSize" :item-count="aio.total" size="small" />
-        <span>数据更新时间：{{ formatDisplayDateTime(aio.refreshedAt) }}</span>
-      </footer>
+      <asset-list-footer :selected-count="showingPlatformIssues ? undefined : selectedMacs.length" :disabled="aio.loading || !projects.isReady" :disabled-reason="aio.loading ? '列表正在刷新，请稍候' : '请先连接并登录当前项目'" batch-test-id="aio-batch-operations" @batch="openBatchOperations">
+        <template #summary>{{ showingPlatformIssues ? `每页 ${aio.pageSize} 条 · 共 ${filteredPlatformIssues.length} 条平台待处理记录` : `每页 ${aio.pageSize} 条 · 共 ${aio.total} 条` }}</template>
+        <template #pagination>
+          <n-pagination v-if="showingPlatformIssues && filteredPlatformIssues.length > aio.pageSize" v-model:page="issuePage" :page-size="aio.pageSize" :item-count="filteredPlatformIssues.length" :page-slot="5" size="small" />
+          <n-pagination v-else-if="!showingPlatformIssues && aio.total > aio.pageSize" v-model:page="aio.page" :page-size="aio.pageSize" :item-count="aio.total" :page-slot="5" size="small" />
+        </template>
+        <template #meta>数据更新时间：{{ formatDisplayDateTime(aio.refreshedAt) }}</template>
+      </asset-list-footer>
     </section>
 
-    <n-drawer :show="Boolean(selectedNode)" :width="440" placement="right" @update:show="!$event && (selectedNode = undefined)">
+    <aio-node-create-dialog v-model:show="createOpen" :project-id="projects.activeProjectId" @created="createdNode" />
+
+    <n-drawer :show="Boolean(selectedNode)" width="min(var(--inx-detail-drawer-width), 94vw)" class="device-detail-drawer aio-detail-drawer" placement="right" @update:show="!$event && (selectedNode = undefined)">
       <n-drawer-content title="一体机详情" closable>
         <n-spin :show="aio.detailLoading">
           <template v-if="aio.detail">
             <div class="drawer-identity">
               <span class="feature-icon info"><ServerCog :size="22" /></span>
-              <div><strong>{{ aio.detail.node.name }}</strong><span class="mono">{{ aio.detail.node.ip }} · {{ aio.detail.node.mac }}</span></div>
+              <div><strong :title="aio.detail.node.name">{{ aio.detail.node.name }}</strong><span class="mono" :title="`${aio.detail.node.ip} · ${aio.detail.node.mac}`">{{ aio.detail.node.ip }} · {{ aio.detail.node.mac }}</span></div>
             </div>
-            <div class="detail-section">
-              <h3>资产关系</h3>
-              <dl class="detail-grid">
-                <dt>工作台状态</dt><dd>{{ aio.detail.node.deployLabel }}</dd>
-                <dt>平台对象ID</dt><dd class="mono">{{ aio.detail.node.platformId ?? "尚未关联" }}</dd>
-                <dt>资产来源</dt><dd>{{ sourceLabel(aio.detail.node.source) }}</dd>
-                <dt>记录版本</dt><dd>{{ aio.detail.node.version || "平台只读" }}</dd>
-                <dt>位置</dt><dd>{{ aio.detail.node.location }}</dd>
-                <dt>最近操作</dt><dd>{{ lastOperationLabel(aio.detail.node) }}</dd>
+            <div>
+              <h3 class="device-detail-section-title">资产关系</h3>
+              <dl class="device-detail-facts">
+                <div><dt>工作台状态</dt><dd :title="aio.detail.node.deployLabel">{{ aio.detail.node.deployLabel }}</dd></div>
+                <div><dt>平台对象ID</dt><dd class="mono" :title="String(aio.detail.node.platformId ?? '尚未关联')">{{ aio.detail.node.platformId ?? "尚未关联" }}</dd></div>
+                <div><dt>资产来源</dt><dd :title="sourceLabel(aio.detail.node.source)">{{ sourceLabel(aio.detail.node.source) }}</dd></div>
+                <div><dt>记录版本</dt><dd :title="String(aio.detail.node.version || '平台只读')">{{ aio.detail.node.version || "平台只读" }}</dd></div>
+                <div><dt>位置</dt><dd :title="aio.detail.node.location">{{ aio.detail.node.location }}</dd></div>
+                <div><dt>最近操作</dt><dd :title="lastOperationLabel(aio.detail.node)">{{ lastOperationLabel(aio.detail.node) }}</dd></div>
               </dl>
             </div>
-            <div class="detail-section">
-              <div class="service-section-heading"><h3>服务与版本检查</h3><n-button size="tiny" secondary :loading="Boolean(detailInspection)" :disabled="!projects.isReady || !aio.detail.node.ip || Boolean(detailInspection)" data-testid="check-node-services" @click="checkServices">{{ detailInspection ? '检查中' : '检查服务' }}</n-button></div>
+            <div>
+              <div class="service-section-heading"><h3 class="device-detail-section-title">服务与版本检查</h3><n-button size="tiny" secondary :loading="Boolean(detailInspection)" :disabled="!projects.isReady || !aio.detail.node.ip || Boolean(detailInspection)" data-testid="check-node-services" @click="checkServices">{{ detailInspection ? '检查中' : '检查服务' }}</n-button></div>
               <p class="service-check-meta">已部署版本为项目共享记录，服务检查仅保存到本机。</p>
-              <p class="service-check-meta">本机最近整机检查：{{ formatDisplayDateTime(aio.detail.node.serviceCheck?.lastFullCheckAt, '尚未检查') }}</p>
-              <p v-if="detailServices.length" class="service-check-meta">{{ serviceCheckCoverage(aio.detail.node).checked }}/{{ serviceCheckCoverage(aio.detail.node).total }} 项服务有本机实测结果</p>
+              <div class="service-check-summary"><p class="service-check-meta">本机最近整机检查：{{ formatDisplayDateTime(aio.detail.node.serviceCheck?.lastFullCheckAt, '尚未检查') }}</p><p v-if="detailServices.length" class="service-check-meta">{{ serviceCheckCoverage(aio.detail.node).checked }}/{{ serviceCheckCoverage(aio.detail.node).total }} 项服务有本机实测结果</p></div>
               <p v-if="detailInspection" class="service-check-meta" data-testid="service-inspection-stage">{{ detailInspectionStage }} · 可在底部查看任务日志</p>
               <p v-if="aio.detail.node.serviceCheck?.lastAttempt?.scope === 'service'" class="service-check-meta">最近仅检查 {{ aio.detail.node.serviceCheck.lastAttempt.serviceName }}，其他服务保留各自检查时间。</p>
               <div v-if="aio.detail.node.serviceCheck?.lastAttempt?.state === 'failed'" class="inline-notice warning service-check-failure" data-testid="service-check-failure"><CircleAlert :size="16" /><div><strong>最近一次检查失败 · {{ formatDisplayDateTime(aio.detail.node.serviceCheck.lastAttempt.checkedAt) }}</strong><span>{{ aio.detail.node.serviceCheck.lastAttempt.error || '未能完成服务检查，请查看任务日志。' }}</span></div></div>
               <div v-if="detailServices.length" class="service-observation-list">
                 <div v-for="service in detailServices" :key="service.serviceName" class="service-observation" data-testid="node-service-observation">
-                  <header><strong>{{ service.serviceName }}</strong><n-tag size="small" :bordered="false" :type="service.tone">{{ service.label }}</n-tag></header>
+                  <header>
+                    <strong :title="service.serviceName">{{ service.serviceName }}</strong>
+                    <span class="service-observation-status" :class="service.tone">
+                      <component :is="service.tone === 'success' ? CheckCircle2 : service.tone === 'error' ? XCircle : service.tone === 'warning' ? CircleAlert : CircleHelp" :size="13" aria-hidden="true" />
+                      {{ service.label }}
+                    </span>
+                  </header>
                   <dl class="detail-grid">
-                    <dt>镜像版本</dt><dd class="mono" :title="service.observation?.actualImage ? '最近检查的实际镜像' : '已部署记录，实际镜像尚未采集'">{{ service.observation?.actualImage || service.deployedImage }}</dd>
-                    <template v-if="service.observation?.actualImage && service.deployedImage !== '未记录' && service.observation.actualImage !== service.deployedImage"><dt>已部署版本</dt><dd class="mono">{{ service.deployedImage }}</dd></template>
-                    <template v-if="service.observation?.expectedImage && service.observation.expectedImage !== (service.observation.actualImage || service.deployedImage) && service.observation.expectedImage !== service.deployedImage"><dt>生效配置镜像</dt><dd class="mono">{{ service.observation.expectedImage }}</dd></template>
-                    <dt>运行状态</dt><dd>{{ serviceRuntimeLabel(service.observation) }}</dd>
-                    <dt>检查时间</dt><dd>{{ formatDisplayDateTime(service.observation?.checkedAt, '尚未检查') }}</dd>
-                    <dt>检查来源</dt><dd>{{ serviceCheckSourceLabel(service.observation?.source) }}</dd>
-                    <template v-if="service.observation?.message"><dt>说明</dt><dd>{{ service.observation.message }}</dd></template>
+                    <dt>镜像版本</dt><dd class="mono" :title="service.observation?.actualImage ? '最近检查的实际镜像' : '已部署记录，实际镜像尚未采集'"><span :title="service.observation?.actualImage || service.deployedImage">{{ service.observation?.actualImage || service.deployedImage }}</span></dd>
+                    <template v-if="service.observation?.actualImage && service.deployedImage !== '未记录' && service.observation.actualImage !== service.deployedImage"><dt>已部署版本</dt><dd class="mono" :title="service.deployedImage">{{ service.deployedImage }}</dd></template>
+                    <template v-if="service.observation?.expectedImage && service.observation.expectedImage !== (service.observation.actualImage || service.deployedImage) && service.observation.expectedImage !== service.deployedImage"><dt>生效配置镜像</dt><dd class="mono" :title="service.observation.expectedImage">{{ service.observation.expectedImage }}</dd></template>
+                    <dt>运行状态</dt><dd :title="serviceRuntimeLabel(service.observation)">{{ serviceRuntimeLabel(service.observation) }}</dd>
+                    <dt>检查时间</dt><dd :title="formatDisplayDateTime(service.observation?.checkedAt, '尚未检查')">{{ formatDisplayDateTime(service.observation?.checkedAt, '尚未检查') }}</dd>
+                    <dt>检查来源</dt><dd :title="serviceCheckSourceLabel(service.observation?.source)">{{ serviceCheckSourceLabel(service.observation?.source) }}</dd>
+                    <template v-if="service.observation?.message"><dt>说明</dt><dd class="service-observation-message">{{ service.observation.message }}</dd></template>
                   </dl>
                 </div>
               </div>
@@ -658,15 +706,29 @@ onBeforeUnmount(() => {
 <style scoped>
 .service-section-heading,
 .service-observation > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.service-section-heading { margin: 14px 0 8px; }
 .service-section-heading h3 { margin: 0; }
+.service-check-summary { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0 12px; }
 .service-check-meta { margin: 4px 0; color: var(--inx-color-text-secondary); font-size: 12px; line-height: 1.5; }
-.node-table td:first-child > small { margin-top: 1px; }
+.node-table td > small { margin-top: 1px; }
+.node-table .node-col-select { width: 34px; }
+.node-table .node-col-select ~ .node-col-location { width: auto; }
+.node-table .node-select-cell { padding-left: 10px; padding-right: 6px; }
+.node-table .node-selected td { background: var(--inx-color-selected); }
 .service-check-cell > small { display: block; margin-top: 2px; white-space: nowrap; }
-.service-observation { padding: 6px 0; border-bottom: 1px solid var(--inx-color-border); }
-.service-observation:last-child { border-bottom: 0; padding-bottom: 0; }
-.service-observation > header strong { font-size: 13px; }
+.service-observation-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.service-observation { min-width: 0; padding: 10px; border: 1px solid var(--inx-color-border); border-radius: 6px; background: var(--inx-color-surface-subtle); }
+.service-observation > header strong { min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.service-observation-status { display: inline-flex; align-items: center; gap: 4px; min-height: 22px; flex: none; color: var(--inx-color-text-secondary); font-size: 12px; white-space: nowrap; cursor: default; }
+.service-observation-status svg { flex: none; color: var(--inx-color-text-tertiary); }
+.service-observation-status.success svg { color: var(--inx-color-operation); }
+.service-observation-status.warning svg { color: var(--inx-color-warning); }
+.service-observation-status.error svg { color: var(--inx-color-danger); }
 .service-observation .detail-grid { grid-template-columns: 72px minmax(0, 1fr); gap: 4px 8px; margin-top: 5px; font-size: 12px; line-height: 1.4; }
-.service-observation dd { overflow-wrap: anywhere; }
+.service-observation dt { white-space: nowrap; }
+.service-observation dd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.service-observation .service-observation-message { white-space: normal; overflow-wrap: anywhere; }
+.aio-detail-drawer .drawer-identity strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .service-check-failure { margin-top: 10px; }
 .version-unrecorded { color: var(--inx-color-text-secondary); font-size: 12px; }
 </style>

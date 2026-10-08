@@ -237,8 +237,8 @@ async function viewAgentScript() {
             <label>平台 MQTT 端口<n-input-number v-model:value="release.draft.values.platformMqttPort" v-bind="fieldProps('values.platformMqttPort')" data-testid="release-mqtt-port" size="small" :disabled="!editing || release.saving" :show-button="false" /><small v-if="release.fieldErrors['values.platformMqttPort']" id="release-error-values.platformMqttPort" class="field-feedback" role="alert">{{ release.fieldErrors['values.platformMqttPort'] }}</small></label>
             <label>平台 MQTT 账号<n-input v-model:value="release.draft.credentials.platformMqttUser" v-bind="fieldProps('credentials.platformMqttUser')" data-testid="release-mqtt-user" size="small" :disabled="!editing || release.saving" /><small v-if="release.fieldErrors['credentials.platformMqttUser']" id="release-error-credentials.platformMqttUser" class="field-feedback" role="alert">{{ release.fieldErrors['credentials.platformMqttUser'] }}</small></label>
             <label>平台 MQTT 密码<n-input v-model:value="release.draft.credentials.platformMqttPassword" v-bind="fieldProps('credentials.platformMqttPassword')" data-testid="release-mqtt-password" type="password" show-password-on="click" size="small" :disabled="!editing || release.saving" /><small v-if="release.fieldErrors['credentials.platformMqttPassword']" id="release-error-credentials.platformMqttPassword" class="field-feedback" role="alert">{{ release.fieldErrors['credentials.platformMqttPassword'] }}</small></label>
-            <label>一体机 MQTT 账号<n-input v-model:value="release.draft.credentials.aioMqttUser" v-bind="fieldProps('credentials.aioMqttUser')" data-testid="release-aio-mqtt-user" size="small" :disabled="!editing || release.saving" /><small v-if="release.fieldErrors['credentials.aioMqttUser']" id="release-error-credentials.aioMqttUser" class="field-feedback" role="alert">{{ release.fieldErrors['credentials.aioMqttUser'] }}</small></label>
-            <label>一体机 MQTT 密码<n-input v-model:value="release.draft.credentials.aioMqttPassword" v-bind="fieldProps('credentials.aioMqttPassword')" data-testid="release-aio-mqtt-password" type="password" show-password-on="click" size="small" :disabled="!editing || release.saving" /><small v-if="release.fieldErrors['credentials.aioMqttPassword']" id="release-error-credentials.aioMqttPassword" class="field-feedback" role="alert">{{ release.fieldErrors['credentials.aioMqttPassword'] }}</small></label>
+            <label><span>一体机 MQTT <span class="release-label-term">账号</span></span><n-input v-model:value="release.draft.credentials.aioMqttUser" v-bind="fieldProps('credentials.aioMqttUser')" data-testid="release-aio-mqtt-user" size="small" :disabled="!editing || release.saving" /><small v-if="release.fieldErrors['credentials.aioMqttUser']" id="release-error-credentials.aioMqttUser" class="field-feedback" role="alert">{{ release.fieldErrors['credentials.aioMqttUser'] }}</small></label>
+            <label><span>一体机 MQTT <span class="release-label-term">密码</span></span><n-input v-model:value="release.draft.credentials.aioMqttPassword" v-bind="fieldProps('credentials.aioMqttPassword')" data-testid="release-aio-mqtt-password" type="password" show-password-on="click" size="small" :disabled="!editing || release.saving" /><small v-if="release.fieldErrors['credentials.aioMqttPassword']" id="release-error-credentials.aioMqttPassword" class="field-feedback" role="alert">{{ release.fieldErrors['credentials.aioMqttPassword'] }}</small></label>
           </div></div>
           <div class="form-section"><h3>SSH 连接</h3><div class="form-grid">
             <label>SSH 用户名<n-input v-model:value="release.draft.credentials.sshUser" v-bind="fieldProps('credentials.sshUser')" data-testid="release-ssh-user" size="small" :disabled="!editing || release.saving" /><small v-if="release.fieldErrors['credentials.sshUser']" id="release-error-credentials.sshUser" class="field-feedback" role="alert">{{ release.fieldErrors['credentials.sshUser'] }}</small></label>
@@ -281,11 +281,16 @@ async function viewAgentScript() {
 </template>
 
 <style scoped>
+.release-label-term {
+  white-space: nowrap;
+}
+
 .parameter-panel .form-grid label > .field-feedback {
   grid-column: 2;
   width: 100%;
   color: var(--inx-color-danger);
-  font-size: 11px;
+  font-size: var(--inx-font-size-table);
+  font-weight: 400;
   line-height: 1.4;
   text-align: left;
   overflow-wrap: anywhere;
@@ -299,11 +304,12 @@ async function viewAgentScript() {
 .agent-script-row {
   display: grid;
   width: 100%;
-  grid-template-columns: 84px minmax(0, 1fr) auto;
+  grid-template-columns: 8em minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
   color: var(--inx-color-text-secondary);
-  font-size: 10px;
+  font-size: var(--inx-font-size-base);
+  font-weight: 400;
 }
 
 .agent-script-label {

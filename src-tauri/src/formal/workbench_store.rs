@@ -16,6 +16,7 @@ const EXPECTED_BUSINESS_TABLES: &[&str] = &[
     "operation_record",
     "operation_target_result",
     "resource_lease",
+    "workbench_data_source",
 ];
 
 const FORBIDDEN_PROJECT_TABLES: &[&str] = &[

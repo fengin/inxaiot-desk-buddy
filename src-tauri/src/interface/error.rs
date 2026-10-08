@@ -31,6 +31,7 @@ impl From<AppError> for CommandErrorDto {
                 ("CONFIG_VERSION_CONFLICT", "error.config_version_conflict")
             }
             AppError::Conflict(_) => ("STATE_CONFLICT", "error.state_conflict"),
+            AppError::ConfirmationRequired { code, .. } => (*code, "error.confirmation_required"),
             AppError::NotFound(_) => ("NOT_FOUND", "error.not_found"),
             AppError::Database { .. } => ("LOCAL_DATABASE", "error.local_database"),
             AppError::PlatformHttp { .. } => ("PLATFORM_HTTP", "error.platform_http"),
@@ -45,6 +46,9 @@ impl From<AppError> for CommandErrorDto {
         };
         let mut params = BTreeMap::new();
         params.insert("summary".into(), summary);
+        if let AppError::ConfirmationRequired { details, .. } = &error {
+            params.insert("details".into(), details.to_string());
+        }
         let field_errors = match error {
             AppError::InvalidFields(fields) => fields
                 .into_iter()

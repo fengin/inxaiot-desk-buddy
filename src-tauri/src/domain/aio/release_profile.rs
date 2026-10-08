@@ -712,6 +712,36 @@ mod tests {
     }
 
     #[test]
+    fn built_in_templates_pass_real_release_validation() {
+        let mut draft = valid_draft();
+        draft.values.env_template = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/templates/aio-default.env"
+        ))
+        .into();
+        draft.values.compose_template = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/templates/aio-default-compose.yml"
+        ))
+        .into();
+        let result = draft.validate().expect("内置三模板应通过正式校验");
+        let services = result
+            .compose_services
+            .iter()
+            .map(|service| service.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            services,
+            ["emqx", "device-edge", "rule-engine", "device-edge-web"]
+                .into_iter()
+                .collect()
+        );
+        assert!(result.published_ports.contains(&6001));
+        assert!(result.published_ports.contains(&6002));
+        assert!(result.published_ports.contains(&7000));
+    }
+
+    #[test]
     fn validation_extracts_compose_services_and_ports_before_save() {
         let result = valid_draft().validate().expect("valid profile");
         assert_eq!(result.compose_services[0].name, "app");

@@ -8,18 +8,6 @@ use sqlx::{MySqlPool, Row};
 use crate::core::error::{AppError, AppResult};
 use crate::core::secret::SecretValue;
 
-const REQUIRED_AIO_COLUMNS: &[&str] = &[
-    "id",
-    "name",
-    "ip",
-    "mac",
-    "building_id",
-    "addr_alias",
-    "status",
-    "last_beat_time",
-    "last_sync_time",
-];
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DatabaseTlsMode {
@@ -79,9 +67,6 @@ pub struct DatabaseProbeReport {
     pub tls_cipher: Option<String>,
     pub platform_schema: String,
     pub workbench_schema: String,
-    pub platform_aio_table_exists: bool,
-    pub platform_aio_columns: Vec<String>,
-    pub missing_required_columns: Vec<String>,
     pub workbench_charset: Option<String>,
     pub workbench_collation: Option<String>,
 }
@@ -103,6 +88,29 @@ impl DualMySqlPools {
         })
     }
 
+    /// 平台读操作可以独立使用；共享库只在第一次共享操作时建立连接。
+    pub async fn connect_platform_first(config: &MySqlProjectConfig) -> AppResult<Self> {
+        config.validate()?;
+        let platform = connect_pool(config, &config.platform_schema, 3, true).await?;
+        let options = MySqlConnectOptions::new()
+            .host(&config.host)
+            .port(config.port)
+            .username(&config.username)
+            .password(config.password.expose())
+            .database(&config.workbench_schema)
+            .charset("utf8mb4")
+            .ssl_mode(config.tls_mode.into());
+        let workbench = MySqlPoolOptions::new()
+            .min_connections(0)
+            .max_connections(5)
+            .acquire_timeout(config.connect_timeout)
+            .connect_lazy_with(options);
+        Ok(Self {
+            platform,
+            workbench,
+        })
+    }
+
     pub async fn probe(&self, config: &MySqlProjectConfig) -> AppResult<DatabaseProbeReport> {
         let server_version = sqlx::query_scalar::<_, String>("SELECT VERSION()")
             .fetch_one(&self.platform)
@@ -118,28 +126,6 @@ impl DualMySqlPools {
             })
             .transpose()?
             .filter(|value| !value.is_empty());
-
-        let rows = sqlx::query(
-            "SELECT column_name FROM information_schema.columns \
-             WHERE table_schema = ? AND table_name = 'op_edge_aio_server'",
-        )
-        .bind(&config.platform_schema)
-        .fetch_all(&self.platform)
-        .await
-        .map_err(|error| AppError::database("探测平台一体机表", &error))?;
-
-        let columns = rows
-            .into_iter()
-            .map(|row| {
-                row.try_get::<String, _>("column_name")
-                    .map_err(|error| AppError::database("解析平台一体机表字段", &error))
-            })
-            .collect::<AppResult<BTreeSet<_>>>()?;
-        let missing_required_columns = REQUIRED_AIO_COLUMNS
-            .iter()
-            .filter(|column| !columns.contains(**column))
-            .map(|column| (*column).to_string())
-            .collect::<Vec<_>>();
 
         let schema_row = sqlx::query(
             "SELECT default_character_set_name, default_collation_name \
@@ -170,9 +156,6 @@ impl DualMySqlPools {
             tls_cipher,
             platform_schema: config.platform_schema.clone(),
             workbench_schema: config.workbench_schema.clone(),
-            platform_aio_table_exists: !columns.is_empty(),
-            platform_aio_columns: columns.into_iter().collect(),
-            missing_required_columns,
             workbench_charset,
             workbench_collation,
         })
@@ -182,6 +165,11 @@ impl DualMySqlPools {
         self.platform.close().await;
         self.workbench.close().await;
     }
+}
+
+pub async fn connect_platform_write(config: &MySqlProjectConfig) -> AppResult<MySqlPool> {
+    config.validate()?;
+    connect_pool(config, &config.platform_schema, 3, false).await
 }
 
 async fn connect_pool(
@@ -217,6 +205,30 @@ async fn connect_pool(
         .connect_with(options)
         .await
         .map_err(|error| AppError::database("建立MySQL连接池", &error))
+}
+
+pub async fn require_table_columns(
+    pool: &MySqlPool,
+    table: &str,
+    required: &[&str],
+) -> AppResult<()> {
+    let columns = sqlx::query_scalar::<_, String>(
+        "SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ?"
+    ).bind(table).fetch_all(pool).await
+        .map_err(|error| AppError::database("检查业务表字段", &error))?
+        .into_iter().collect::<BTreeSet<_>>();
+    let missing = required
+        .iter()
+        .filter(|name| !columns.contains(**name))
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(AppError::InvalidConfig(format!(
+            "业务表{table}缺少字段：{}",
+            missing.join("、")
+        )));
+    }
+    Ok(())
 }
 
 fn validate_identifier(value: &str) -> AppResult<()> {

@@ -2,6 +2,8 @@
 
 面向项目实施与维护人员的桌面工作台，根据 `inxaiot-edge-workbench` 的实际能力重新进行产品、技术和工程设计。
 
+当前应用版本：**0.2.0**。功能与验收范围见[版本变更记录](CHANGELOG.md)。
+
 Windows 与现有两台一体机、三台智能屏的整体实机回归已完成，包括一体机部署升级、智能屏安装及配置管理、结果回写和异常恢复。验证结果与范围见[整体实机回归记录](doc/27-整体实机回归记录.md)；Mac 原生运行及现场触摸、语音体验仍需在目标设备验收。
 
 当前部署物模型以项目共享配置为中心：`.env`、`docker-compose.yml`、`host-info.json`三个模板及发布参数保存到项目`inxaiot_desk_buddy`，Compose决定可部署服务。首次部署和整包升级不再选择Release目录或要求用户准备`manifest.json`，只为Compose服务选择单镜像tar并确认RepoTag；工作台在上传前完成模板、YAML、端口、镜像和逐节点渲染校验，再自动生成Agent使用的内部发布包。
@@ -96,7 +98,7 @@ pnpm tauri dev
 
 ### GitHub多平台发布
 
-- 推送`v*.*.*`标签会触发`.github/workflows/portable-release.yml`；标签必须与`package.json`、Cargo和Tauri中的应用版本一致，例如当前版本使用`v0.1.1`。
+- 推送`v*.*.*`标签会触发`.github/workflows/portable-release.yml`；标签必须与`package.json`、Cargo和Tauri中的应用版本一致，当前版本使用`v0.2.0`。
 - Actions并行构建Windows x64、Linux x64、macOS Intel x64和Apple Silicon arm64，生成便携压缩包及对应SHA-256文件；全部构建成功后才创建GitHub Release。手动触发只保存7天的Workflow Artifact，不创建Release。
 - macOS 流水线与本机构建共用 `build:macos`，按 x64、arm64 分别准备 SDK 和 Java。默认产物使用 adhoc 签名；没有 Apple Developer 证书和公证，首次从网络下载后仍可能需要用户在系统“隐私与安全性”中允许打开。Apple Silicon 使用 Intel 版随包 Android 工具时，用户电脑也必须具备 Rosetta。
 - GitHub产物用于跨平台构建和原生验收，不能替代目标Mac和Linux发行版上的实际运行、Keychain/Secret Service、文件对话框及SSH/SFTP验证。

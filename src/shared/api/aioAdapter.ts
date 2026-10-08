@@ -1,4 +1,5 @@
 import type { ListAioNodesQuery } from "@/shared/api/aioNodes";
+import type { ProjectSpaceNode } from "@/shared/model/projectSpace";
 import type {
   AioImportSession,
   AioNodeDetail,
@@ -11,6 +12,8 @@ import type {
 
 export interface AioAdapter {
   readonly real: boolean;
+  listSpaces(projectId: string): Promise<ProjectSpaceNode[]>;
+  updateNode(projectId: string, input: import("@/shared/model/aio").UpdateAioNodeInput): Promise<void>;
   listNodes(projectId: string, query: ListAioNodesQuery): Promise<AioNodeListPage>;
   getNodeDetail(projectId: string, mac: string): Promise<AioNodeDetail>;
   checkServices(projectId: string, mac: string): Promise<{ taskId: string }>;

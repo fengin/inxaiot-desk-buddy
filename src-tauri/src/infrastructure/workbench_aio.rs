@@ -116,10 +116,13 @@ impl WorkbenchAioRepository {
         &self,
     ) -> AppResult<std::collections::HashMap<String, OperationRecordSummary>> {
         let rows = sqlx::query(concat!(
-            "SELECT n.mac_normalized, o.id, o.operation_type, o.operation_name, o.state, ",
+            "SELECT links.mac_normalized, o.id, o.operation_type, o.operation_name, o.state, ",
             "o.operator_name, DATE_FORMAT(o.ended_at, '%Y-%m-%dT%H:%i:%s') AS ended_at_text, ",
-            "o.result_summary FROM aio_node n ",
-            "JOIN operation_record o ON o.id = n.last_operation_id"
+            "o.result_summary FROM (SELECT resource_key AS mac_normalized, operation_id ",
+            "FROM operation_target_result WHERE resource_type='aio' UNION ",
+            "SELECT mac_normalized, last_operation_id AS operation_id FROM aio_node WHERE last_operation_id IS NOT NULL) links ",
+            "JOIN operation_record o ON o.id = links.operation_id WHERE o.domain_type='aio' ",
+            "ORDER BY COALESCE(o.ended_at,o.started_at),o.id"
         ))
         .fetch_all(&self.pool)
         .await

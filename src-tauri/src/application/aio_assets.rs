@@ -37,6 +37,8 @@ pub struct AioNodeListItem {
     pub name: String,
     pub ip: String,
     pub location: String,
+    pub building_id: Option<String>,
+    pub space_path: String,
     pub management_state: String,
     pub deploy_label: String,
     pub platform_state: String,
@@ -56,6 +58,7 @@ pub struct AioNodeListItem {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AioNodeListPage {
+    pub metadata_warning: Option<String>,
     pub items: Vec<AioNodeListItem>,
     pub total: u32,
     pub page: u32,
@@ -78,6 +81,7 @@ pub struct LocalCheckRecord {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AioNodeDetail {
+    pub metadata_warning: Option<String>,
     pub node: AioNodeListItem,
     pub platform: Option<PlatformNodeSnapshot>,
     pub versions: Vec<ServiceVersionRecord>,
@@ -99,8 +103,20 @@ pub struct InventoryApplyOutcome {
     pub local_session_finalized: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAioNodeInput {
+    pub mac: String,
+    pub expected_version: u64,
+    pub platform_base: Option<PlatformNodeSnapshot>,
+    pub values: InventoryValues,
+    #[serde(default)]
+    pub force_takeover: bool,
+}
+
 #[allow(async_fn_in_trait)]
 pub trait AioAssetsPort: Send + Sync {
+    async fn update_node(&self, local_project_id: &str, input: UpdateAioNodeInput) -> AppResult<()>;
     async fn list_nodes(
         &self,
         local_project_id: &str,
@@ -130,6 +146,10 @@ pub trait AioAssetsPort: Send + Sync {
         local_project_id: &str,
         session_id: &str,
     ) -> AppResult<InventoryApplyOutcome>;
+}
+
+pub async fn update_aio_node<P: AioAssetsPort>(port: &P, project: &str, input: UpdateAioNodeInput) -> AppResult<()> {
+    port.update_node(project, input).await
 }
 
 pub async fn list_aio_nodes<P: AioAssetsPort>(

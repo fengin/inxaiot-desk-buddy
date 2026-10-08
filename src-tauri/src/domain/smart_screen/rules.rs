@@ -1,4 +1,3 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
 use super::model::{ScreenFields, SpaceNode};
@@ -52,31 +51,7 @@ pub fn validate_fields(fields: &ScreenFields, platform: bool) -> AppResult<()> {
     Ok(())
 }
 
-pub fn space_path(nodes: &[SpaceNode], id: &str) -> Option<Vec<SpaceNode>> {
-    let map: BTreeMap<&str, &SpaceNode> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-    if map.len() != nodes.len() {
-        return None;
-    }
-    let mut current = id;
-    let mut seen = BTreeSet::new();
-    let mut path = Vec::new();
-    while !current.is_empty() && current != "0" {
-        if !seen.insert(current) {
-            return None;
-        }
-        let node = map.get(current)?;
-        if node.name.trim().is_empty() {
-            return None;
-        }
-        path.push((*node).clone());
-        current = node.parent_id.as_deref().unwrap_or("0");
-    }
-    if path.is_empty() {
-        return None;
-    }
-    path.reverse();
-    Some(path)
-}
+pub use crate::domain::common::project_space::space_path;
 
 pub fn validate_space(fields: &ScreenFields, nodes: &[SpaceNode], required: bool) -> AppResult<()> {
     match fields.space_id.as_deref().filter(|id| !id.is_empty()) {

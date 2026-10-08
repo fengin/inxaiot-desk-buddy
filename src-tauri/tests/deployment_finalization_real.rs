@@ -128,6 +128,10 @@ async fn atomic_finalization_rejects_stale_fencing_allows_confirmed_takeover_and
         .bind(&mac)
         .execute(&workbench)
         .await?;
+        let mut confirmed_asset = inxaiot_desk_buddy_lib::infrastructure::workbench_aio::WorkbenchAioRepository::new(workbench.clone())
+            .list_snapshots().await?.remove(0);
+        confirmed_asset.platform_aio_id = Some("2108257198208651265".into());
+        confirmed_asset.name = "部署前旧名称不能覆盖已有资料".into();
         sqlx::query(
             "INSERT INTO aio_node_service_version \
              (mac_normalized, service_name, expected_image_name, expected_version) \
@@ -173,6 +177,7 @@ async fn atomic_finalization_rejects_stale_fencing_allows_confirmed_takeover_and
                 error_summary: None,
             },
             targets: vec![AtomicTargetFinalization {
+                asset: Some(confirmed_asset),
                 result: TargetFinalResult {
                     operation_id: operation.id.clone(),
                     resource_type: "aio".into(),
@@ -317,6 +322,10 @@ async fn atomic_finalization_rejects_stale_fencing_allows_confirmed_takeover_and
         ensure(row.try_get::<String, _>("management_state")? == "managed", "node state")?;
         ensure(row.try_get::<u64, _>("node_version")? == 2, "node version")?;
         ensure(row.try_get::<String, _>("lease_state")? == "released", "lease state")?;
+        let linked: (Option<String>, String) = sqlx::query_as("SELECT platform_aio_id,name FROM aio_node WHERE mac_normalized=?")
+            .bind(&mac).fetch_one(&workbench).await?;
+        ensure(linked.0.as_deref() == Some("2108257198208651265"), "confirmed platform ID was not saved")?;
+        ensure(linked.1 == "finalization-node", "existing asset metadata was overwritten")?;
         let services = sqlx::query_scalar::<_, String>(
             "SELECT service_name FROM aio_node_service_version WHERE mac_normalized = ? \
              ORDER BY service_name",
@@ -375,6 +384,9 @@ async fn verify_unchanged(
         row.try_get::<u64, _>("node_version")? == 1,
         "node version changed",
     )?;
+    let platform_id: Option<String> = sqlx::query_scalar("SELECT platform_aio_id FROM aio_node WHERE mac_normalized=?")
+        .bind(mac).fetch_one(pool).await?;
+    ensure(platform_id.is_none(), "platform ID changed before transaction commit")?;
     ensure(
         row.try_get::<String, _>("lease_state")? == "active",
         "lease changed",

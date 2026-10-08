@@ -162,8 +162,8 @@ const businessRouteMessage = computed(() => {
         <button class="side-link nav-parent" :class="{ active: route.path.startsWith('/aio') }" type="button" @click="toggleAioNavigation">
           <Boxes :size="18" /><span>一体机管理</span><ChevronRight class="nav-parent__arrow" :class="{ expanded: aioExpanded }" :size="15" />
         </button>
-        <div v-show="aioExpanded && !preferences.navigationCollapsed" class="sub-nav" :data-disabled="!projects.businessMenuEnabled">
-          <router-link to="/aio/nodes" class="sub-link" :aria-disabled="!projects.businessMenuEnabled" @click="!projects.businessMenuEnabled && $event.preventDefault()"><span>一体机列表</span></router-link>
+        <div v-show="aioExpanded && !preferences.navigationCollapsed" class="sub-nav" :data-disabled="!projects.allowsAccess('platform') && !projects.businessMenuEnabled">
+          <router-link to="/aio/nodes" class="sub-link" :aria-disabled="!projects.allowsAccess('platform')" @click="!projects.allowsAccess('platform') && $event.preventDefault()"><span>一体机列表</span></router-link>
           <router-link to="/aio/release" class="sub-link" :aria-disabled="!projects.businessMenuEnabled" @click="!projects.businessMenuEnabled && $event.preventDefault()"><span>发布参数</span></router-link>
           <router-link to="/aio/operations" class="sub-link" :aria-disabled="!projects.businessMenuEnabled" @click="!projects.businessMenuEnabled && $event.preventDefault()"><span>部署升级</span></router-link>
         </div>

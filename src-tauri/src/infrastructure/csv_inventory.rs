@@ -10,6 +10,7 @@ use crate::domain::aio::inventory::{InventoryValues, ParsedInventoryRow, validat
 const MAX_INVENTORY_BYTES: u64 = 10 * 1024 * 1024;
 const REQUIRED_HEADERS: &[&str] = &["name", "ip", "mac"];
 const OPTIONAL_HEADERS: &[&str] = &[
+    "spacePath",
     "buildingId",
     "regionId",
     "addrAlias",
@@ -64,7 +65,16 @@ pub fn parse_inventory_text(text: &str) -> AppResult<Vec<ParsedInventoryRow>> {
 fn build_header_index(headers: &StringRecord) -> AppResult<HashMap<String, usize>> {
     let mut index = HashMap::new();
     for (position, raw) in headers.iter().enumerate() {
-        let name = raw.trim().trim_start_matches('﻿').to_string();
+        let raw = raw.trim().trim_start_matches('﻿');
+        let name = match raw.to_lowercase().as_str() {
+            "名称" | "一体机名称" | "name" => "name",
+            "ip" | "ip地址" | "ip 地址" => "ip",
+            "mac" | "mac地址" | "mac 地址" => "mac",
+            "空间路径" | "空间位置" | "spacepath" => "spacePath",
+            "位置" | "安装位置" | "详细位置" | "addralias" => "addrAlias",
+            "备注" => "remark",
+            _ => raw,
+        }.to_string();
         if name.is_empty() {
             continue;
         }
@@ -114,6 +124,7 @@ fn parse_row(
         ip: value(record, headers, "ip"),
         mac: value(record, headers, "mac"),
         building_id: optional_value(record, headers, "buildingId"),
+        space_path: optional_value(record, headers, "spacePath"),
         region_id: optional_value(record, headers, "regionId"),
         addr_alias: optional_value(record, headers, "addrAlias"),
         floor: optional_value(record, headers, "floor"),
@@ -165,6 +176,15 @@ mod tests {
         assert_eq!(rows[0].values.location.as_deref(), Some("A,1F"));
         assert_eq!(rows[0].mac_normalized.as_deref(), Some("AABBCCDDEE01"));
         assert!(rows[0].errors.is_empty());
+    }
+
+    #[test]
+    fn csv_supports_screen_style_space_paths_and_chinese_headers() {
+        let rows = parse_inventory_text("名称,IP,MAC,空间路径,备注\n一体机,192.0.2.7,AA:BB:CC:DD:EE:01,项目/一号楼/一层,测试\n").unwrap();
+        assert_eq!(rows[0].values.space_path.as_deref(), Some("项目/一号楼/一层"));
+        assert!(rows[0].values.building_id.is_none());
+        assert!(rows[0].errors.is_empty());
+        assert!(parse_inventory_text("name,名称,ip,mac\na,b,192.0.2.7,AABBCCDDEE01\n").is_err());
     }
 
     #[test]

@@ -96,19 +96,30 @@ impl ResourceLeaseRepository {
     }
 
     pub async fn acquire_many(&self, requests: Vec<LeaseRequest>) -> FormalResult<Vec<LeaseGrant>> {
-        self.acquire_many_with_policy(requests, false, false).await
+        self.acquire_many_with_policy(requests, false, false, false).await
     }
 
     pub async fn force_acquire_many(
         &self,
         requests: Vec<LeaseRequest>,
     ) -> FormalResult<Vec<LeaseGrant>> {
-        self.acquire_many_with_policy(requests, true, false).await
+        self.acquire_many_with_policy(requests, true, false, false).await
+    }
+
+    /// 用户确认接手后发起的新操作；不同于旧任务补写结果，不沿用旧操作编号。
+    pub async fn takeover_for_new_operation(&self, requests: Vec<LeaseRequest>) -> FormalResult<Vec<LeaseGrant>> {
+        for request in &requests {
+            let state: Option<String> = sqlx::query_scalar("SELECT state FROM operation_record WHERE id=? AND domain_type=?")
+                .bind(&request.operation_id).bind(&request.domain_type).fetch_optional(&self.pool).await
+                .map_err(|error| map_error("核对接手操作", error))?;
+            if state.as_deref() != Some("running") { return Err(FormalError::Conflict("新操作尚未开始，不能接手".into())); }
+        }
+        self.acquire_many_with_policy(requests, true, false, true).await
     }
 
     /// 只恢复同一操作自己的占用，不能借恢复覆盖其他操作。
     pub async fn recover_same_operation(&self, requests: Vec<LeaseRequest>) -> FormalResult<Vec<LeaseGrant>> {
-        self.acquire_many_with_policy(requests, true, true).await
+        self.acquire_many_with_policy(requests, true, true, false).await
     }
 
     async fn acquire_many_with_policy(
@@ -116,6 +127,7 @@ impl ResourceLeaseRepository {
         requests: Vec<LeaseRequest>,
         force_takeover: bool,
         same_operation_only: bool,
+        new_user_operation: bool,
     ) -> FormalResult<Vec<LeaseGrant>> {
         if requests.is_empty() {
             return Err(FormalError::InvalidConfig("租约目标不能为空".into()));
@@ -135,7 +147,7 @@ impl ResourceLeaseRepository {
         })?;
         let mut grants = Vec::with_capacity(unique.len());
         for (_, request) in unique {
-            match acquire_one(&mut transaction, &request, force_takeover, same_operation_only).await? {
+            match acquire_one(&mut transaction, &request, force_takeover, same_operation_only, new_user_operation).await? {
                 LeaseOutcome::Acquired(grant) => grants.push(grant),
                 LeaseOutcome::Busy {
                     resource_type,
@@ -239,6 +251,7 @@ async fn acquire_one(
     request: &LeaseRequest,
     force_takeover: bool,
     same_operation_only: bool,
+    new_user_operation: bool,
 ) -> FormalResult<LeaseOutcome> {
     validate_request(request)?;
     // 先以唯一键建立/锁定记录，再读取。对不存在的键先 SELECT FOR UPDATE
@@ -298,7 +311,7 @@ async fn acquire_one(
                 operation_id,
             });
         }
-        if force_takeover && operation_id != request.operation_id {
+        if force_takeover && operation_id != request.operation_id && !new_user_operation {
             let operation_state = sqlx::query_scalar::<_, String>(
                 "SELECT state FROM operation_record WHERE id = ? FOR UPDATE",
             )

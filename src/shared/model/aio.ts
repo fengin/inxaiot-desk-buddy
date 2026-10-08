@@ -67,6 +67,8 @@ export interface AioNodeListItem {
   name: string;
   ip: string;
   location: string;
+  buildingId?: string;
+  spacePath?: string;
   managementState: string;
   deployLabel: string;
   platformState: "online" | "offline" | "unknown";
@@ -101,6 +103,7 @@ export interface PlatformRecordIssue {
 }
 
 export interface AioNodeListPage {
+  metadataWarning?: string | null;
   items: AioNodeListItem[];
   total: number;
   page: number;
@@ -142,6 +145,7 @@ export interface LocalCheckRecord {
 }
 
 export interface AioNodeDetail {
+  metadataWarning?: string | null;
   node: AioNodeListItem;
   platform?: PlatformNodeSnapshot;
   versions: ServiceVersionRecord[];
@@ -154,6 +158,7 @@ export interface InventoryValues {
   ip: string;
   mac: string;
   buildingId?: string;
+  spacePath?: string;
   regionId?: string;
   addrAlias?: string;
   floor?: string;
@@ -210,8 +215,17 @@ export interface ImportSelection {
 
 export interface InventoryApplyOutcome {
   result: {
+    /** 本机导入会话编号，不是平台操作记录编号。 */
     operationId: string;
     appliedCount: number;
   };
   localSessionFinalized: boolean;
+}
+
+export interface UpdateAioNodeInput {
+  mac: string;
+  expectedVersion: number;
+  platformBase?: PlatformNodeSnapshot | null;
+  values: InventoryValues;
+  forceTakeover?: boolean;
 }

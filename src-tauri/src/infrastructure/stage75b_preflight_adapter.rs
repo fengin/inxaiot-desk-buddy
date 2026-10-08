@@ -48,7 +48,6 @@ use crate::infrastructure::remote::RusshConnector;
 use crate::infrastructure::remote::observed::ObservedConnector;
 use crate::infrastructure::stage75_adapter::stored_release_secret_values;
 use crate::infrastructure::task_data_lifecycle::TaskDataLifecycle;
-use crate::infrastructure::workbench_aio::WorkbenchAioRepository;
 
 pub struct Stage75BPreflightAdapter<'a> {
     state: &'a FormalAppState,
@@ -201,8 +200,7 @@ impl Stage75BPreflightAdapter<'_> {
             }
         };
         checks.push(local_endpoint_checks(&profile.values).await);
-        let nodes = match WorkbenchAioRepository::new(pools.workbench.clone())
-            .list_snapshots()
+        let nodes = match crate::infrastructure::aio_inventory_source::deployment_nodes(self.state, project_id)
             .await
         {
             Ok(values) => values

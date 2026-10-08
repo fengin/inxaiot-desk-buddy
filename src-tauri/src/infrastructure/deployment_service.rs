@@ -176,7 +176,7 @@ async fn launch_deployment_inner(
         secret_values,
         cancellation: cancellation.clone(),
     };
-    ExecutionCoordinator.run(&lifecycle, cancellation).await
+    ExecutionCoordinator.run(&lifecycle, cancellation).await.map(|summary| summary.execution)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -453,6 +453,7 @@ async fn prepare_deployment(
         prepared.insert(
             mac.clone(),
             PreparedNode {
+                asset: node.clone(),
                 target,
                 auth,
                 files: RemoteDeploymentFiles {
@@ -485,7 +486,7 @@ async fn prepare_deployment(
                     building_id: node
                         .building_id
                         .as_deref()
-                        .and_then(|value| value.parse().ok()),
+                        .and_then(|value| value.parse().ok()).or(Some(0)),
                     addr_alias: node.addr_alias.clone(),
                 },
             },
@@ -899,6 +900,7 @@ async fn validate_fencing(
 
 #[derive(Clone)]
 struct PreparedNode {
+    asset: crate::domain::aio::inventory::WorkbenchNodeSnapshot,
     target: RemoteTarget,
     auth: RemoteAuth,
     files: RemoteDeploymentFiles,
@@ -928,9 +930,15 @@ struct AioExecutionLifecycle<'a> {
     cancellation: CancellationToken,
 }
 
+#[derive(Clone)]
+struct AioExecutionSummary {
+    execution: DeploymentExecutionSummary,
+    assets: HashMap<String, crate::domain::aio::inventory::WorkbenchNodeSnapshot>,
+}
+
 impl ExecutionLifecyclePort for AioExecutionLifecycle<'_> {
     type Handle = crate::infrastructure::deployment_control::DeploymentControlHandle;
-    type Summary = DeploymentExecutionSummary;
+    type Summary = AioExecutionSummary;
     type Heartbeat = crate::infrastructure::deployment_control::DeploymentHeartbeatGuard;
 
     async fn start(&self) -> AppResult<Self::Handle> {
@@ -1027,6 +1035,16 @@ impl ExecutionLifecyclePort for AioExecutionLifecycle<'_> {
         handle: &Self::Handle,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> AppResult<Self::Summary> {
+        // 取得共享占用后再次读取资料，防止检查结束后编辑了地址却仍按旧地址部署。
+        let current = crate::infrastructure::aio_inventory_source::deployment_nodes(self.state, self.local_project_id).await?;
+        for node in self.prepared.values() {
+            let actual = current.iter().find(|item| item.mac_normalized == node.asset.mac_normalized);
+            if actual.is_none_or(|item| item.version != node.asset.version || item.name != node.asset.name
+                || item.ip != node.asset.ip || item.building_id != node.asset.building_id || item.addr_alias != node.asset.addr_alias
+                || item.platform_aio_id != node.asset.platform_aio_id) {
+                return Err(AppError::Conflict(format!("{} 的资料或注册状态已变化，请重新检查后部署", node.asset.name)));
+            }
+        }
         let check_started_at = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
             .map_err(|_| AppError::InvalidConfig("生成服务检查时间失败".into()))?;
@@ -1034,6 +1052,16 @@ impl ExecutionLifecyclePort for AioExecutionLifecycle<'_> {
         for node in prepared.values_mut() {
             node.config.operation_id = handle.operation_id.clone();
         }
+        let registration = if self.plan.mode == DeploymentMode::FirstDeploy {
+            let pool = crate::infrastructure::project_context::project_platform_write_pool(self.state, self.local_project_id).await?;
+            let read_source = crate::infrastructure::project_context::database_source_id(&self.pools.platform).await?;
+            if crate::infrastructure::project_context::database_source_id(&pool).await? != read_source {
+                return Err(AppError::Conflict("平台注册读写连接不一致".into()));
+            }
+            let shared_schema = sqlx::query_scalar::<_, String>("SELECT DATABASE()").fetch_one(&self.pools.workbench).await
+                .map_err(|error| AppError::database("读取工作台数据库名", &error))?;
+            Some(crate::infrastructure::aio_registration::RegistrationCompletion { pool, shared_schema })
+        } else { None };
         let progress_guard = TaskProgressGuard::start_scaled(
             handle.local_task_id.clone(),
             self.state.task_repository.clone(),
@@ -1048,6 +1076,7 @@ impl ExecutionLifecyclePort for AioExecutionLifecycle<'_> {
             self.plan.clone(),
             self.pools.workbench.clone(),
             prepared,
+            registration,
             handle,
             cancellation,
             progress_sink.clone(),
@@ -1152,7 +1181,8 @@ impl ExecutionLifecyclePort for AioExecutionLifecycle<'_> {
             self.state,
             self.local_project_id,
             handle.clone(),
-            summary.clone(),
+            summary.execution.clone(),
+            summary.assets.clone(),
         )
         .await
     }
@@ -1175,11 +1205,16 @@ async fn execute_prepared_targets(
     plan: DeploymentPlan,
     workbench_pool: sqlx::MySqlPool,
     prepared: HashMap<String, PreparedNode>,
+    registration: Option<crate::infrastructure::aio_registration::RegistrationCompletion>,
     handle: &crate::infrastructure::deployment_control::DeploymentControlHandle,
     cancellation: tokio_util::sync::CancellationToken,
     progress_sink: Arc<TaskProgressReporter>,
     connector: ObservedConnector<RusshConnector>,
-) -> AppResult<DeploymentExecutionSummary> {
+) -> AppResult<AioExecutionSummary> {
+    // 注册生成的平台 ID 属于执行结果，不能继续使用部署前尚未注册的资料快照。
+    let confirmed_assets = Arc::new(tokio::sync::Mutex::new(
+        prepared.iter().map(|(mac, node)| (mac.clone(), node.asset.clone())).collect::<HashMap<_, _>>()
+    ));
     let lease_by_mac = Arc::new(
         handle
             .leases
@@ -1191,11 +1226,14 @@ async fn execute_prepared_targets(
     let prepared = Arc::new(prepared);
     let global_slots = global_remote_node_slots();
     let plan_for_worker = plan.clone();
-    execute_deployment_targets(plan, cancellation.clone(), {
+    let execution = execute_deployment_targets(plan, cancellation.clone(), {
         let prepared = prepared.clone();
         let lease_by_mac = lease_by_mac.clone();
         let progress_sink = progress_sink.clone();
+        let confirmed_assets = confirmed_assets.clone();
         move |mac, cancellation| {
+            let registration = registration.clone();
+            let confirmed_assets = confirmed_assets.clone();
             let prepared = prepared.clone();
             let lease_by_mac = lease_by_mac.clone();
             let workbench_pool = workbench_pool.clone();
@@ -1266,16 +1304,30 @@ async fn execute_prepared_targets(
                             message_code: "DEVICE_REGISTRATION_STARTED".into(),
                             message: Some("调用一体机本地注册接口".into()),
                         })?;
-                        DeviceApiClient::new(
+                        let device = DeviceApiClient::new(
                             &format!("http://{}:6002", node.target.host),
                             &node.registration.auth_key,
-                        )?
-                        .register_if_missing_with_retry(
-                            &node.registration,
+                        )?;
+                        device.register_if_missing_with_retry(
+                            &crate::infrastructure::aio_registration::compatible_payload(&node.registration),
                             30,
                             Duration::from_secs(2),
                         )
                         .await?;
+                        device.wait_registration_sync(&mac, &cancellation).await?;
+                        let completion = registration.as_ref().ok_or_else(|| AppError::InvalidConfig("缺少平台注册核对连接".into()))?;
+                        for attempt in 0..5 {
+                            match completion.confirm(&node.asset, &lease).await {
+                                Ok(platform_id) => {
+                                    let mut assets = confirmed_assets.lock().await;
+                                    let asset = assets.get_mut(&mac).ok_or_else(|| AppError::NotFound(format!("缺少部署结果资料：{mac}")))?;
+                                    asset.platform_aio_id = Some(platform_id);
+                                    break;
+                                }
+                                Err(AppError::NotFound(_)) if attempt < 4 => tokio::time::sleep(Duration::from_millis(400)).await,
+                                Err(error) => return Err(error),
+                            }
+                        }
                         progress_sink.emit(DeploymentProgressEvent {
                             mac: mac.clone(),
                             stage: "register".into(),
@@ -1339,7 +1391,9 @@ async fn execute_prepared_targets(
             }
         }
     })
-    .await
+    .await?;
+    let assets = confirmed_assets.lock().await.clone();
+    Ok(AioExecutionSummary { execution, assets })
 }
 
 fn materialize_artifact_snapshot(

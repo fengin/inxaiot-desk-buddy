@@ -1,7 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
-use crate::infrastructure::client_instance::application_instance_id;
 use sqlx::Row;
 use time::OffsetDateTime;
 
@@ -22,12 +21,12 @@ use crate::domain::aio::service_check::NodeServiceCheckSnapshot;
 use crate::formal::app_state::FormalAppState;
 use crate::infrastructure::csv_inventory::parse_inventory_path;
 use crate::infrastructure::local_sqlite::aio_import_repository::AioImportRepository;
+use crate::infrastructure::local_sqlite::aio_node_repository::LocalAioRepository;
+use crate::infrastructure::aio_inventory_source::merge_sources;
 use crate::infrastructure::platform_aio::PlatformAioRepository;
-use crate::infrastructure::project_context::project_aio_database as project_database;
+use crate::infrastructure::project_context::project_pools as project_database;
 use crate::infrastructure::service_check_repository::ServiceCheckRepository;
-use crate::infrastructure::workbench_aio::{
-    ApplyInventoryWrite, InventoryAssetWrite, WorkbenchAioRepository,
-};
+use crate::infrastructure::workbench_aio::WorkbenchAioRepository;
 
 pub struct AioAssetsService<'a> {
     state: &'a FormalAppState,
@@ -40,6 +39,9 @@ impl<'a> AioAssetsService<'a> {
 }
 
 impl AioAssetsPort for AioAssetsService<'_> {
+    async fn update_node(&self, project: &str, input: crate::application::aio_assets::UpdateAioNodeInput) -> AppResult<()> {
+        crate::infrastructure::aio_edit::update(self.state, project, input).await
+    }
     async fn list_nodes(
         &self,
         local_project_id: &str,
@@ -106,20 +108,22 @@ pub async fn list_aio_nodes(
     let platform_repository = PlatformAioRepository::new(pools.platform.clone());
     let check_repository =
         ServiceCheckRepository::new(state.local_store.pool().clone(), local_project_id);
-    let (workbench, platform, versions, operations, checks) = tokio::try_join!(
-        workbench_repository.list_snapshots(),
+    let ((workbench, versions, operations, metadata_warning), platform, checks) = tokio::try_join!(
+        async { Ok::<_, AppError>(shared_metadata(&workbench_repository).await) },
         platform_repository.list_all(),
-        workbench_repository.list_service_versions(),
-        workbench_repository.list_last_operations(),
         check_repository.list(),
     )?;
+    let local = LocalAioRepository::new(state.local_store.pool().clone()).list(local_project_id).await?;
+    crate::infrastructure::aio_inventory_source::retire_registered(state, local_project_id, &local, &platform.nodes).await?;
+    let workbench = merge_sources(&local, &workbench, &platform.nodes);
     let mut items = build_node_items(&workbench, &platform.nodes, &versions, &operations, &checks);
+    apply_space_labels(&mut items, &pools.platform).await;
     let stats = calculate_stats(&items);
     let keyword = query.search.unwrap_or_default().trim().to_lowercase();
     let state_filter = query.state.unwrap_or_else(|| "all".into());
     items.retain(|item| {
         let keyword_matches = keyword.is_empty()
-            || [&item.name, &item.ip, &item.mac, &item.location]
+            || [&item.name, &item.ip, &item.mac, &item.location, &item.space_path]
                 .iter()
                 .any(|value| value.to_lowercase().contains(&keyword));
         let state_matches = state_filter == "all"
@@ -144,6 +148,7 @@ pub async fn list_aio_nodes(
         .await?
         .map(|session| session.id);
     Ok(AioNodeListPage {
+        metadata_warning,
         items: paged,
         total,
         page,
@@ -166,18 +171,19 @@ pub async fn get_aio_node_detail(
     let platform_repository = PlatformAioRepository::new(pools.platform.clone());
     let check_repository =
         ServiceCheckRepository::new(state.local_store.pool().clone(), local_project_id);
-    let (workbench, platform, versions, operations, check) = tokio::try_join!(
-        workbench_repository.list_snapshots(),
+    let ((workbench, versions, operations, metadata_warning), platform, check) = tokio::try_join!(
+        async { Ok::<_, AppError>(shared_metadata(&workbench_repository).await) },
         platform_repository.list_all(),
-        workbench_repository.list_service_versions(),
-        workbench_repository.list_last_operations(),
         check_repository.get(mac.normalized()),
     )?;
+    let local = LocalAioRepository::new(state.local_store.pool().clone()).list(local_project_id).await?;
+    crate::infrastructure::aio_inventory_source::retire_registered(state, local_project_id, &local, &platform.nodes).await?;
+    let workbench = merge_sources(&local, &workbench, &platform.nodes);
     let service_checks = check
         .into_iter()
         .map(|check| (mac.normalized().to_string(), check))
         .collect();
-    let node = build_node_items(
+    let mut node = build_node_items(
         &workbench,
         &platform.nodes,
         &versions,
@@ -187,6 +193,7 @@ pub async fn get_aio_node_detail(
     .into_iter()
     .find(|item| item.mac_normalized == mac.normalized())
     .ok_or_else(|| AppError::NotFound(format!("一体机不存在：{}", mac.display())))?;
+    apply_space_labels(std::slice::from_mut(&mut node), &pools.platform).await;
     let platform_node = platform
         .nodes
         .into_iter()
@@ -195,6 +202,7 @@ pub async fn get_aio_node_detail(
     let last_operation = operations.get(mac.normalized()).cloned();
     let checks = latest_local_checks(state, local_project_id, mac.normalized()).await?;
     Ok(AioNodeDetail {
+        metadata_warning,
         node,
         platform: platform_node,
         versions: node_versions,
@@ -204,6 +212,13 @@ pub async fn get_aio_node_detail(
             .find(|check| check.step_code.to_ascii_lowercase().contains("ssh"))
             .cloned(),
     })
+}
+
+async fn shared_metadata(repository: &WorkbenchAioRepository) -> (Vec<WorkbenchNodeSnapshot>, Vec<ServiceVersionRecord>, HashMap<String, OperationRecordSummary>, Option<String>) {
+    match tokio::try_join!(repository.list_snapshots(), repository.list_service_versions(), repository.list_last_operations()) {
+        Ok((nodes, versions, operations)) => (nodes, versions, operations, None),
+        Err(_) => (Vec::new(), Vec::new(), HashMap::new(), Some("工作台部署记录暂未读取，当前显示本机清单和平台资料；请检查项目连接或工作台数据库结构。".into())),
+    }
 }
 
 pub async fn preview_inventory_import(
@@ -221,15 +236,16 @@ pub async fn preview_inventory_import(
             "当前项目已有未处理导入预览，请继续处理或先放弃".into(),
         ));
     }
-    let rows = parse_inventory_path(file_path)?;
+    let mut rows = parse_inventory_path(file_path)?;
     let pools = project_database(state, local_project_id).await?;
-    let workbench_repository = WorkbenchAioRepository::new(pools.workbench.clone());
+    resolve_import_spaces(&pools.platform, &mut rows).await?;
+    let workbench_repository = LocalAioRepository::new(state.local_store.pool().clone());
     let platform_repository = PlatformAioRepository::new(pools.platform.clone());
     let (workbench, platform) = tokio::try_join!(
-        workbench_repository.list_snapshots(),
+        workbench_repository.list(local_project_id),
         platform_repository.list_all(),
     )?;
-    let items = reconcile_inventory(rows, &workbench, &platform.nodes);
+    let items = reconcile_local_import(rows, &workbench, &platform.nodes);
     let file_name = file_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -266,15 +282,19 @@ pub async fn preview_aio_node_create(
     if repository.latest_open_for_project(local_project_id).await?.is_some() {
         return Err(AppError::Conflict("当前项目有未处理的导入预览，请先处理或放弃后再新增一体机".into()));
     }
-    let row = validate_inventory_values(1, values);
+    let mut row = validate_inventory_values(1, values);
     if !row.errors.is_empty() {
         return Err(AppError::InvalidConfig(row.errors.join("；")));
     }
     let pools = project_database(state, local_project_id).await?;
-    let workbench_repository = WorkbenchAioRepository::new(pools.workbench.clone());
+    resolve_import_spaces(&pools.platform, std::slice::from_mut(&mut row)).await?;
+    if !row.errors.is_empty() {
+        return Err(AppError::InvalidConfig(row.errors.join("；")));
+    }
+    let workbench_repository = LocalAioRepository::new(state.local_store.pool().clone());
     let platform_repository = PlatformAioRepository::new(pools.platform.clone());
     let (workbench, platform) = tokio::try_join!(
-        workbench_repository.list_snapshots(),
+        workbench_repository.list(local_project_id),
         platform_repository.list_all(),
     )?;
     let items = prepare_node_create(row, &workbench, &platform.nodes)?;
@@ -283,12 +303,27 @@ pub async fn preview_aio_node_create(
     Ok(InventoryPreview { session, platform_issues: platform.issues })
 }
 
+async fn resolve_import_spaces(pool: &sqlx::MySqlPool, rows: &mut [ParsedInventoryRow]) -> AppResult<()> {
+    let needs_directory = rows.iter().any(|row| row.values.space_path.is_some() || row.values.building_id.as_deref().is_some_and(|id| !id.is_empty() && id != "0"));
+    let spaces = if needs_directory { crate::infrastructure::project_spaces::read(pool, None).await? } else { Vec::new() };
+    let paths = crate::domain::common::project_space::space_paths(&spaces);
+    for row in rows {
+        if let Err(error) = crate::domain::aio::space::resolve_inventory_space_in_directory(&mut row.values, &paths) {
+            row.errors.push(format!("第 {} 行：{}", row.row_number, error));
+        }
+    }
+    Ok(())
+}
+
 fn prepare_node_create(
     row: ParsedInventoryRow,
     workbench: &[WorkbenchNodeSnapshot],
     platform: &[PlatformNodeSnapshot],
 ) -> AppResult<Vec<ReconciledImportItem>> {
-    let items = reconcile_inventory(vec![row], workbench, platform);
+    if platform.iter().any(|node| Some(&node.mac_normalized) == row.mac_normalized.as_ref()) {
+        return Err(AppError::Conflict("该一体机已在平台注册，无需重复新增；请在详情中编辑平台资料".into()));
+    }
+    let items = reconcile_local_import(vec![row], workbench, platform);
     let item = &items[0];
     match item.classification {
         ImportClassification::NewPending => {}
@@ -311,6 +346,17 @@ fn prepare_node_create(
         ImportClassification::Invalid => return Err(AppError::InvalidConfig(item.errors.join("；"))),
     }
     Ok(items)
+}
+
+fn reconcile_local_import(rows: Vec<ParsedInventoryRow>, local: &[WorkbenchNodeSnapshot], platform: &[PlatformNodeSnapshot]) -> Vec<ReconciledImportItem> {
+    let mut items = reconcile_inventory(rows, local, platform);
+    for item in &mut items {
+        if item.platform_aio_id.is_some() && item.errors.is_empty() {
+            item.classification = ImportClassification::ExistingUnchanged;
+            item.selected = false;
+        }
+    }
+    items
 }
 
 pub async fn update_inventory_selection(
@@ -341,121 +387,39 @@ pub async fn apply_inventory_import(
     local_project_id: &str,
     session_id: &str,
 ) -> AppResult<InventoryApplyOutcome> {
-    let local_repository = AioImportRepository::new(state.local_store.pool().clone());
-    let session = local_repository.get(session_id).await?;
+    let sessions = AioImportRepository::new(state.local_store.pool().clone());
+    let session = sessions.get(session_id).await?;
     ensure_session_project(&session, local_project_id)?;
-    if session.state != "preview" {
-        return Err(AppError::Conflict("导入会话已经结束".into()));
-    }
-    let selected = session
-        .items
-        .iter()
-        .filter(|item| item.selected)
-        .collect::<Vec<_>>();
-    if selected.is_empty() {
-        return Err(AppError::InvalidConfig(
-            "请至少选择一行可应用的一体机".into(),
-        ));
-    }
+    if session.state != "preview" { return Err(AppError::Conflict("导入会话已经结束".into())); }
+    let selected = session.items.iter().filter(|item| item.selected).collect::<Vec<_>>();
+    if selected.is_empty() { return Err(AppError::InvalidConfig("请至少选择一行可应用的一体机".into())); }
     let pools = project_database(state, local_project_id).await?;
-    let workbench_repository = WorkbenchAioRepository::new(pools.workbench.clone());
-    let platform_repository = PlatformAioRepository::new(pools.platform.clone());
-    let (current_workbench, current_platform) = tokio::try_join!(
-        workbench_repository.list_snapshots(),
-        platform_repository.list_all(),
-    )?;
-    let refreshed = reconcile_inventory(
-        session
-            .items
-            .iter()
-            .map(|item| ParsedInventoryRow {
-                row_number: item.row_number,
-                values: item.values.clone(),
-                mac_normalized: item.mac_normalized.clone(),
-                errors: item.errors.clone(),
-            })
-            .collect(),
-        &current_workbench,
-        &current_platform.nodes,
-    );
-    let refreshed_by_row = refreshed
-        .iter()
-        .map(|item| (item.row_number, item))
-        .collect::<HashMap<_, _>>();
-    let workbench_by_mac = current_workbench
-        .iter()
-        .map(|node| (node.mac_normalized.as_str(), node))
-        .collect::<HashMap<_, _>>();
-    let mut assets = Vec::with_capacity(selected.len());
-    for original in selected {
-        let item = refreshed_by_row.get(&original.row_number).ok_or_else(|| {
-            AppError::Conflict(format!("第 {} 行在重新对账后不存在", original.row_number))
-        })?;
-        if !item.classification.can_apply() {
-            return Err(AppError::Conflict(format!(
-                "第 {} 行在预览后发生变化，请重新预览",
-                item.row_number
-            )));
-        }
-        if item.workbench_version != original.workbench_version
-            || item.platform_aio_id != original.platform_aio_id
-            || item.platform_fingerprint != original.platform_fingerprint
+    let local = LocalAioRepository::new(state.local_store.pool().clone());
+    let current = local.list(local_project_id).await?;
+    let platform = PlatformAioRepository::new(pools.platform.clone()).list_all().await?;
+    let mut rows = selected.iter().map(|item| ParsedInventoryRow {
+        row_number: item.row_number, values: item.values.clone(),
+        mac_normalized: item.mac_normalized.clone(), errors: item.errors.clone(),
+    }).collect::<Vec<_>>();
+    resolve_import_spaces(&pools.platform, &mut rows).await?;
+    let checked = reconcile_local_import(rows, &current, &platform.nodes);
+    let mut records = Vec::new();
+    for item in checked {
+        let original = selected.iter().find(|old| old.row_number == item.row_number)
+            .ok_or_else(|| AppError::Conflict("导入预览已经变化，请重新选择".into()))?;
+        if !matches!(item.classification, ImportClassification::NewPending | ImportClassification::ExistingChanged)
+            || item.workbench_version != original.workbench_version || item.platform_aio_id.is_some()
         {
-            return Err(AppError::Conflict(format!(
-                "第 {} 行对应的工作台或平台数据已变化，请重新预览",
-                item.row_number
-            )));
+            return Err(AppError::Conflict(format!("第 {} 行资料或注册状态已变化，请重新预览；已注册一体机请在详情中编辑", item.row_number)));
         }
-        let mac = MacAddress::parse(
-            item.mac_normalized
-                .as_deref()
-                .ok_or_else(|| AppError::InvalidConfig("导入行缺少规范化 MAC".into()))?,
-        )?;
-        let current = workbench_by_mac.get(mac.normalized()).copied();
-        let (management_state, source) = asset_state(item, current);
-        assets.push(InventoryAssetWrite {
-            mac_normalized: mac.normalized().into(),
-            display_mac: mac.display(),
-            name: item.values.name.clone(),
-            ip: item.values.ip.clone(),
-            building_id: item.values.building_id.clone(),
-            region_id: item.values.region_id.clone(),
-            addr_alias: item.values.addr_alias.clone(),
-            floor: item.values.floor.clone(),
-            location: item.values.location.clone(),
-            remark: item.values.remark.clone(),
-            platform_aio_id: item.platform_aio_id.clone(),
-            management_state,
-            source,
-            expected_version: item.workbench_version,
-        });
+        records.push((item.values, item.workbench_version));
     }
-    let operator_name = project_operator(state, local_project_id).await?;
-    let result = workbench_repository
-        .apply_inventory(ApplyInventoryWrite {
-            file_name: session.file_name.clone(),
-            operator_name,
-            instance_id: application_instance_id().into(),
-            classification_counts: serde_json::to_value(&session.counts)
-                .map_err(|_| AppError::InvalidConfig("导入统计无法序列化".into()))?,
-            assets,
-        })
-        .await?;
-    let local_session_finalized = match local_repository.mark_applied(session_id).await {
-        Ok(_) => true,
-        Err(error) => {
-            tracing::error!(
-                session_id,
-                operation_id = result.operation_id,
-                error = ?crate::core::log_safety::safe_error(&error),
-                "project import committed but local session finalization failed"
-            );
-            false
-        }
-    };
+    local.apply_import(local_project_id, session_id, &records).await?;
     Ok(InventoryApplyOutcome {
-        result,
-        local_session_finalized,
+        result: crate::domain::aio::assets::InventoryApplyResult {
+            operation_id: session_id.into(), applied_count: records.len() as u32,
+        },
+        local_session_finalized: true,
     })
 }
 
@@ -530,6 +494,10 @@ fn build_node_items(
                     .or_else(|| platform_node.map(|node| node.ip.clone()))
                     .unwrap_or_default(),
                 location: display_location(workbench_node, platform_node),
+                space_path: String::new(),
+                building_id: platform_node.and_then(|node| node.building_id.clone())
+                    .or_else(|| workbench_node.and_then(|node| node.building_id.clone()))
+                    .filter(|id| !id.is_empty() && id != "0"),
                 deploy_label: deploy_label(&management_state).into(),
                 management_state,
                 platform_state,
@@ -572,6 +540,18 @@ fn build_node_items(
             .then_with(|| left.mac_normalized.cmp(&right.mac_normalized))
     });
     items
+}
+
+async fn apply_space_labels(items: &mut [AioNodeListItem], pool: &sqlx::MySqlPool) {
+    if !items.iter().any(|item| item.building_id.is_some()) { return; }
+    // 目录暂不可用不影响查看资产；实际选空间和保存仍需实时校验。
+    if let Ok(spaces) = crate::infrastructure::project_spaces::read(pool, None).await {
+        for item in items {
+            if let Some(path) = item.building_id.as_deref().and_then(|id| crate::domain::common::project_space::path_text(&spaces, id)) {
+                item.space_path = path;
+            }
+        }
+    }
 }
 
 fn asset_conflicts(
@@ -701,11 +681,9 @@ fn display_location(
             node.location
                 .clone()
                 .or_else(|| node.addr_alias.clone())
-                .or_else(|| node.floor.clone())
         })
         .or_else(|| platform.and_then(|node| node.addr_alias.clone()))
-        .or_else(|| platform.and_then(|node| node.building_id.clone()))
-        .unwrap_or_else(|| "未填写".into())
+        .unwrap_or_default()
 }
 
 fn platform_updated_at(node: &PlatformNodeSnapshot) -> String {
@@ -729,36 +707,6 @@ fn platform_updated_at(node: &PlatformNodeSnapshot) -> String {
         .unwrap_or_else(|| raw.to_string())
 }
 
-fn asset_state(
-    item: &ReconciledImportItem,
-    current: Option<&WorkbenchNodeSnapshot>,
-) -> (String, String) {
-    match item.classification {
-        ImportClassification::NewPending => ("pending".into(), "import".into()),
-        ImportClassification::PlatformExisting => ("platform_existing".into(), "merged".into()),
-        ImportClassification::ExistingChanged => {
-            if item.platform_aio_id.is_some() {
-                (
-                    current
-                        .map(|node| node.management_state.clone())
-                        .filter(|state| state == "managed")
-                        .unwrap_or_else(|| "platform_existing".into()),
-                    "merged".into(),
-                )
-            } else {
-                (
-                    current
-                        .map(|node| node.management_state.clone())
-                        .unwrap_or_else(|| "pending".into()),
-                    current
-                        .map(|node| node.source.clone())
-                        .unwrap_or_else(|| "import".into()),
-                )
-            }
-        }
-        _ => ("pending".into(), "import".into()),
-    }
-}
 
 fn ensure_session_project(session: &AioImportSession, local_project_id: &str) -> AppResult<()> {
     if session.local_project_id != local_project_id {
@@ -855,10 +803,10 @@ mod tests {
     }
 
     #[test]
-    fn manual_create_only_allows_new_node_or_matching_platform_takeover() {
+    fn manual_create_only_allows_unregistered_local_nodes() {
         let row = || validate_inventory_values(1, create_values());
         assert_eq!(prepare_node_create(row(), &[], &[]).unwrap()[0].classification, ImportClassification::NewPending);
-        assert_eq!(prepare_node_create(row(), &[], &[platform()]).unwrap()[0].classification, ImportClassification::PlatformExisting);
+        assert!(prepare_node_create(row(), &[], &[platform()]).is_err());
         assert!(prepare_node_create(row(), &[workbench()], &[platform()]).is_err());
         let mut changed = create_values(); changed.name = "changed".into();
         assert!(prepare_node_create(validate_inventory_values(1, changed.clone()), &[workbench()], &[platform()]).is_err());

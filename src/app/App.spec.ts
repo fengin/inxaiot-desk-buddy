@@ -220,6 +220,9 @@ describe("desktop demo shell", () => {
       await openCurrentProjectEditor(wrapper);
       expect(document.body.textContent).toContain("工作台数据库结构未就绪");
       expect(document.body.textContent).toContain("初始化/升级");
+      // 清单现保存在本机，平台会话有效时可查看；发布参数仍要求共享库就绪。
+      expect(document.querySelector('[data-testid="aio-create-node"]')?.getAttribute("disabled")).toBeNull();
+      await router.push("/aio/release"); await flushPromises();
       expect(document.body.textContent).toContain("工作台数据库尚未就绪，请在项目设置中处理。");
       expect(document.body.textContent).not.toContain("当前项目尚未登录平台，请在项目切换器中完成登录。");
       expect(document.body.textContent).not.toContain("当前版本");

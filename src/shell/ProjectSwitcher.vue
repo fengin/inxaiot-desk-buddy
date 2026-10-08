@@ -420,9 +420,9 @@ async function upgradeSchema() {
     </div>
     <template #footer>
       <div class="project-editor-actions">
-        <n-popconfirm v-if="editingProjectId" positive-text="仅删除本地入口" negative-text="取消" @positive-click="deleteCurrentProject">
+        <n-popconfirm v-if="editingProjectId" positive-text="删除本机项目" negative-text="取消" @positive-click="deleteCurrentProject">
           <template #trigger><n-button size="small" type="error" secondary data-action-owner="popconfirm"><template #icon><Trash2 /></template>删除项目</n-button></template>
-          只删除此电脑中保存的项目和登录会话，不删除项目数据库中的任何数据。继续？
+          将删除当前电脑的项目配置、登录会话及本机设备资料，包括未注册一体机清单。平台数据库中的数据不会删除。继续？
         </n-popconfirm>
         <n-space justify="end">
           <n-button size="small" @click="projectDialogOpen = false">取消</n-button>

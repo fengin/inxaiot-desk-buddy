@@ -1,3 +1,5 @@
+#[path = "common/aio_assets_regression.rs"]
+mod aio_assets_regression;
 #[path = "common/project_test_config.rs"]
 mod project_test_config;
 
@@ -1106,7 +1108,11 @@ async fn compose_driven_three_mode_e2e_on_79_and_121() {
     create_schema(&admin, &config.schema).await;
     let result: Result<(), Box<dyn std::error::Error>> = async {
         let temp = tempfile::tempdir()?;
-        let state = state_at(temp.path()).await;
+        let data_path = std::env::var_os("INX_AIO_REAL_EVIDENCE_PATH")
+            .map(|root| PathBuf::from(root).join(format!("app-data-{}", Uuid::now_v7())))
+            .unwrap_or_else(|| temp.path().to_path_buf());
+        let state = state_at(&data_path).await;
+        println!("AIO_REAL_LOCAL_DATA={}", data_path.display());
         let adapter = Stage75Adapter::new(&state);
         let project_id = adapter
             .create_project(project_input(&config, "Compose驱动三模式真实E2E"))
@@ -1147,41 +1153,53 @@ async fn compose_driven_three_mode_e2e_on_79_and_121() {
             )
             .list_all()
             .await?;
-        WorkbenchAioRepository::new(pools.workbench.clone())
-            .apply_inventory(ApplyInventoryWrite {
-                file_name: "compose-driven-three-mode-e2e.csv".into(),
-                operator_name: "compose-driven-e2e".into(),
-                instance_id: "compose-driven-e2e-instance".into(),
-                classification_counts: serde_json::json!({"managed": 2}),
-                assets: nodes
-                    .iter()
-                    .map(|node| {
-                        let original = platform_baseline
-                            .nodes
-                            .iter()
-                            .find(|item| item.mac_normalized == node.mac_normalized);
-                        InventoryAssetWrite {
-                            mac_normalized: node.mac_normalized.clone(),
-                            display_mac: node.mac_normalized.clone(),
-                            name: original
-                                .map(|item| item.name.clone())
-                                .unwrap_or_else(|| node.name.clone()),
-                            ip: node.ip.clone(),
-                            building_id: original.and_then(|item| item.building_id.clone()),
-                            region_id: None,
-                            addr_alias: original.and_then(|item| item.addr_alias.clone()),
-                            floor: None,
-                            location: Some("compose-driven-three-mode-e2e".into()),
-                            remark: None,
-                            platform_aio_id: original.map(|item| item.id.clone()),
-                            management_state: "managed".into(),
-                            source: "platform".into(),
-                            expected_version: None,
-                        }
-                    })
-                    .collect(),
-            })
-            .await?;
+        let fresh = !platform_baseline.nodes.iter().any(|item| {
+            nodes
+                .iter()
+                .any(|node| node.mac_normalized == item.mac_normalized)
+        });
+        let mut expected_assets = if fresh {
+            Some(aio_assets_regression::prepare(&state, &project_id, &pools, &config).await?)
+        } else {
+            None
+        };
+        if !fresh {
+            WorkbenchAioRepository::new(pools.workbench.clone())
+                .apply_inventory(ApplyInventoryWrite {
+                    file_name: "compose-driven-three-mode-e2e.csv".into(),
+                    operator_name: "compose-driven-e2e".into(),
+                    instance_id: "compose-driven-e2e-instance".into(),
+                    classification_counts: serde_json::json!({"managed": 2}),
+                    assets: nodes
+                        .iter()
+                        .map(|node| {
+                            let original = platform_baseline
+                                .nodes
+                                .iter()
+                                .find(|item| item.mac_normalized == node.mac_normalized);
+                            InventoryAssetWrite {
+                                mac_normalized: node.mac_normalized.clone(),
+                                display_mac: node.mac_normalized.clone(),
+                                name: original
+                                    .map(|item| item.name.clone())
+                                    .unwrap_or_else(|| node.name.clone()),
+                                ip: node.ip.clone(),
+                                building_id: original.and_then(|item| item.building_id.clone()),
+                                region_id: None,
+                                addr_alias: original.and_then(|item| item.addr_alias.clone()),
+                                floor: None,
+                                location: Some("compose-driven-three-mode-e2e".into()),
+                                remark: None,
+                                platform_aio_id: original.map(|item| item.id.clone()),
+                                management_state: "managed".into(),
+                                source: "platform".into(),
+                                expected_version: None,
+                            }
+                        })
+                        .collect(),
+                })
+                .await?;
+        }
         let macs = nodes
             .iter()
             .map(|node| node.mac_normalized.clone())
@@ -1218,6 +1236,11 @@ async fn compose_driven_three_mode_e2e_on_79_and_121() {
             )
             .list_all()
             .await?;
+        if let Some(expected) = &mut expected_assets {
+            aio_assets_regression::verify_registered(&state, &project_id, &pools, expected).await?;
+            aio_assets_regression::edit_registered(&state, &project_id, &pools, expected).await?;
+        }
+        aio_assets_regression::snapshot(&config, "after-first").await?;
         for original in platform_baseline
             .nodes
             .iter()
@@ -1244,6 +1267,10 @@ async fn compose_driven_three_mode_e2e_on_79_and_121() {
             DeploymentMode::FullUpgrade,
         )
         .await?;
+        if let Some(expected) = &expected_assets {
+            aio_assets_regression::verify_registered(&state, &project_id, &pools, expected).await?;
+        }
+        aio_assets_regression::snapshot(&config, "after-full").await?;
         let (_, service_operation) = execute_compose_driven_mode(
             &state,
             &project_id,
@@ -1252,6 +1279,10 @@ async fn compose_driven_three_mode_e2e_on_79_and_121() {
             DeploymentMode::ServiceUpgrade,
         )
         .await?;
+        if let Some(expected) = &expected_assets {
+            aio_assets_regression::verify_registered(&state, &project_id, &pools, expected).await?;
+        }
+        aio_assets_regression::snapshot(&config, "after-service").await?;
 
         let platform_after_upgrades =
             inxaiot_desk_buddy_lib::infrastructure::platform_aio::PlatformAioRepository::new(

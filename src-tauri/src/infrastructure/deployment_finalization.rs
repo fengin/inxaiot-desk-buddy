@@ -73,6 +73,8 @@ pub async fn shared_operation_state(
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AtomicTargetFinalization {
+    #[serde(default)]
+    pub asset: Option<crate::domain::aio::inventory::WorkbenchNodeSnapshot>,
     pub result: TargetFinalResult,
     pub service_versions: Vec<ServiceVersionWrite>,
     pub replace_service_versions: bool,
@@ -183,6 +185,15 @@ pub async fn finalize_deployment_atomically(
     let mut failure_count = 0_u32;
     let mut cancelled_count = 0_u32;
     for target in &write.targets {
+        if let Some(asset) = &target.asset {
+            // 只有部署成功的设备才建立结果关联；新增/导入清单不进入共享资产表。
+            sqlx::query("INSERT INTO aio_node(mac_normalized,name,ip,display_mac,building_id,addr_alias,location,remark,platform_aio_id,region_id,floor,management_state,source,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'managed','deployment',1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE platform_aio_id=COALESCE(VALUES(platform_aio_id),platform_aio_id)")
+                .bind(&asset.mac_normalized).bind(&asset.name).bind(&asset.ip)
+                .bind(crate::domain::aio::mac::MacAddress::parse(&asset.mac_normalized)?.display())
+                .bind(&asset.building_id).bind(&asset.addr_alias).bind(&asset.addr_alias).bind(&asset.remark).bind(&asset.platform_aio_id)
+                .bind(&asset.region_id).bind(&asset.floor)
+                .execute(&mut *transaction).await.map_err(|error| AppError::database("保存部署成功的一体机结果关联", &error))?;
+        }
         match target.result.result_state.as_str() {
             "succeeded" => success_count += 1,
             "failed" | "interrupted" | "unknown" => failure_count += 1,
@@ -343,6 +354,7 @@ fn validate_write(write: &AtomicDeploymentFinalization) -> AppResult<()> {
         || target_keys != lease_keys
         || write.targets.iter().any(|target| {
             target.result.operation_id != write.operation.operation_id
+                || target.asset.as_ref().is_some_and(|asset| asset.mac_normalized != target.result.resource_key || !target.mark_operation_success || target.result.result_state != "succeeded")
                 || target.result.resource_type != "aio"
                 || (target.replace_service_versions
                     && (!target.mark_operation_success
@@ -410,6 +422,7 @@ mod tests {
                     error_summary: None,
                 },
                 targets: vec![AtomicTargetFinalization {
+                    asset: None,
                     result: TargetFinalResult {
                         operation_id: operation_id.clone(),
                         resource_type: "aio".into(),

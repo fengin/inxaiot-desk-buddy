@@ -1,5 +1,8 @@
 pub mod agent_asset;
 pub mod aio_assets_service;
+pub mod aio_edit;
+pub mod aio_registration;
+pub mod aio_inventory_source;
 pub mod client_instance;
 pub mod csv_inventory;
 pub mod data_directory;
@@ -17,6 +20,7 @@ pub mod logging;
 pub mod platform_aio;
 pub mod process_lock;
 pub mod project_context;
+pub mod project_spaces;
 pub mod release_archive;
 pub mod release_artifacts_service;
 mod release_remote_auth;

@@ -12,6 +12,8 @@ pub struct InventoryValues {
     pub ip: String,
     pub mac: String,
     pub building_id: Option<String>,
+    #[serde(default)]
+    pub space_path: Option<String>,
     pub region_id: Option<String>,
     pub addr_alias: Option<String>,
     pub floor: Option<String>,
@@ -26,6 +28,7 @@ impl InventoryValues {
         self.mac = self.mac.trim().to_string();
         for value in [
             &mut self.building_id,
+            &mut self.space_path,
             &mut self.region_id,
             &mut self.addr_alias,
             &mut self.floor,
@@ -55,11 +58,18 @@ pub fn validate_inventory_values(row_number: u32, mut values: InventoryValues) -
     let mut errors = Vec::new();
     if values.name.is_empty() {
         errors.push(format!("第 {row_number} 行：名称不能为空"));
+    } else if values.name.chars().count() > 32 {
+        errors.push(format!("第 {row_number} 行：名称不能超过 32 个字符"));
     }
     if values.ip.is_empty() {
         errors.push(format!("第 {row_number} 行：IP 不能为空"));
     } else if values.ip.parse::<IpAddr>().is_err() {
         errors.push(format!("第 {row_number} 行：IP 格式无效"));
+    } else if values.ip.len() > 32 {
+        errors.push(format!("第 {row_number} 行：IP 超过平台字段支持的长度"));
+    }
+    if values.remark.as_ref().is_some_and(|value| value.chars().count() > 1000) {
+        errors.push(format!("第 {row_number} 行：备注不能超过 1000 个字符"));
     }
     let mac_normalized = if values.mac.is_empty() {
         errors.push(format!("第 {row_number} 行：MAC 不能为空"));

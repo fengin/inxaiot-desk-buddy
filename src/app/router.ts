@@ -7,7 +7,7 @@ export const router = createRouter({
     {
       path: "/aio/nodes",
       name: "aio-nodes",
-      meta: { projectAccess: "shared" },
+      meta: { projectAccess: "platform" },
       component: () => import("@/features/aio/nodes/AioNodeListView.vue")
     },
     {

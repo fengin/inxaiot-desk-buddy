@@ -95,6 +95,28 @@ impl DeviceApiClient {
         }))
     }
 
+    /// 设备首次保存后还会补报一次注册资料；等补报结束，再确认工作台填写的平台资料。
+    pub async fn wait_registration_sync(
+        &self,
+        mac: &str,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> AppResult<()> {
+        let waiting = async {
+            loop {
+                let envelope = self.send(self.client.get(format!("{}/api/aio/server/info", self.base_url))).await?;
+                if !success_code(envelope.code) {
+                    return Err(AppError::PlatformHttp { operation: "核对一体机注册同步" });
+                }
+                if registration_is_synced(&envelope.data, mac)? { return Ok(()); }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        };
+        tokio::select! {
+            _ = cancellation.cancelled() => Err(AppError::Cancelled),
+            result = tokio::time::timeout(Duration::from_secs(90), waiting) => result.unwrap_or(Err(AppError::Timeout { operation: "等待一体机完成注册同步" })),
+        }
+    }
+
     async fn send(&self, request: reqwest::RequestBuilder) -> AppResult<ApiEnvelope> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -136,6 +158,20 @@ fn success_code(code: i64) -> bool {
     code == 0 || code == 200
 }
 
+fn registration_is_synced(data: &serde_json::Value, expected_mac: &str) -> AppResult<bool> {
+    use crate::domain::aio::mac::MacAddress;
+    let actual = data.get("mac").and_then(serde_json::Value::as_str)
+        .ok_or_else(|| AppError::InvalidConfig("一体机注册信息缺少 MAC".into()))?;
+    if MacAddress::parse(actual)?.normalized() != MacAddress::parse(expected_mac)?.normalized() {
+        return Err(AppError::Conflict("一体机注册信息与本次部署的 MAC 不一致".into()));
+    }
+    match data.get("sync").and_then(serde_json::Value::as_i64) {
+        Some(1) => Ok(true),
+        Some(0) | None => Ok(false),
+        _ => Err(AppError::InvalidConfig("一体机注册同步状态无效".into())),
+    }
+}
+
 fn validate_payload(payload: &AioRegistrationPayload) -> AppResult<()> {
     if payload.name.trim().is_empty()
         || payload.ip.trim().is_empty()
@@ -151,7 +187,17 @@ fn validate_payload(payload: &AioRegistrationPayload) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AioRegistrationPayload, validate_payload};
+    use super::{AioRegistrationPayload, validate_payload, registration_is_synced};
+
+    #[test]
+    fn registration_completion_requires_matching_identity_and_finished_sync() {
+        let mac = "001122334455";
+        assert!(!registration_is_synced(&serde_json::json!({"mac":"00:11:22:33:44:55", "sync":0}), mac).unwrap());
+        assert!(!registration_is_synced(&serde_json::json!({"mac":mac}), mac).unwrap());
+        assert!(registration_is_synced(&serde_json::json!({"mac":"00:11:22:33:44:55", "sync":1}), mac).unwrap());
+        assert!(registration_is_synced(&serde_json::json!({"mac":"001122334466", "sync":1}), mac).is_err());
+        assert!(registration_is_synced(&serde_json::json!({"sync":1}), mac).is_err());
+    }
 
     #[test]
     fn registration_requires_stable_identity_and_platform_parameters() {

@@ -104,9 +104,12 @@ describe("aio nodes store", () => {
     const store = useAioNodesStore();
     await store.refresh(projectId);
     await store.previewImport("C:/demo/inventory.csv");
-    expect(store.importPreview?.session.counts.selected).toBe(2);
-    await store.updateSelection({ rowNumber: 2, selected: false });
     expect(store.importPreview?.session.counts.selected).toBe(1);
+    expect(store.importPreview?.session.items.find(row => row.platformAioId)?.selected).toBe(false);
+    await expect(store.updateSelection({ rowNumber: 4, selected: true })).rejects.toThrow("已注册");
+    await store.updateSelection({ rowNumber: 2, selected: false });
+    expect(store.importPreview?.session.counts.selected).toBe(0);
+    await store.updateSelection({ rowNumber: 2, selected: true });
     const outcome = await store.applyImport();
     expect(outcome.result.appliedCount).toBe(1);
     expect(store.importPreview?.session.state).toBe("applied");

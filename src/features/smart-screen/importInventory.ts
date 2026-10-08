@@ -1,6 +1,6 @@
 import { effectiveScreenMac, normalizeScreenMac, validateLocalScreen } from "@/shared/model/screen";
 import type { LocalScreenInput, SmartScreen } from "@/shared/model/screen";
-import { buildProjectSpaceTree, projectSpacePath, resolveProjectSpacePath } from "@/shared/model/projectSpace";
+import { projectSpacePath, resolveProjectSpacePath } from "@/shared/model/projectSpace";
 import type { ProjectSpaceNode } from "@/shared/model/projectSpace";
 
 type SpaceMatch = ReturnType<typeof resolveProjectSpacePath>;
@@ -93,18 +93,4 @@ export function parseScreenInventory(text: string, existing: readonly SmartScree
   return revalidateScreenInventory(rows, existing, spaces, available);
 }
 
-export function inventorySpacePaths(spaces: readonly ProjectSpaceNode[], available = true): string[] {
-  if (!available) return [];
-  const paths: string[] = [];
-  const collect = (nodes: ReturnType<typeof buildProjectSpaceTree>) => {
-    for (const node of nodes) { paths.push(node.path.split("/").map((part) => part.trim()).join("/")); if (node.children) collect(node.children); }
-  };
-  collect(buildProjectSpaceTree(spaces));
-  const counts = new Map<string, number>();
-  for (const path of paths) counts.set(path, (counts.get(path) ?? 0) + 1);
-  return paths.filter((path) => counts.get(path) === 1);
-}
-
-export function inventorySpacePathsCsv(paths: readonly string[]): string {
-  return `\uFEFF空间路径\r\n${paths.map((path) => `"${path.split("/").map((part) => part.trim()).join("/").replace(/"/g, '""')}"`).join("\r\n")}\r\n`;
-}
+export { uniqueProjectSpacePaths as inventorySpacePaths, projectSpacePathsCsv as inventorySpacePathsCsv } from "@/shared/model/projectSpace";

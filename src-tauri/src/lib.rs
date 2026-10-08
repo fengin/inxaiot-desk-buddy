@@ -37,8 +37,9 @@ use crate::infrastructure::task_runtime::{
 use crate::interface::commands::aio_assets::{
     apply_inventory_import, discard_inventory_import, get_edge_node_detail,
     get_latest_inventory_import, list_edge_nodes, preview_inventory_import, preview_aio_node_create,
-    update_inventory_import_selection,
+    update_inventory_import_selection, update_aio_node,
 };
+use crate::interface::commands::project_spaces::list_project_spaces;
 use crate::interface::commands::application_lifecycle::{
     ApplicationExitImpact, ExitConfirmationState, confirm_application_exit,
 };
@@ -298,10 +299,12 @@ pub fn run() {
             capture_host_key,
             confirm_host_key,
             list_edge_nodes,
+            list_project_spaces,
             get_edge_node_detail,
             check_edge_node_services,
             preview_inventory_import,
             preview_aio_node_create,
+            update_aio_node,
             get_latest_inventory_import,
             update_inventory_import_selection,
             apply_inventory_import,

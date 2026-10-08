@@ -50,7 +50,10 @@ import { useAioNodesStore } from "@/stores/aioNodes";
 import { useProjectStore } from "@/stores/projects";
 import { useActivityStore } from "@/stores/activity";
 import AioNodeCreateDialog from "./AioNodeCreateDialog.vue";
+import AioNodeEditDialog from "./AioNodeEditDialog.vue";
 import AssetListFooter from "@/shared/components/AssetListFooter.vue";
+import { useAioAdapter } from "@/shared/api/aioAdapter";
+import { uniqueProjectSpacePaths, projectSpacePathsCsv } from "@/shared/model/projectSpace";
 
 const aio = useAioNodesStore();
 const projects = useProjectStore();
@@ -66,6 +69,7 @@ const selectedNode = ref<AioNodeListItem>();
 const versionOpen = ref(false);
 const importOpen = ref(false);
 const createOpen = ref(false);
+const editOpen = ref(false);
 const selectedMacs = ref<string[]>([]);
 const importStage = ref<"select" | "preview" | "done">("select");
 let refreshTimer: number | undefined;
@@ -93,6 +97,13 @@ async function openBatchOperations() {
 async function createdNode() {
   viewMode.value = "nodes"; search.value = ""; stateFilter.value = "all"; aio.page = 1;
   await refresh();
+}
+async function editedNode() {
+  const projectId = projects.activeProjectId, mac = selectedNode.value?.mac;
+  try {
+    await refresh();
+    if (mac && projects.activeProjectId === projectId) await aio.loadDetail(mac);
+  } catch { message.warning("资料已保存，但列表刷新失败，请手动刷新核对"); }
 }
 const filteredPlatformIssues = computed(() => {
   const keyword = search.value.trim().toLocaleLowerCase();
@@ -160,6 +171,8 @@ function lastOperationLabel(node: AioNodeListItem) {
 
 function sourceLabel(value: string) {
   return {
+    local: "本机待实施",
+    deployment: "部署结果",
     import: "导入",
     merged: "平台接管",
     platform: "平台已有"
@@ -167,7 +180,7 @@ function sourceLabel(value: string) {
 }
 
 async function refresh() {
-  if (!projects.activeProjectId || !projects.isReady) return;
+  if (!projects.activeProjectId || !projects.allowsAccess("platform")) return;
   await aio.refresh(projects.activeProjectId, search.value, stateFilter.value);
 }
 
@@ -254,6 +267,23 @@ async function chooseInventoryFile() {
   }
 }
 
+function downloadCsv(name: string, text: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a"); link.href = url; link.download = name; link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function downloadInventoryTemplate() {
+  downloadCsv("一体机导入模板.csv", "\uFEFF名称,IP,MAC,空间路径,位置,备注\r\n");
+}
+async function downloadSpacePaths() {
+  const projectId = projects.activeProjectId;
+  try {
+    const spaces = await useAioAdapter().listSpaces(projectId);
+    if (projects.activeProjectId !== projectId) return;
+    downloadCsv("一体机-项目空间路径清单.csv", projectSpacePathsCsv(uniqueProjectSpacePaths(spaces)));
+  } catch (cause) { message.error(commandErrorText(cause, "空间目录读取失败")); }
+}
+
 async function toggleImportItem(item: ReconciledImportItem, selected: boolean) {
   try {
     await aio.updateSelection({ rowNumber: item.rowNumber, selected });
@@ -300,6 +330,7 @@ watch([search, stateFilter], () => {
   aio.page = 1;
   scheduleRefresh();
 });
+watch(() => projects.activeProject?.connectionState, () => { void refresh(); });
 watch(
   () => aio.page,
   () => {
@@ -310,7 +341,7 @@ watch(
   () => projects.activeProjectId,
   () => {
     viewMode.value = "nodes";
-    selectedMacs.value = []; createOpen.value = false;
+    selectedMacs.value = []; createOpen.value = false; editOpen.value = false;
     selectedNode.value = undefined;
     versionOpen.value = false;
     aio.page = 1;
@@ -343,7 +374,7 @@ onBeforeUnmount(() => {
           <template #icon><Upload /></template>
           导入清单
         </n-button>
-        <n-button size="small" type="primary" :disabled="!projects.isReady" data-testid="aio-create-node" @click="createOpen = true">
+        <n-button size="small" type="primary" :disabled="!projects.allowsAccess('platform')" data-testid="aio-create-node" @click="createOpen = true">
           <template #icon><Plus /></template>新增一体机
         </n-button>
       </div>
@@ -352,6 +383,7 @@ onBeforeUnmount(() => {
     <n-alert v-if="aio.error" type="error" :bordered="false" closable @close="aio.error = ''">
       {{ aio.error }}
     </n-alert>
+    <n-alert v-else-if="aio.metadataWarning" type="warning" :bordered="false">{{ aio.metadataWarning }}</n-alert>
     <n-alert
       v-else-if="aio.latestImportSessionId"
       type="info"
@@ -493,7 +525,7 @@ onBeforeUnmount(() => {
                   <td><strong>{{ node.name }}</strong><small>{{ lastOperationLabel(node) }}</small></td>
                   <td class="mono">{{ node.ip }}</td>
                   <td class="mono muted-cell">{{ node.mac }}</td>
-                  <td>{{ node.location }}</td>
+                  <td class="node-space-cell" :title="[node.spacePath, node.location].filter(Boolean).join(' · ')"><span>{{ node.spacePath || (node.buildingId ? '原空间待核实' : '未选择空间') }}</span><small v-if="node.location">{{ node.location }}</small></td>
                   <td><n-tag size="small" :bordered="false" :type="managementTone(node)">{{ node.deployLabel }}</n-tag></td>
                   <td>
                     <span class="state-with-time" :class="node.platformState">
@@ -528,11 +560,13 @@ onBeforeUnmount(() => {
     </section>
 
     <aio-node-create-dialog v-model:show="createOpen" :project-id="projects.activeProjectId" @created="createdNode" />
+    <aio-node-edit-dialog v-model:show="editOpen" :project-id="projects.activeProjectId" :detail="aio.detail" @saved="editedNode" />
 
     <n-drawer :show="Boolean(selectedNode)" width="min(var(--inx-detail-drawer-width), 94vw)" class="device-detail-drawer aio-detail-drawer" placement="right" @update:show="!$event && (selectedNode = undefined)">
       <n-drawer-content title="一体机详情" closable>
         <n-spin :show="aio.detailLoading">
           <template v-if="aio.detail">
+            <n-alert v-if="aio.detail.metadataWarning" type="warning" :bordered="false">{{ aio.detail.metadataWarning }}</n-alert>
             <div class="drawer-identity">
               <span class="feature-icon info"><ServerCog :size="22" /></span>
               <div><strong :title="aio.detail.node.name">{{ aio.detail.node.name }}</strong><span class="mono" :title="`${aio.detail.node.ip} · ${aio.detail.node.mac}`">{{ aio.detail.node.ip }} · {{ aio.detail.node.mac }}</span></div>
@@ -543,8 +577,9 @@ onBeforeUnmount(() => {
                 <div><dt>工作台状态</dt><dd :title="aio.detail.node.deployLabel">{{ aio.detail.node.deployLabel }}</dd></div>
                 <div><dt>平台对象ID</dt><dd class="mono" :title="String(aio.detail.node.platformId ?? '尚未关联')">{{ aio.detail.node.platformId ?? "尚未关联" }}</dd></div>
                 <div><dt>资产来源</dt><dd :title="sourceLabel(aio.detail.node.source)">{{ sourceLabel(aio.detail.node.source) }}</dd></div>
-                <div><dt>记录版本</dt><dd :title="String(aio.detail.node.version || '平台只读')">{{ aio.detail.node.version || "平台只读" }}</dd></div>
-                <div><dt>位置</dt><dd :title="aio.detail.node.location">{{ aio.detail.node.location }}</dd></div>
+                <div><dt>资料保存</dt><dd>{{ aio.detail.platform ? '平台业务库' : '当前电脑' }}</dd></div>
+                <div><dt>空间位置</dt><dd :title="aio.detail.node.spacePath">{{ aio.detail.node.spacePath || (aio.detail.node.buildingId ? '原空间待核实' : '未选择') }}</dd></div>
+                <div><dt>具体位置</dt><dd :title="aio.detail.node.location">{{ aio.detail.node.location || '未填写' }}</dd></div>
                 <div><dt>最近操作</dt><dd :title="lastOperationLabel(aio.detail.node)">{{ lastOperationLabel(aio.detail.node) }}</dd></div>
               </dl>
             </div>
@@ -589,6 +624,7 @@ onBeforeUnmount(() => {
         <template #footer>
           <n-space justify="end">
             <n-button size="small" @click="selectedNode = undefined">关闭</n-button>
+            <n-button size="small" :disabled="aio.detailLoading || !aio.detail" data-testid="aio-edit-node" @click="editOpen = true">编辑资料</n-button>
             <n-button size="small" type="primary" :disabled="Boolean(aio.detail?.node.conflicts.length)" @click="openDeployment">进入部署升级</n-button>
           </n-space>
         </template>
@@ -626,8 +662,9 @@ onBeforeUnmount(() => {
         <div v-if="importStage === 'select'" class="upload-zone" @click="chooseInventoryFile">
           <FileSpreadsheet :size="36" />
           <strong>选择 CSV 清单</strong>
-          <span>必填字段：name、ip、mac；文件仅在本机解析</span>
+          <span>必填：名称、IP、MAC；空间路径可选，格式为“项目/楼幢/楼层/区域”；位置可填写具体安装位置。</span>
           <n-button size="small" type="primary" @click.stop="chooseInventoryFile"><template #icon><Upload /></template>选择文件</n-button>
+          <n-space><n-button size="small" @click.stop="downloadInventoryTemplate">下载导入模板</n-button><n-button size="small" @click.stop="downloadSpacePaths">下载项目空间路径清单</n-button></n-space>
         </div>
         <div v-else-if="importStage === 'preview' && importSession" class="import-preview">
           <div class="import-file">
@@ -646,13 +683,13 @@ onBeforeUnmount(() => {
           </n-alert>
           <div class="import-preview-table-header">
             <table class="workbench-table compact import-preview-table__table">
-              <colgroup><col class="import-col-apply" /><col class="import-col-result" /><col class="import-col-name" /><col class="import-col-ip" /><col class="import-col-mac" /><col class="import-col-action" /></colgroup>
-              <thead><tr><th>应用</th><th>结果</th><th>名称</th><th>IP</th><th>MAC</th><th>处理</th></tr></thead>
+              <colgroup><col class="import-col-apply" /><col class="import-col-result" /><col class="import-col-name" /><col class="import-col-ip" /><col class="import-col-mac" /><col class="import-col-space" /><col class="import-col-action" /></colgroup>
+              <thead><tr><th>应用</th><th>结果</th><th>名称</th><th>IP</th><th>MAC</th><th>空间位置</th><th>处理</th></tr></thead>
             </table>
           </div>
           <div class="import-preview-table">
             <table class="workbench-table compact import-preview-table__table">
-              <colgroup><col class="import-col-apply" /><col class="import-col-result" /><col class="import-col-name" /><col class="import-col-ip" /><col class="import-col-mac" /><col class="import-col-action" /></colgroup>
+              <colgroup><col class="import-col-apply" /><col class="import-col-result" /><col class="import-col-name" /><col class="import-col-ip" /><col class="import-col-mac" /><col class="import-col-space" /><col class="import-col-action" /></colgroup>
               <tbody>
                 <tr v-for="item in importSession.items" :key="item.rowNumber">
                   <td>
@@ -666,6 +703,7 @@ onBeforeUnmount(() => {
                   <td>{{ item.values.name || "—" }}</td>
                   <td class="mono">{{ item.values.ip || "—" }}</td>
                   <td class="mono">{{ item.displayMac ?? item.values.mac ?? "—" }}</td>
+                  <td :title="item.values.spacePath"><span>{{ item.values.spacePath || "未选择" }}</span><small v-if="item.values.addrAlias">{{ item.values.addrAlias }}</small></td>
                   <td class="import-action-copy">{{ classificationAction(item) }}</td>
                 </tr>
               </tbody>
@@ -673,7 +711,7 @@ onBeforeUnmount(() => {
           </div>
           <div class="inline-notice info">
             <CheckCircle2 :size="17" />
-            <div><strong>确认后只写入最终资产</strong><span>导入预览、逐行明细和冲突草稿等数据仅存在于当前电脑，完成部署后才同步到平台。</span></div>
+            <div><strong>确认后只保存在当前电脑</strong><span>未注册一体机留在本机待实施清单，部署后才注册到平台；已注册一体机请在详情中编辑。</span></div>
           </div>
         </div>
         <div v-else class="result-state">
@@ -704,6 +742,14 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.node-space-cell > span, .node-space-cell > small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.import-preview-table__table .import-col-apply { width: 6%; }
+.import-preview-table__table .import-col-result { width: 12%; }
+.import-preview-table__table .import-col-name { width: 15%; }
+.import-preview-table__table .import-col-ip { width: 15%; }
+.import-preview-table__table .import-col-mac { width: 18%; }
+.import-preview-table__table .import-col-space { width: 20%; }
+.import-preview-table__table .import-col-action { width: 14%; }
 .service-section-heading,
 .service-observation > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .service-section-heading { margin: 14px 0 8px; }

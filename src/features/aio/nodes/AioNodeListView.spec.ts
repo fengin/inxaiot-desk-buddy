@@ -9,8 +9,34 @@ import { configureAioAdapter } from "@/shared/api/aioAdapter";
 import { configureActivityAdapter } from "@/shared/api/activityAdapter";
 import { useActivityStore } from "@/stores/activity";
 import { useAioNodesStore } from "@/stores/aioNodes";
+import { useProjectStore } from "@/stores/projects";
 
 describe("一体机服务检查入口", () => {
+  it("工作台连接或初始化恢复后自动刷新记录提示", async () => {
+    Object.defineProperty(window, "matchMedia", { configurable: true, value: vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })) });
+    const adapter = new FixtureAioAdapter();
+    const original = adapter.listNodes.bind(adapter);
+    let unavailable = false;
+    const list = vi.spyOn(adapter, "listNodes").mockImplementation(async (...args) => ({ ...await original(...args), metadataWarning: unavailable ? "工作台部署记录暂未读取" : null }));
+    configureAioAdapter(adapter); configureActivityAdapter(new FixtureActivityAdapter());
+    const { default: App } = await import("@/app/App.vue");
+    await router.push("/aio/nodes"); await router.isReady();
+    const pinia = createPinia();
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [pinia, router, i18n], stubs: { teleport: true } } });
+    try {
+      await flushPromises();
+      const projects = useProjectStore(pinia);
+      unavailable = true; projects.activeProject!.connectionState = "schema_required";
+      await flushPromises();
+      expect(wrapper.text()).toContain("工作台部署记录暂未读取");
+      const before = list.mock.calls.length;
+      unavailable = false; projects.activeProject!.connectionState = "ready";
+      await flushPromises();
+      expect(list.mock.calls.length).toBeGreaterThan(before);
+      expect(wrapper.text()).not.toContain("工作台部署记录暂未读取");
+    } finally { wrapper.unmount(); }
+  }, 30000);
+
   it("详情区分部署记录与实测，检查后自动展示结果和任务日志", async () => {
     Object.defineProperty(window, "matchMedia", {
       configurable: true,

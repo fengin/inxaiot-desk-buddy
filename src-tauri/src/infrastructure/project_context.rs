@@ -227,6 +227,28 @@ pub async fn project_pools(
     }
 }
 
+/// 仅供领域内明确的业务字段更新使用，普通平台查询连接继续保持只读。
+pub async fn project_platform_write_pool(state: &FormalAppState, project: &str) -> AppResult<sqlx::MySqlPool> {
+    let runtime = state.runtime_registry.open(project).await.map_err(map_formal_error)?;
+    runtime.platform_write_or_try_init(|| async {
+        let repository = LocalProjectRepository::new(state.local_store.pool().clone(), state.secret_store.clone());
+        let secrets = repository.connection_secrets(project).await.map_err(map_formal_error)?;
+        state.task_event_pipeline.register_secrets([secrets.db_password.clone()])?;
+        let config = MySqlProjectConfig {
+            host: secrets.project.db_host, port: secrets.project.db_port, username: secrets.project.db_user,
+            password: SecretValue::new(secrets.db_password), platform_schema: secrets.project.business_db,
+            workbench_schema: secrets.project.workbench_db, connect_timeout: Duration::from_secs(10),
+            tls_mode: if secrets.project.db_tls_enabled { DatabaseTlsMode::Required } else { DatabaseTlsMode::Disabled },
+        };
+        crate::infrastructure::database::connect_platform_write(&config).await
+    }).await
+}
+
+pub async fn database_source_id(pool: &sqlx::MySqlPool) -> AppResult<String> {
+    sqlx::query_scalar("SELECT CONCAT(@@server_uuid, ':', DATABASE())").fetch_one(pool).await
+        .map_err(|error| AppError::database("读取平台数据源标识", &error))
+}
+
 async fn workbench_schema_status_with_pools(
     state: &FormalAppState,
     local_project_id: &str,

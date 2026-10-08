@@ -4,6 +4,7 @@ pub mod data_directory;
 pub mod deployment_workflow;
 pub mod diagnostics;
 pub mod project_database;
+pub mod project_spaces;
 pub mod project_management;
 pub mod release_artifacts;
 pub mod service_inspection;

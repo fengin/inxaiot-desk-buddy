@@ -10,9 +10,13 @@ import {
   updateInventoryImportSelection
 } from "@/shared/api/aioNodes";
 import type { AioAdapter } from "@/shared/api/aioAdapter";
+import { invoke } from "@tauri-apps/api/core";
+import type { ProjectSpaceNode } from "@/shared/model/projectSpace";
 
 export class RealAioAdapter implements AioAdapter {
   readonly real = true;
+  listSpaces(projectId: string) { return invoke<ProjectSpaceNode[]>("list_project_spaces", { localProjectId: projectId }); }
+  updateNode(projectId: string, input: Parameters<AioAdapter["updateNode"]>[1]) { return invoke<void>("update_aio_node", { localProjectId: projectId, input }); }
   listNodes(projectId: string, query: Parameters<AioAdapter["listNodes"]>[1]) { return listEdgeNodes(projectId, query); }
   getNodeDetail(projectId: string, mac: string) { return getEdgeNodeDetail(projectId, mac); }
   checkServices(projectId: string, mac: string) { return checkEdgeNodeServices(projectId, mac); }

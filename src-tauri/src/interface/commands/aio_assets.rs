@@ -18,6 +18,14 @@ use crate::infrastructure::stage75_adapter::Stage75Adapter;
 use crate::interface::error::CommandErrorDto;
 
 #[tauri::command]
+pub async fn update_aio_node(state: State<'_, FormalAppState>, local_project_id: String, input: crate::application::aio_assets::UpdateAioNodeInput) -> Result<(), CommandErrorDto> {
+    require_project_access(&Stage75Adapter::new(&state), &local_project_id, ProjectAccessRequirement::ActiveSession)
+        .await.map_err(CommandErrorDto::from)?;
+    crate::application::aio_assets::update_aio_node(&AioAssetsService::new(&state), &local_project_id, input)
+        .await.map_err(CommandErrorDto::from)
+}
+
+#[tauri::command]
 pub async fn list_edge_nodes(
     state: State<'_, FormalAppState>,
     local_project_id: String,
@@ -140,7 +148,7 @@ pub async fn apply_inventory_import(
     require_project_access(
         &Stage75Adapter::new(&state),
         &local_project_id,
-        ProjectAccessRequirement::Ready,
+        ProjectAccessRequirement::ActiveSession,
     )
     .await
     .map_err(CommandErrorDto::from)?;

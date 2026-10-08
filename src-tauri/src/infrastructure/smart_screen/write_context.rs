@@ -4,17 +4,14 @@ use crate::application::{
 };
 use crate::core::{
     error::{AppError, AppResult},
-    secret::SecretValue,
 };
 use crate::formal::{app_state::FormalAppState, project_repository::LocalProjectRepository};
 use crate::infrastructure::{
-    database::{DatabaseTlsMode, MySqlProjectConfig, connect_platform_write},
     local_sqlite::screen_repository::ScreenRepository,
     project_context::{map_formal_error, project_database_for_finalization, project_operator},
     stage75_adapter::Stage75Adapter,
 };
 use sqlx::MySqlPool;
-use std::time::Duration;
 
 pub struct ScreenWriteContext {
     pub business: String,
@@ -58,37 +55,7 @@ pub async fn open(state: &FormalAppState, project: &str) -> AppResult<ScreenWrit
     let repository =
         LocalProjectRepository::new(state.local_store.pool().clone(), state.secret_store.clone());
     let record = repository.get(project).await.map_err(map_formal_error)?;
-    let runtime = state
-        .runtime_registry
-        .open(project)
-        .await
-        .map_err(map_formal_error)?;
-    let write = runtime
-        .platform_write_or_try_init(|| async {
-            let secrets = repository
-                .connection_secrets(project)
-                .await
-                .map_err(map_formal_error)?;
-            state
-                .task_event_pipeline
-                .register_secrets([secrets.db_password.clone()])?;
-            let config = MySqlProjectConfig {
-                host: secrets.project.db_host,
-                port: secrets.project.db_port,
-                username: secrets.project.db_user,
-                password: SecretValue::new(secrets.db_password),
-                platform_schema: secrets.project.business_db,
-                workbench_schema: secrets.project.workbench_db,
-                connect_timeout: Duration::from_secs(10),
-                tls_mode: if secrets.project.db_tls_enabled {
-                    DatabaseTlsMode::Required
-                } else {
-                    DatabaseTlsMode::Disabled
-                },
-            };
-            connect_platform_write(&config).await
-        })
-        .await?;
+    let write = crate::infrastructure::project_context::project_platform_write_pool(state, project).await?;
     if platform::source_id(&write).await? != source {
         return Err(AppError::Conflict("平台读写连接的数据源不同".into()));
     }

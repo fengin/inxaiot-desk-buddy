@@ -508,6 +508,7 @@ pub async fn finalize_deployment_control(
     local_project_id: &str,
     handle: DeploymentControlHandle,
     summary: DeploymentExecutionSummary,
+    assets: std::collections::HashMap<String, crate::domain::aio::inventory::WorkbenchNodeSnapshot>,
 ) -> AppResult<()> {
     let mut shared_targets = Vec::with_capacity(summary.targets.len());
     for target in &summary.targets {
@@ -553,6 +554,7 @@ pub async fn finalize_deployment_control(
             }
         }
         shared_targets.push(AtomicTargetFinalization {
+            asset: (state_name == "succeeded").then(|| assets.get(&target.mac).cloned()).flatten(),
             result: target_result,
             service_versions,
             replace_service_versions: should_replace_service_versions(

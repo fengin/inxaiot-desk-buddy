@@ -1,4 +1,6 @@
 import type { AioAdapter } from "@/shared/api/aioAdapter";
+import { screenSpaces } from "./screenData";
+import { getProjectSpacePath, projectSpacePath, resolveProjectSpacePath } from "@/shared/model/projectSpace";
 import { demoNodes } from "@/shared/fixtures/demoData";
 import type {
   AioImportSession,
@@ -66,35 +68,47 @@ function previewSession(projectId: string, filePath: string): AioImportSession {
     fileName: filePath.split(/[\\/]/).at(-1) ?? "inventory.csv",
     filePath,
     state: "preview",
-    counts: { total: 3, newPending: 1, existingUnchanged: 1, existingChanged: 0, platformExisting: 1, conflicts: 0, invalid: 0, selected: 2 },
+    counts: { total: 3, newPending: 1, existingUnchanged: 2, existingChanged: 0, platformExisting: 0, conflicts: 0, invalid: 0, selected: 1 },
     createdAt: now,
     updatedAt: now,
     items: [
       { rowNumber: 2, values: { name: "AIO-C栋-1F", ip: "10.20.14.21", mac: "00:0C:29:3B:B9:39" }, macNormalized: "000C293BB939", displayMac: "00:0C:29:3B:B9:39", classification: "new_pending", selected: true, errors: [], conflicts: [] },
       { rowNumber: 3, values: { name: "AIO-B栋-2F", ip: "10.20.13.22", mac: "00:0C:29:3B:B9:36" }, macNormalized: "000C293BB936", displayMac: "00:0C:29:3B:B9:36", classification: "existing_unchanged", selected: false, errors: [], conflicts: [] },
-      { rowNumber: 4, values: { name: "AIO-平台既有", ip: "10.20.15.21", mac: "00:0C:29:3B:B9:40" }, macNormalized: "000C293BB940", displayMac: "00:0C:29:3B:B9:40", classification: "platform_existing", selected: true, errors: [], conflicts: [], platformAioId: "fixture-platform-aio" }
+      { rowNumber: 4, values: { name: "AIO-平台既有", ip: "10.20.15.21", mac: "00:0C:29:3B:B9:40" }, macNormalized: "000C293BB940", displayMac: "00:0C:29:3B:B9:40", classification: "existing_unchanged", selected: false, errors: [], conflicts: [], platformAioId: "fixture-platform-aio" }
     ]
   };
 }
 
 export class FixtureAioAdapter implements AioAdapter {
+  async listSpaces(projectId: string) {
+    if (!projectId) throw new Error("请先选择项目");
+    return screenSpaces.map(space => ({ ...space }));
+  }
   readonly real = false;
-  private nodes = structuredClone(demoNodes);
+  private inventories = new Map<string, EdgeNode[]>();
+  private revisions = new Map<string, number>();
+  private nodesFor(project: string) {
+    if (!this.inventories.has(project)) this.inventories.set(project, structuredClone(demoNodes));
+    return this.inventories.get(project)!;
+  }
   private sessions = new Map<string, AioImportSession>();
   private serviceChecks = new Map<string, NodeServiceCheckSnapshot>();
-  private adoptedMacs = new Set<string>();
+  private buildingIds = new Map<string, string>();
 
   private mappedNode(projectId: string, node: EdgeNode) {
     const mapped = mapNode(node);
+    mapped.buildingId = this.buildingIds.get(`${projectId}:${mapped.macNormalized}`);
+    mapped.spacePath = projectSpacePath(screenSpaces, mapped.buildingId);
+    mapped.version = this.revisions.get(`${projectId}:${mapped.macNormalized}`) ?? 1;
     mapped.serviceCheck = this.serviceChecks.get(`${projectId}:${mapped.macNormalized}`);
     return mapped;
   }
 
   async listNodes(_projectId: string, query: Parameters<AioAdapter["listNodes"]>[1]): ReturnType<AioAdapter["listNodes"]> {
-    const all = this.nodes.map((node) => this.mappedNode(_projectId, node));
+    const all = this.nodesFor(_projectId).map((node) => this.mappedNode(_projectId, node));
     const keyword = query.search?.toLocaleLowerCase();
     const filtered = all.filter((node) =>
-      (!keyword || [node.name, node.ip, node.mac, node.location].some((value) => value.toLocaleLowerCase().includes(keyword)))
+      (!keyword || [node.name, node.ip, node.mac, node.location, node.spacePath ?? ""].some((value) => value.toLocaleLowerCase().includes(keyword)))
       && (!query.state || query.state === "all" || node.managementState === query.state || node.platformState === query.state)
     );
     const start = (query.page - 1) * query.pageSize;
@@ -110,13 +124,16 @@ export class FixtureAioAdapter implements AioAdapter {
     };
   }
   async getNodeDetail(_projectId: string, mac: string) {
-    const node = this.nodes.find((item) => item.mac === mac);
+    const node = this.nodesFor(_projectId).find((item) => item.mac === mac);
     if (!node) throw new Error(`Fixture 一体机不存在：${mac}`);
     const mapped = this.mappedNode(_projectId, node);
-    return { node: mapped, versions: mapped.versions };
+    return { node: mapped, versions: mapped.versions, platform: node.platformId ? {
+      id: node.platformId, name: node.name, ip: node.ip, macRaw: node.mac, macNormalized: mapped.macNormalized,
+      buildingId: mapped.buildingId ?? "0", addrAlias: node.location,
+    } : undefined };
   }
   async checkServices(projectId: string, mac: string) {
-    const node = this.nodes.find((item) => item.mac.replaceAll(":", "").toUpperCase() === mac.replaceAll(":", "").toUpperCase());
+    const node = this.nodesFor(projectId).find((item) => item.mac.replaceAll(":", "").toUpperCase() === mac.replaceAll(":", "").toUpperCase());
     if (!node) throw new Error(`Fixture 一体机不存在：${mac}`);
     const taskId = `fixture-service-inspection-${crypto.randomUUID()}`;
     const startedAt = new Date().toISOString();
@@ -153,22 +170,33 @@ export class FixtureAioAdapter implements AioAdapter {
   async previewCreate(projectId: string, input: InventoryValues): ReturnType<AioAdapter["previewCreate"]> {
     if (this.sessions.get(projectId)?.state === "preview") throw new Error("当前项目有未处理的导入预览，请先处理或放弃后再新增一体机");
     const values = Object.fromEntries(Object.entries(input).map(([key, value]) => [key, value?.trim()])) as unknown as InventoryValues;
+    if (values.spacePath && !values.buildingId) {
+      const match = resolveProjectSpacePath(values.spacePath, screenSpaces);
+      if (match.status !== "matched") throw new Error(match.error);
+      values.buildingId = match.spaceId;
+    }
+    if (values.buildingId) {
+      const path = getProjectSpacePath(screenSpaces, values.buildingId);
+      if (!path) throw new Error("所选空间不存在，请重新选择");
+      values.spacePath = projectSpacePath(screenSpaces, values.buildingId);
+      values.location = values.addrAlias;
+    }
     if (!values.name || !values.ip || !values.mac) throw new Error("名称、IP 和 MAC 不能为空");
     const macNormalized = values.mac.replace(/[:-]/g, "").toUpperCase();
     if (!/^[0-9A-F]{12}$/.test(macNormalized)) throw new Error("MAC 格式无效");
     if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(values.ip) || values.ip.split(".").some((part) => Number(part) > 255)) throw new Error("IP 格式无效");
-    const existing = this.nodes.find((node) => node.mac.replace(/[:-]/g, "").toUpperCase() === macNormalized);
-    if (existing && (existing.managementState !== "platform_existing" || this.adoptedMacs.has(`${projectId}:${macNormalized}`))) {
+    const existing = this.nodesFor(projectId).find((node) => node.mac.replace(/[:-]/g, "").toUpperCase() === macNormalized);
+    if (existing?.platformId) throw new Error("该一体机已在平台注册，无需重复新增；请在详情中编辑平台资料");
+    if (existing) {
       throw new Error("该 MAC 对应的一体机已在工作台中，无需重复新增；如需修改，请使用清单导入核对变更");
     }
-    if (existing && (existing.name !== values.name || existing.ip !== values.ip)) throw new Error(`该 MAC 已在平台登记为“${existing.name}”（${existing.ip}），请核对名称和 IP 后再接管`);
-    const classification = existing ? "platform_existing" : "new_pending";
+    const classification = "new_pending";
     const now = new Date().toISOString();
     const session: AioImportSession = {
       id: `fixture-create-${crypto.randomUUID()}`, localProjectId: projectId,
       fileName: "单台新增一体机", filePath: "manual-entry", state: "preview", createdAt: now, updatedAt: now,
-      counts: { total: 1, newPending: existing ? 0 : 1, existingUnchanged: 0, existingChanged: 0, platformExisting: existing ? 1 : 0, conflicts: 0, invalid: 0, selected: 1 },
-      items: [{ rowNumber: 1, values, macNormalized, displayMac: macNormalized.match(/.{2}/g)!.join(":"), classification, selected: true, errors: [], conflicts: [], platformAioId: existing?.platformId }]
+      counts: { total: 1, newPending: 1, existingUnchanged: 0, existingChanged: 0, platformExisting: 0, conflicts: 0, invalid: 0, selected: 1 },
+      items: [{ rowNumber: 1, values, macNormalized, displayMac: macNormalized.match(/.{2}/g)!.join(":"), classification, selected: true, errors: [], conflicts: [] }]
     };
     this.sessions.set(projectId, session);
     return { session: structuredClone(session), platformIssues: [] };
@@ -181,6 +209,11 @@ export class FixtureAioAdapter implements AioAdapter {
     const session = this.requiredSession(projectId, sessionId);
     for (const selection of selections) {
       const item = session.items.find((row) => row.rowNumber === selection.rowNumber);
+      if (!item) throw new Error("导入记录不存在");
+      if (selection.selected && (item.platformAioId || !["new_pending", "existing_changed"].includes(item.classification))) throw new Error("已注册或无须变更的记录不能导入，请在详情中编辑");
+    }
+    for (const selection of selections) {
+      const item = session.items.find((row) => row.rowNumber === selection.rowNumber);
       if (item) item.selected = selection.selected;
     }
     session.counts.selected = session.items.filter((row) => row.selected).length;
@@ -189,13 +222,12 @@ export class FixtureAioAdapter implements AioAdapter {
   async applyImport(projectId: string, sessionId: string) {
     const session = this.requiredSession(projectId, sessionId);
     const appliedCount = session.counts.selected;
+    if (!appliedCount) throw new Error("请至少选择一台待实施一体机");
     session.state = "applied";
-    if (session.filePath === "manual-entry" && session.items[0]?.classification === "platform_existing") {
-      this.adoptedMacs.add(`${projectId}:${session.items[0].macNormalized}`);
-    }
     const selectedNew = session.items.find((item) => item.selected && item.classification === "new_pending");
-    if (selectedNew && !this.nodes.some((node) => node.mac === selectedNew.displayMac)) {
-      this.nodes.unshift({
+    if (selectedNew && !this.nodesFor(projectId).some((node) => node.mac === selectedNew.displayMac)) {
+      if (selectedNew.values.buildingId) this.buildingIds.set(`${projectId}:${selectedNew.macNormalized}`, selectedNew.values.buildingId);
+      this.nodesFor(projectId).unshift({
         mac: selectedNew.displayMac!, name: selectedNew.values.name, ip: selectedNew.values.ip,
         location: selectedNew.values.location ?? "", managementState: "pending", deployLabel: "待实施",
         platformState: "unknown", platformUpdatedAt: "尚未注册", serviceState: "unknown",
@@ -207,6 +239,19 @@ export class FixtureAioAdapter implements AioAdapter {
   async discardImport(projectId: string, sessionId: string) {
     const session = this.requiredSession(projectId, sessionId);
     session.state = "discarded";
+  }
+  async updateNode(projectId: string, input: Parameters<AioAdapter["updateNode"]>[1]) {
+    const detail = await this.getNodeDetail(projectId, input.mac);
+    const normalize = (mac: string) => mac.replace(/[:-]/g, "").toUpperCase();
+    if (normalize(input.values.mac) !== normalize(input.mac)) throw new Error("MAC 不能修改");
+    if (detail.node.version !== input.expectedVersion || detail.platform?.id !== input.platformBase?.id) throw new Error("资料已变化，请刷新");
+    if (!input.values.name.trim() || !input.values.ip.trim()) throw new Error("名称、IP 不能为空");
+    if (input.values.buildingId && !getProjectSpacePath(screenSpaces, input.values.buildingId)) throw new Error("空间不存在");
+    const node = this.nodesFor(projectId).find(item => item.mac === input.mac)!;
+    node.name = input.values.name.trim(); node.ip = input.values.ip.trim(); node.location = input.values.addrAlias?.trim() ?? "";
+    const key = `${projectId}:${detail.node.macNormalized}`;
+    if (input.values.buildingId) this.buildingIds.set(key, input.values.buildingId); else this.buildingIds.delete(key);
+    this.revisions.set(key, detail.node.version + 1);
   }
   private requiredSession(projectId: string, sessionId: string) {
     const session = this.sessions.get(projectId);

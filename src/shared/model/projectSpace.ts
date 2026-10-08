@@ -91,3 +91,20 @@ export function resolveProjectSpacePath(text: string, spaces: readonly ProjectSp
   if (matches.length !== 1) return { status: "ambiguous", path: input, error: `空间路径对应 ${matches.length} 个节点，请核实后从空间树明确选择` };
   return { status: "matched", spaceId: matches[0]!.id, path: pathText(resolve(matches[0]!.id)!), error: "" };
 }
+
+/** 一次遍历生成无歧义的完整路径，供各业务导入模板共用。 */
+export function uniqueProjectSpacePaths(spaces: readonly ProjectSpaceNode[], available = true): string[] {
+  if (!available) return [];
+  const paths: string[] = [];
+  const collect = (nodes: readonly ProjectSpaceOption[]) => {
+    for (const node of nodes) { paths.push(normalizedPath(node.path)); if (node.children) collect(node.children); }
+  };
+  collect(buildProjectSpaceTree(spaces));
+  const counts = new Map<string, number>();
+  for (const path of paths) counts.set(path, (counts.get(path) ?? 0) + 1);
+  return paths.filter(path => counts.get(path) === 1);
+}
+
+export function projectSpacePathsCsv(paths: readonly string[]): string {
+  return `\uFEFF空间路径\r\n${paths.map(path => `"${normalizedPath(path).replace(/"/g, '""')}"`).join("\r\n")}\r\n`;
+}

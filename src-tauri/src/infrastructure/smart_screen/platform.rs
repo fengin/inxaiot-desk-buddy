@@ -7,10 +7,7 @@ fn db(error: sqlx::Error) -> AppError {
 }
 
 pub async fn source_id(pool: &MySqlPool) -> AppResult<String> {
-    sqlx::query_scalar("SELECT CONCAT(@@server_uuid, ':', DATABASE())")
-        .fetch_one(pool)
-        .await
-        .map_err(db)
+    crate::infrastructure::project_context::database_source_id(pool).await
 }
 pub async fn projects(pool: &MySqlPool) -> AppResult<Vec<BusinessProject>> {
     let rows=sqlx::query("SELECT CAST(project_info_id AS CHAR) AS id, MAX(CASE WHEN parent_id=0 THEN area_name ELSE NULL END) AS name FROM t_project_building WHERE delete_flag='0' GROUP BY project_info_id ORDER BY project_info_id").fetch_all(pool).await.map_err(db)?;
@@ -42,26 +39,7 @@ pub async fn read_with_known_ids(
 ) -> AppResult<(Vec<ScreenAsset>, Vec<SpaceNode>, Vec<String>)> {
     // 同一次一致性读取中取得完整目录和资产，不对两个来源分别分页后拼接。
     let mut tx = pool.begin().await.map_err(db)?;
-    let rows=sqlx::query("SELECT CAST(id AS CHAR) AS id,CAST(parent_id AS CHAR) AS parent_id,area_name,COALESCE(area_level,0) AS area_level FROM t_project_building WHERE project_info_id=? AND delete_flag='0' ORDER BY area_level,building_sort,id")
-        .bind(business).fetch_all(&mut *tx).await.map_err(db)?;
-    let spaces = rows
-        .into_iter()
-        .map(|r| {
-            let level: i32 = r.try_get("area_level").map_err(db)?;
-            Ok(SpaceNode {
-                id: r.try_get("id").map_err(db)?,
-                parent_id: Some(r.try_get("parent_id").map_err(db)?),
-                name: r.try_get("area_name").map_err(db)?,
-                kind: match level {
-                    3 => "building",
-                    4 => "floor",
-                    5.. => "area",
-                    _ => "other",
-                }
-                .into(),
-            })
-        })
-        .collect::<AppResult<Vec<_>>>()?;
+    let spaces = crate::infrastructure::project_spaces::read(&mut *tx, Some(business)).await?;
     let rows=sqlx::query("SELECT CAST(s.id AS CHAR) AS id,s.name,s.ip,COALESCE(s.mac,'') AS mac,s.size,CAST(s.building_id AS CHAR) AS space_id,s.install_address,s.app_version,CAST(s.status AS CHAR) AS platform_status FROM smart_terminal_screen s JOIN t_project_building b ON b.id=s.building_id WHERE s.delete_flag=0 AND b.delete_flag='0' AND b.project_info_id=? ORDER BY s.id")
         .bind(business).fetch_all(&mut *tx).await.map_err(db)?;
     let assets = rows

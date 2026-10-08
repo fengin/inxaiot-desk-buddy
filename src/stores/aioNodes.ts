@@ -33,6 +33,7 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
   const latestImportSessionId = ref("");
   const loading = ref(false);
   const error = ref("");
+  const metadataWarning = ref("");
   const detail = ref<AioNodeDetail>();
   const detailLoading = ref(false);
   const importPreview = ref<InventoryPreview>();
@@ -57,6 +58,7 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
       detailRequest += 1;
       importRequest += 1;
       nodes.value = [];
+      metadataWarning.value = "";
       stats.value = emptyStats();
       total.value = 0;
       detail.value = undefined;
@@ -80,6 +82,7 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
       });
       if (request === listRequest && projectId.value === nextProjectId) {
         nodes.value = result.items;
+        metadataWarning.value = result.metadataWarning ?? "";
         stats.value = result.stats;
         total.value = result.total;
         refreshedAt.value = result.refreshedAt;
@@ -324,7 +327,7 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
 
   return {
     realBackend, nodes, stats, total, page, pageSize, refreshedAt, latestImportSessionId,
-    loading, error, detail, detailLoading, importPreview, importLoading, platformIssues,
+    loading, error, metadataWarning, detail, detailLoading, importPreview, importLoading, platformIssues,
     selectionNodes, selectionLoading, serviceInspections, serviceInspection,
     refresh, loadSelectionNodes, loadDetail, checkServices, resumeImport, previewImport, updateSelection, applyImport, discardImport
   };

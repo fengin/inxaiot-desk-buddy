@@ -7,3 +7,4 @@ pub mod release;
 pub mod release_profile;
 pub mod release_render;
 pub mod service_check;
+pub mod space;

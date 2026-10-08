@@ -6,6 +6,8 @@ import { configureAioAdapter } from "@/shared/api/aioAdapter";
 import { FixtureAioAdapter } from "@/dev-fixtures/aioFixtureAdapter";
 import type { InventoryApplyOutcome, InventoryPreview } from "@/shared/model/aio";
 import AioNodeCreateDialog from "./AioNodeCreateDialog.vue";
+import ProjectSpaceSelect from "@/shared/components/ProjectSpaceSelect.vue";
+import { projectSpacePath } from "@/shared/model/projectSpace";
 
 beforeEach(() => {
   Object.defineProperty(window, "matchMedia", { configurable: true, value: vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })) });
@@ -26,6 +28,22 @@ function render(adapter = new FixtureAioAdapter()) {
 }
 
 describe("单台新增一体机", () => {
+  it("空间树选择提交真实 ID，保存后显示完整路径", async () => {
+    const context = render();
+    const preview = vi.spyOn(context.adapter, "previewCreate");
+    try {
+      await flushPromises();
+      const spaces = await context.adapter.listSpaces("project-a");
+      const space = spaces.at(-1)!;
+      context.wrapper.getComponent(ProjectSpaceSelect).vm.$emit("update:modelValue", space.id);
+      await context.wrapper.get('[data-testid="aio-create-address"] input').setValue("门口弱电柜");
+      await context.fill(); await context.save();
+      expect(preview).toHaveBeenCalledWith("project-a", expect.objectContaining({ buildingId: space.id, spacePath: projectSpacePath(spaces, space.id) }));
+      const page = await context.adapter.listNodes("project-a", { page: 1, pageSize: 100 });
+      expect(page.items.find(node => node.macNormalized === "AABBCCDDEE79")).toMatchObject({ buildingId: space.id, spacePath: projectSpacePath(spaces, space.id), location: "门口弱电柜" });
+    } finally { context.wrapper.unmount(); }
+  });
+
   it("名称、IP、MAC 必填；完整填写后复用导入应用并关闭预览", async () => {
     const context = render();
     const preview = vi.spyOn(context.adapter, "previewCreate"), apply = vi.spyOn(context.adapter, "applyImport");
@@ -67,14 +85,14 @@ describe("单台新增一体机", () => {
     } finally { context.wrapper.unmount(); }
   });
 
-  it("平台接管要二次确认；取消后释放自己创建的预览", async () => {
+  it("已注册一体机提示在详情编辑，不创建本机待实施记录", async () => {
     const context = render();
     const nodes = await context.adapter.listNodes("project-a", { page: 1, pageSize: 100 });
     const platformNode = nodes.items.find((node) => node.managementState === "platform_existing")!;
     const apply = vi.spyOn(context.adapter, "applyImport");
     try {
       await context.fill(platformNode.name, platformNode.ip, platformNode.mac); await context.save();
-      expect(context.wrapper.text()).toContain("确认接管");
+      expect(context.wrapper.text()).toContain("请在详情中编辑平台资料");
       expect(apply).not.toHaveBeenCalled();
       await context.wrapper.findAll("button").find((button) => button.text() === "取消")!.trigger("click");
       await flushPromises();
@@ -83,7 +101,7 @@ describe("单台新增一体机", () => {
     } finally { context.wrapper.unmount(); }
   });
 
-  it("平台接管确认后保存一次，同 MAC 再次新增被拒绝", async () => {
+  it("反复新增已注册一体机不会写入清单或修改平台资料", async () => {
     const context = render();
     const nodes = await context.adapter.listNodes("project-a", { page: 1, pageSize: 100 });
     const platformNode = nodes.items.find((node) => node.managementState === "platform_existing")!;
@@ -92,8 +110,8 @@ describe("单台新增一体机", () => {
       await context.fill(platformNode.name, platformNode.ip, platformNode.mac); await context.save();
       expect(apply).not.toHaveBeenCalled();
       await context.save();
-      expect(apply).toHaveBeenCalledTimes(1);
-      expect(context.created).toHaveBeenCalledTimes(1);
+      expect(apply).not.toHaveBeenCalled();
+      expect(context.created).not.toHaveBeenCalled();
       expect(await context.adapter.getLatestImport("project-a")).toBeNull();
       await expect(context.adapter.previewCreate("project-a", { name: platformNode.name, ip: platformNode.ip, mac: platformNode.mac })).rejects.toThrow("无需重复新增");
     } finally { context.wrapper.unmount(); }

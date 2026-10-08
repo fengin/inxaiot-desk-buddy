@@ -38,14 +38,7 @@ pub struct ScreenDraft {
     pub updated_at: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SpaceNode {
-    pub id: String,
-    pub name: String,
-    pub parent_id: Option<String>,
-    pub kind: String,
-}
+pub use crate::domain::common::project_space::SpaceNode;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

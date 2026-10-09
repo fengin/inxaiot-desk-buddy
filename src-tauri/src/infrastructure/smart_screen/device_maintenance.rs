@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+mod clock;
+
 const PID_EXIT_MARKER: &str = "__INX_XIAOXIN_PIDOF_EXIT__=";
 const STOP_WAIT_LIMIT: Duration = Duration::from_secs(15);
 const STOP_WAIT_INTERVAL: Duration = Duration::from_millis(150);
@@ -149,6 +151,13 @@ pub async fn capability<P: DeviceCommandPort>(
                 ));
             }
             value["clockSettings"] = clock_settings(device, ip).await?;
+            value["clock"] = clock::capability(
+                device,
+                screen,
+                observed,
+                value["root"].as_str().unwrap_or(""),
+            )
+            .await?;
         }
         "adb" => {
             if screen.fields.size != "10"
@@ -267,15 +276,21 @@ pub async fn execute(
             let now = time::OffsetDateTime::now_utc().unix_timestamp();
             result.evidence["requestedSeconds"] = json!(now);
             checkpoint(state, plan, id, result).await?;
-            // Android 8 toybox 对 @时间戳仍可能套用本地时区，显式按 UTC 解释；不修改系统时区。
-            root_command(
-                &device,
-                ip,
-                capabilities["root"].as_str().unwrap_or(""),
-                &["date", "-u", &format!("@{now}")],
-            )
-            .await?;
+            let mode = capabilities["root"].as_str().unwrap_or("");
+            clock::set_system(&device, ip, mode, now).await?;
             result.evidence["phase"] = json!("clock_set");
+            checkpoint(state, plan, id, result).await?;
+            authorize(state, plan, held).await?;
+            result.evidence["phase"] = json!("hardware_clock_requested");
+            checkpoint(state, plan, id, result).await?;
+            clock::set_hardware(&device, ip, mode, &capabilities["clock"]["rtc"])
+                .await
+                .map_err(|error| {
+                    AppError::Conflict(format!(
+                        "系统时间已校准，但硬件时钟设置尚未确认，请核实结果：{error}"
+                    ))
+                })?;
+            result.evidence["phase"] = json!("hardware_clock_set");
             checkpoint(state, plan, id, result).await?;
         }
         "adb" => {
@@ -525,20 +540,16 @@ pub async fn verify(
     let capability = &result.evidence["capability"];
     match action {
         "time" => {
-            let seconds = read(&device, ip, &["date", "+%s"])
-                .await?
-                .parse::<i64>()
-                .map_err(|_| AppError::Conflict("未取得设备实际时间".into()))?;
-            let offset = seconds - time::OffsetDateTime::now_utc().unix_timestamp();
-            if offset.abs() > 15
-                || clock_settings(&device, ip).await? != capability["clockSettings"]
-            {
-                result.device = ResultState::Failed;
-                result.message = "校时后偏差或原有时区、自动校时设置未通过核对，请检查设备".into();
+            let verified = clock::verify(&device, ip, &result.evidence).await?;
+            result.evidence["clockVerification"] = verified.readings;
+            result.device = if verified.succeeded {
+                ResultState::Succeeded
             } else {
-                result.device = ResultState::Succeeded;
-                result.message =
-                    format!("已核对当前时间，偏差 {offset} 秒；时区和自动校时设置保留");
+                ResultState::Failed
+            };
+            result.message = verified.message;
+            if verified.succeeded {
+                result.evidence["phase"] = json!("clock_verified");
             }
         }
         "adb" | "reboot" => {

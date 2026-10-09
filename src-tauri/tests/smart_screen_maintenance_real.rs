@@ -329,3 +329,157 @@ async fn resume_persistent_adb_and_diagnostics_from_preserved_case()
     eprintln!("维护接续证据：{}", evidence.display());
     outcome
 }
+
+#[tokio::test]
+#[ignore = "显式指定 INX_SCREEN_CLOCK_TEST=1；先隔离公网并准备旧RTC，再校准两种屏并各重启一次"]
+async fn system_and_hardware_clock_survive_offline_reboot() -> Result<(), Box<dyn std::error::Error>>
+{
+    use inxaiot_desk_buddy_lib::{
+        domain::smart_screen::model::ResultState,
+        infrastructure::smart_screen::device::{AdbDevice, AndroidTools},
+    };
+    use tokio_util::sync::CancellationToken;
+    if std::env::var("INX_SCREEN_CLOCK_TEST").as_deref() != Ok("1") {
+        return Err("必须明确允许本次硬件校时和两台屏重启".into());
+    }
+    let directory = support::evidence_dir("hardware-clock")?;
+    let state = support::state_at(&directory, true).await;
+    let device = AdbDevice::new(AndroidTools::discover()?);
+    let mut report = serde_json::json!({"screens":[], "passed":false});
+    let outcome: Result<(), Box<dyn std::error::Error>> = async {
+        let project = Stage75Adapter::new(&state)
+            .create_project(support::local_input())
+            .await?
+            .project
+            .id;
+        let repository = ScreenRepository::new(state.local_store.pool().clone());
+        let mut targets = Vec::new();
+        // 每种尺寸只使用测试说明中的第一台，避免连带操作其他屏。
+        for size in ["4", "10"] {
+            let live = support::live_screen(size)?;
+            device.connect(&live.ip, CancellationToken::new()).await?;
+            let routes = device
+                .shell(
+                    &live.ip,
+                    &[
+                        "su",
+                        "0",
+                        "sh",
+                        "-c",
+                        "'ip -4 route show table all; ip -6 route show table all'",
+                    ],
+                    CancellationToken::new(),
+                )
+                .await?;
+            if routes.lines().any(|line| line.starts_with("default ")) {
+                return Err(format!("{} 尚未隔离公网，停止实机测试", live.ip).into());
+            }
+            let fields = ScreenFields {
+                name: live.name,
+                ip: live.ip,
+                size: size.into(),
+                ..Default::default()
+            };
+            let id = repository.save_local(&project, &fields, None, None).await?;
+            targets.push((id, fields));
+        }
+        let ids: Vec<_> = targets.iter().map(|(id, _)| id.clone()).collect();
+        let time_task = execute(&state, &project, input("time", ids.clone())).await?;
+        let result =
+            task_data::read_results(state.local_store.pool(), &project, &time_task).await?;
+        report["timeTask"] = serde_json::to_value(&result)?;
+        for target in result.targets.values() {
+            assert_eq!(target.device, ResultState::Succeeded);
+            assert_eq!(target.evidence["phase"], "clock_verified");
+            for key in ["systemOffsetSeconds", "hardwareOffsetSeconds"] {
+                assert!(
+                    target.evidence["clockVerification"][key]
+                        .as_i64()
+                        .unwrap()
+                        .abs()
+                        <= 15
+                );
+            }
+            let old = target.evidence["capability"]["clock"]["beforeHardwareSeconds"]
+                .as_i64()
+                .unwrap();
+            assert!(
+                (old - time::OffsetDateTime::now_utc().unix_timestamp()).abs() > 60,
+                "必须实际修正旧硬件时间，不能只验证原本正确的时钟"
+            );
+        }
+        let reboot_task = execute(&state, &project, input("reboot", ids)).await?;
+        report["rebootTask"] = serde_json::to_value(
+            task_data::read_results(state.local_store.pool(), &project, &reboot_task).await?,
+        )?;
+        for (_, fields) in targets {
+            let utc = device
+                .shell(
+                    &fields.ip,
+                    &["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"],
+                    CancellationToken::new(),
+                )
+                .await?;
+            let system = time::OffsetDateTime::parse(
+                utc.trim(),
+                &time::format_description::well_known::Rfc3339,
+            )?
+            .unix_timestamp();
+            let system_offset = system - time::OffsetDateTime::now_utc().unix_timestamp();
+            let rtc: i64 = device
+                .shell(
+                    &fields.ip,
+                    &["su", "0", "cat", "/sys/class/rtc/rtc0/since_epoch"],
+                    CancellationToken::new(),
+                )
+                .await?
+                .trim()
+                .parse()?;
+            let rtc_offset = rtc - time::OffsetDateTime::now_utc().unix_timestamp();
+            let routes = device
+                .shell(
+                    &fields.ip,
+                    &[
+                        "su",
+                        "0",
+                        "sh",
+                        "-c",
+                        "'ip -4 route show table all; ip -6 route show table all'",
+                    ],
+                    CancellationToken::new(),
+                )
+                .await?;
+            let ntp = device
+                .shell(
+                    &fields.ip,
+                    &["dumpsys", "network_time_update_service"],
+                    CancellationToken::new(),
+                )
+                .await?;
+            assert!(!routes.lines().any(|line| line.starts_with("default ")));
+            assert!(
+                ntp.contains("LastNtpFetchTime: -1ms")
+                    || ntp.contains("NTP cache age: 9223372036854775807")
+            );
+            assert!(system_offset.abs() <= 15 && rtc_offset.abs() <= 15);
+            report["screens"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "ip":fields.ip, "size":fields.size, "systemOffsetSeconds":system_offset,
+                    "hardwareOffsetSeconds":rtc_offset, "routes":routes, "networkTime":ntp,
+                }));
+        }
+        Ok(())
+    }
+    .await;
+    support::close(state).await;
+    report["passed"] = serde_json::json!(outcome.is_ok());
+    report["error"] = serde_json::json!(outcome.as_ref().err().map(|e| e.to_string()));
+    std::fs::write(
+        directory.join("result.json"),
+        serde_json::to_vec_pretty(&report)?,
+    )?;
+    eprintln!("硬件校时验收证据：{}", directory.display());
+    outcome
+}

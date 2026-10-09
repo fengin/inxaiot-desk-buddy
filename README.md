@@ -2,7 +2,7 @@
 
 面向项目实施与维护人员的桌面工作台，根据 `inxaiot-edge-workbench` 的实际能力重新进行产品、技术和工程设计。
 
-当前应用版本：**0.2.6**。功能与验收范围见[版本变更记录](CHANGELOG.md)。
+当前应用版本：**0.2.7**。功能与验收范围见[版本变更记录](CHANGELOG.md)。
 
 Windows 与现有两台一体机、三台智能屏的整体实机回归已完成，包括一体机部署升级、智能屏安装及配置管理、结果回写和异常恢复。验证结果与范围见[整体实机回归记录](doc/27-整体实机回归记录.md)；Mac 原生运行及现场触摸、语音体验仍需在目标设备验收。
 
@@ -98,7 +98,7 @@ pnpm tauri dev
 
 ### GitHub多平台发布
 
-- 推送`v*.*.*`标签会触发`.github/workflows/portable-release.yml`；标签必须与`package.json`、Cargo和Tauri中的应用版本一致，当前版本使用`v0.2.6`。
+- 推送`v*.*.*`标签会触发`.github/workflows/portable-release.yml`；标签必须与`package.json`、Cargo和Tauri中的应用版本一致，当前版本使用`v0.2.7`。
 - Actions并行构建Windows x64、Linux x64、macOS Intel x64和Apple Silicon arm64，生成便携压缩包及对应SHA-256文件；全部构建成功后才创建GitHub Release。手动触发只保存7天的Workflow Artifact，不创建Release。
 - macOS 流水线与本机构建共用 `build:macos`，按 x64、arm64 检查 ADB 架构。默认产物使用 adhoc 签名；没有 Apple Developer 证书和公证，首次从网络下载后仍可能需要用户在系统“隐私与安全性”中允许打开。使用工作台不需要 Java 或 Rosetta。
 - GitHub产物用于跨平台构建和原生验收，不能替代目标Mac和Linux发行版上的实际运行、Keychain/Secret Service、文件对话框及SSH/SFTP验证。

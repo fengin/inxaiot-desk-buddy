@@ -239,7 +239,7 @@ function restartConfig(ids:string[]){historyOpen.value=false;fresh();store.selec
             <div class="screen-callout screen-operation-note">新屏注册到平台，已注册的屏只更新信息，MAC信息会自动获取。</div>
             <p class="screen-registration-note">先补齐名称、IP、尺寸和所属空间。已注册屏的修改保留为本机待提交资料，预览确认前不改变平台。</p>
           </template>
-          <template v-else-if="store.operation==='time'"><div class="screen-setting-info"><Clock3 :size="17" /><div><strong>当前电脑时间</strong><p>{{ formatDisplayDateTime(new Date().toISOString()) }}</p></div></div><div class="screen-callout">逐台执行时获取当前时间。保留屏的时区及自动校时设置，回读偏差不超过 15 秒。</div></template>
+          <template v-else-if="store.operation==='time'"><div class="screen-setting-info"><Clock3 :size="17" /><div><strong>当前电脑时间</strong><p>{{ formatDisplayDateTime(new Date().toISOString()) }}</p></div></div><div class="screen-callout">以当前电脑时间同时校准系统时间和硬件时钟，两项回读偏差均不超过 15 秒。保留原时区和自动校时设置；已测4寸固件完全断电后仍可能丢时。</div></template>
           <div v-else class="screen-callout screen-operation-note">
             <template v-if="store.operation==='ping'">从本机检查 IP 可达性。与平台状态有差异时，在检查结果中由你确认是否覆盖；未注册屏仅保留本机结果。</template>
             <template v-else-if="store.operation==='adb'">仅支持已验证的 10 寸屏。先检查当前连接，再确认设置持久 5555 端口并重启，最后验证恢复。</template>

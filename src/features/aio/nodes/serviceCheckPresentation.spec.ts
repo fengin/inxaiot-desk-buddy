@@ -5,7 +5,7 @@ import { nodeServicePresentation, nodeServiceRows, projectVersionRows, serviceCh
 function node(): AioNodeListItem {
   return {
     mac: "00:11:22:33:44:55", macNormalized: "001122334455", name: "测试一体机", ip: "192.0.2.1", location: "",
-    managementState: "managed", deployLabel: "已管理", platformState: "online", platformUpdatedAt: "2026-09-01T00:00:00Z",
+    managementState: "managed", deploymentState: "deployed", deployLabel: "已部署", platformState: "online", platformUpdatedAt: "2026-09-01T00:00:00Z",
     serviceState: "healthy", serviceLabel: "正常", lastOperation: "整包升级", source: "merged", version: 1, conflicts: [],
     versions: ["device-edge", "rule-engine", "web", "emqx"].map((serviceName) => ({
       macNormalized: "001122334455", serviceName, expectedImageName: `inx/${serviceName}`, expectedVersion: "1.0",

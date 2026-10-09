@@ -26,6 +26,9 @@ pub struct AioNodeStats {
     pub online: u32,
     pub offline: u32,
     pub pending: u32,
+    pub deployed: u32,
+    pub attention: u32,
+    pub unconfirmed: u32,
     pub conflicts: u32,
 }
 
@@ -40,6 +43,7 @@ pub struct AioNodeListItem {
     pub building_id: Option<String>,
     pub space_path: String,
     pub management_state: String,
+    pub deployment_state: String,
     pub deploy_label: String,
     pub platform_state: String,
     pub platform_updated_at: String,
@@ -65,6 +69,7 @@ pub struct AioNodeListPage {
     pub page_size: u32,
     pub stats: AioNodeStats,
     pub platform_issues: Vec<PlatformRecordIssue>,
+    pub page_platform_issues: Vec<PlatformRecordIssue>,
     pub latest_import_session_id: Option<String>,
     pub refreshed_at: String,
 }
@@ -116,7 +121,8 @@ pub struct UpdateAioNodeInput {
 
 #[allow(async_fn_in_trait)]
 pub trait AioAssetsPort: Send + Sync {
-    async fn update_node(&self, local_project_id: &str, input: UpdateAioNodeInput) -> AppResult<()>;
+    async fn update_node(&self, local_project_id: &str, input: UpdateAioNodeInput)
+    -> AppResult<()>;
     async fn list_nodes(
         &self,
         local_project_id: &str,
@@ -148,7 +154,11 @@ pub trait AioAssetsPort: Send + Sync {
     ) -> AppResult<InventoryApplyOutcome>;
 }
 
-pub async fn update_aio_node<P: AioAssetsPort>(port: &P, project: &str, input: UpdateAioNodeInput) -> AppResult<()> {
+pub async fn update_aio_node<P: AioAssetsPort>(
+    port: &P,
+    project: &str,
+    input: UpdateAioNodeInput,
+) -> AppResult<()> {
     port.update_node(project, input).await
 }
 

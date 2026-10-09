@@ -10,7 +10,8 @@ use crate::application::aio_assets::{
 };
 use crate::core::error::{AppError, AppResult};
 use crate::domain::aio::assets::{
-    AioImportSession, ImportSelection, OperationRecordSummary, ServiceVersionRecord,
+    AioImportSession, ImportSelection, OperationRecordSummary, PlatformRecordIssue,
+    ServiceVersionRecord,
 };
 use crate::domain::aio::inventory::{
     FieldConflict, ImportClassification, InventoryValues, ParsedInventoryRow, PlatformNodeSnapshot,
@@ -19,10 +20,10 @@ use crate::domain::aio::inventory::{
 use crate::domain::aio::mac::MacAddress;
 use crate::domain::aio::service_check::NodeServiceCheckSnapshot;
 use crate::formal::app_state::FormalAppState;
+use crate::infrastructure::aio_inventory_source::merge_sources;
 use crate::infrastructure::csv_inventory::parse_inventory_path;
 use crate::infrastructure::local_sqlite::aio_import_repository::AioImportRepository;
 use crate::infrastructure::local_sqlite::aio_node_repository::LocalAioRepository;
-use crate::infrastructure::aio_inventory_source::merge_sources;
 use crate::infrastructure::platform_aio::PlatformAioRepository;
 use crate::infrastructure::project_context::project_pools as project_database;
 use crate::infrastructure::service_check_repository::ServiceCheckRepository;
@@ -39,7 +40,11 @@ impl<'a> AioAssetsService<'a> {
 }
 
 impl AioAssetsPort for AioAssetsService<'_> {
-    async fn update_node(&self, project: &str, input: crate::application::aio_assets::UpdateAioNodeInput) -> AppResult<()> {
+    async fn update_node(
+        &self,
+        project: &str,
+        input: crate::application::aio_assets::UpdateAioNodeInput,
+    ) -> AppResult<()> {
         crate::infrastructure::aio_edit::update(self.state, project, input).await
     }
     async fn list_nodes(
@@ -113,35 +118,30 @@ pub async fn list_aio_nodes(
         platform_repository.list_all(),
         check_repository.list(),
     )?;
-    let local = LocalAioRepository::new(state.local_store.pool().clone()).list(local_project_id).await?;
-    crate::infrastructure::aio_inventory_source::retire_registered(state, local_project_id, &local, &platform.nodes).await?;
+    let local = LocalAioRepository::new(state.local_store.pool().clone())
+        .list(local_project_id)
+        .await?;
+    crate::infrastructure::aio_inventory_source::retire_registered(
+        state,
+        local_project_id,
+        &local,
+        &platform.nodes,
+    )
+    .await?;
     let workbench = merge_sources(&local, &workbench, &platform.nodes);
     let mut items = build_node_items(&workbench, &platform.nodes, &versions, &operations, &checks);
     apply_space_labels(&mut items, &pools.platform).await;
-    let stats = calculate_stats(&items);
+    let stats = calculate_stats(&items, &platform.issues);
     let keyword = query.search.unwrap_or_default().trim().to_lowercase();
     let state_filter = query.state.unwrap_or_else(|| "all".into());
-    items.retain(|item| {
-        let keyword_matches = keyword.is_empty()
-            || [&item.name, &item.ip, &item.mac, &item.location, &item.space_path]
-                .iter()
-                .any(|value| value.to_lowercase().contains(&keyword));
-        let state_matches = state_filter == "all"
-            || item.management_state == state_filter
-            || item.platform_state == state_filter;
-        keyword_matches && state_matches
-    });
-    let total = u32::try_from(items.len()).unwrap_or(u32::MAX);
-    let start = usize::try_from((page - 1).saturating_mul(page_size)).unwrap_or(usize::MAX);
-    let paged = if start >= items.len() {
-        Vec::new()
-    } else {
-        items
-            .into_iter()
-            .skip(start)
-            .take(usize::try_from(page_size).unwrap_or(100))
-            .collect()
-    };
+    let (paged, page_platform_issues, total) = filter_node_page(
+        items,
+        &platform.issues,
+        &keyword,
+        &state_filter,
+        page,
+        page_size,
+    );
     let import_repository = AioImportRepository::new(state.local_store.pool().clone());
     let latest_import_session_id = import_repository
         .latest_open_for_project(local_project_id)
@@ -155,6 +155,7 @@ pub async fn list_aio_nodes(
         page_size,
         stats,
         platform_issues: platform.issues,
+        page_platform_issues,
         latest_import_session_id,
         refreshed_at: timestamp(),
     })
@@ -176,8 +177,16 @@ pub async fn get_aio_node_detail(
         platform_repository.list_all(),
         check_repository.get(mac.normalized()),
     )?;
-    let local = LocalAioRepository::new(state.local_store.pool().clone()).list(local_project_id).await?;
-    crate::infrastructure::aio_inventory_source::retire_registered(state, local_project_id, &local, &platform.nodes).await?;
+    let local = LocalAioRepository::new(state.local_store.pool().clone())
+        .list(local_project_id)
+        .await?;
+    crate::infrastructure::aio_inventory_source::retire_registered(
+        state,
+        local_project_id,
+        &local,
+        &platform.nodes,
+    )
+    .await?;
     let workbench = merge_sources(&local, &workbench, &platform.nodes);
     let service_checks = check
         .into_iter()
@@ -214,7 +223,14 @@ pub async fn get_aio_node_detail(
     })
 }
 
-async fn shared_metadata(repository: &WorkbenchAioRepository) -> (Vec<WorkbenchNodeSnapshot>, Vec<ServiceVersionRecord>, HashMap<String, OperationRecordSummary>, Option<String>) {
+async fn shared_metadata(
+    repository: &WorkbenchAioRepository,
+) -> (
+    Vec<WorkbenchNodeSnapshot>,
+    Vec<ServiceVersionRecord>,
+    HashMap<String, OperationRecordSummary>,
+    Option<String>,
+) {
     match tokio::try_join!(repository.list_snapshots(), repository.list_service_versions(), repository.list_last_operations()) {
         Ok((nodes, versions, operations)) => (nodes, versions, operations, None),
         Err(_) => (Vec::new(), Vec::new(), HashMap::new(), Some("工作台部署记录暂未读取，当前显示本机清单和平台资料；请检查项目连接或工作台数据库结构。".into())),
@@ -279,8 +295,14 @@ pub async fn preview_aio_node_create(
     values: InventoryValues,
 ) -> AppResult<InventoryPreview> {
     let repository = AioImportRepository::new(state.local_store.pool().clone());
-    if repository.latest_open_for_project(local_project_id).await?.is_some() {
-        return Err(AppError::Conflict("当前项目有未处理的导入预览，请先处理或放弃后再新增一体机".into()));
+    if repository
+        .latest_open_for_project(local_project_id)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict(
+            "当前项目有未处理的导入预览，请先处理或放弃后再新增一体机".into(),
+        ));
     }
     let mut row = validate_inventory_values(1, values);
     if !row.errors.is_empty() {
@@ -299,17 +321,39 @@ pub async fn preview_aio_node_create(
     )?;
     let items = prepare_node_create(row, &workbench, &platform.nodes)?;
     // 与 CSV 共用一个未处理预览约束；创建失败也不会替换原有预览。
-    let session = repository.create_preview(local_project_id, "单台新增一体机", "manual-entry", &items).await?;
-    Ok(InventoryPreview { session, platform_issues: platform.issues })
+    let session = repository
+        .create_preview(local_project_id, "单台新增一体机", "manual-entry", &items)
+        .await?;
+    Ok(InventoryPreview {
+        session,
+        platform_issues: platform.issues,
+    })
 }
 
-async fn resolve_import_spaces(pool: &sqlx::MySqlPool, rows: &mut [ParsedInventoryRow]) -> AppResult<()> {
-    let needs_directory = rows.iter().any(|row| row.values.space_path.is_some() || row.values.building_id.as_deref().is_some_and(|id| !id.is_empty() && id != "0"));
-    let spaces = if needs_directory { crate::infrastructure::project_spaces::read(pool, None).await? } else { Vec::new() };
+async fn resolve_import_spaces(
+    pool: &sqlx::MySqlPool,
+    rows: &mut [ParsedInventoryRow],
+) -> AppResult<()> {
+    let needs_directory = rows.iter().any(|row| {
+        row.values.space_path.is_some()
+            || row
+                .values
+                .building_id
+                .as_deref()
+                .is_some_and(|id| !id.is_empty() && id != "0")
+    });
+    let spaces = if needs_directory {
+        crate::infrastructure::project_spaces::read(pool, None).await?
+    } else {
+        Vec::new()
+    };
     let paths = crate::domain::common::project_space::space_paths(&spaces);
     for row in rows {
-        if let Err(error) = crate::domain::aio::space::resolve_inventory_space_in_directory(&mut row.values, &paths) {
-            row.errors.push(format!("第 {} 行：{}", row.row_number, error));
+        if let Err(error) =
+            crate::domain::aio::space::resolve_inventory_space_in_directory(&mut row.values, &paths)
+        {
+            row.errors
+                .push(format!("第 {} 行：{}", row.row_number, error));
         }
     }
     Ok(())
@@ -320,15 +364,22 @@ fn prepare_node_create(
     workbench: &[WorkbenchNodeSnapshot],
     platform: &[PlatformNodeSnapshot],
 ) -> AppResult<Vec<ReconciledImportItem>> {
-    if platform.iter().any(|node| Some(&node.mac_normalized) == row.mac_normalized.as_ref()) {
-        return Err(AppError::Conflict("该一体机已在平台注册，无需重复新增；请在详情中编辑平台资料".into()));
+    if platform
+        .iter()
+        .any(|node| Some(&node.mac_normalized) == row.mac_normalized.as_ref())
+    {
+        return Err(AppError::Conflict(
+            "该一体机已在平台注册，无需重复新增；请在详情中编辑平台资料".into(),
+        ));
     }
     let items = reconcile_local_import(vec![row], workbench, platform);
     let item = &items[0];
     match item.classification {
         ImportClassification::NewPending => {}
         ImportClassification::PlatformExisting => {
-            if let Some(current) = platform.iter().find(|node| Some(&node.id) == item.platform_aio_id.as_ref())
+            if let Some(current) = platform
+                .iter()
+                .find(|node| Some(&node.id) == item.platform_aio_id.as_ref())
                 && (current.name.trim() != item.values.name || current.ip.trim() != item.values.ip)
             {
                 return Err(AppError::Conflict(format!(
@@ -338,17 +389,32 @@ fn prepare_node_create(
             }
         }
         ImportClassification::ExistingUnchanged | ImportClassification::ExistingChanged => {
-            return Err(AppError::Conflict("该 MAC 对应的一体机已在工作台中，无需重复新增；如需修改，请使用清单导入核对变更".into()));
+            return Err(AppError::Conflict(
+                "该 MAC 对应的一体机已在工作台中，无需重复新增；如需修改，请使用清单导入核对变更"
+                    .into(),
+            ));
         }
         ImportClassification::Conflict => {
-            return Err(AppError::Conflict(item.conflicts.iter().map(|conflict| conflict.message.as_str()).collect::<Vec<_>>().join("；")));
+            return Err(AppError::Conflict(
+                item.conflicts
+                    .iter()
+                    .map(|conflict| conflict.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("；"),
+            ));
         }
-        ImportClassification::Invalid => return Err(AppError::InvalidConfig(item.errors.join("；"))),
+        ImportClassification::Invalid => {
+            return Err(AppError::InvalidConfig(item.errors.join("；")));
+        }
     }
     Ok(items)
 }
 
-fn reconcile_local_import(rows: Vec<ParsedInventoryRow>, local: &[WorkbenchNodeSnapshot], platform: &[PlatformNodeSnapshot]) -> Vec<ReconciledImportItem> {
+fn reconcile_local_import(
+    rows: Vec<ParsedInventoryRow>,
+    local: &[WorkbenchNodeSnapshot],
+    platform: &[PlatformNodeSnapshot],
+) -> Vec<ReconciledImportItem> {
     let mut items = reconcile_inventory(rows, local, platform);
     for item in &mut items {
         if item.platform_aio_id.is_some() && item.errors.is_empty() {
@@ -390,34 +456,62 @@ pub async fn apply_inventory_import(
     let sessions = AioImportRepository::new(state.local_store.pool().clone());
     let session = sessions.get(session_id).await?;
     ensure_session_project(&session, local_project_id)?;
-    if session.state != "preview" { return Err(AppError::Conflict("导入会话已经结束".into())); }
-    let selected = session.items.iter().filter(|item| item.selected).collect::<Vec<_>>();
-    if selected.is_empty() { return Err(AppError::InvalidConfig("请至少选择一行可应用的一体机".into())); }
+    if session.state != "preview" {
+        return Err(AppError::Conflict("导入会话已经结束".into()));
+    }
+    let selected = session
+        .items
+        .iter()
+        .filter(|item| item.selected)
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err(AppError::InvalidConfig(
+            "请至少选择一行可应用的一体机".into(),
+        ));
+    }
     let pools = project_database(state, local_project_id).await?;
     let local = LocalAioRepository::new(state.local_store.pool().clone());
     let current = local.list(local_project_id).await?;
-    let platform = PlatformAioRepository::new(pools.platform.clone()).list_all().await?;
-    let mut rows = selected.iter().map(|item| ParsedInventoryRow {
-        row_number: item.row_number, values: item.values.clone(),
-        mac_normalized: item.mac_normalized.clone(), errors: item.errors.clone(),
-    }).collect::<Vec<_>>();
+    let platform = PlatformAioRepository::new(pools.platform.clone())
+        .list_all()
+        .await?;
+    let mut rows = selected
+        .iter()
+        .map(|item| ParsedInventoryRow {
+            row_number: item.row_number,
+            values: item.values.clone(),
+            mac_normalized: item.mac_normalized.clone(),
+            errors: item.errors.clone(),
+        })
+        .collect::<Vec<_>>();
     resolve_import_spaces(&pools.platform, &mut rows).await?;
     let checked = reconcile_local_import(rows, &current, &platform.nodes);
     let mut records = Vec::new();
     for item in checked {
-        let original = selected.iter().find(|old| old.row_number == item.row_number)
+        let original = selected
+            .iter()
+            .find(|old| old.row_number == item.row_number)
             .ok_or_else(|| AppError::Conflict("导入预览已经变化，请重新选择".into()))?;
-        if !matches!(item.classification, ImportClassification::NewPending | ImportClassification::ExistingChanged)
-            || item.workbench_version != original.workbench_version || item.platform_aio_id.is_some()
+        if !matches!(
+            item.classification,
+            ImportClassification::NewPending | ImportClassification::ExistingChanged
+        ) || item.workbench_version != original.workbench_version
+            || item.platform_aio_id.is_some()
         {
-            return Err(AppError::Conflict(format!("第 {} 行资料或注册状态已变化，请重新预览；已注册一体机请在详情中编辑", item.row_number)));
+            return Err(AppError::Conflict(format!(
+                "第 {} 行资料或注册状态已变化，请重新预览；已注册一体机请在详情中编辑",
+                item.row_number
+            )));
         }
         records.push((item.values, item.workbench_version));
     }
-    local.apply_import(local_project_id, session_id, &records).await?;
+    local
+        .apply_import(local_project_id, session_id, &records)
+        .await?;
     Ok(InventoryApplyOutcome {
         result: crate::domain::aio::assets::InventoryApplyResult {
-            operation_id: session_id.into(), applied_count: records.len() as u32,
+            operation_id: session_id.into(),
+            applied_count: records.len() as u32,
         },
         local_session_finalized: true,
     })
@@ -467,6 +561,15 @@ fn build_node_items(
                     .map(|node| node.management_state.clone())
                     .unwrap_or_else(|| "platform_existing".into())
             };
+            let deployment_state = if management_state == "conflict" {
+                "attention"
+            } else if platform_node.is_some() {
+                "deployed"
+            } else if management_state == "pending" {
+                "pending"
+            } else {
+                "unconfirmed"
+            };
             let service_versions = versions_by_mac.get(mac).cloned().unwrap_or_default();
             let service_check = checks.get(mac).cloned();
             let (service_state, service_label) = service_check
@@ -495,10 +598,12 @@ fn build_node_items(
                     .unwrap_or_default(),
                 location: display_location(workbench_node, platform_node),
                 space_path: String::new(),
-                building_id: platform_node.and_then(|node| node.building_id.clone())
+                building_id: platform_node
+                    .and_then(|node| node.building_id.clone())
                     .or_else(|| workbench_node.and_then(|node| node.building_id.clone()))
                     .filter(|id| !id.is_empty() && id != "0"),
-                deploy_label: deploy_label(&management_state).into(),
+                deploy_label: deploy_label(deployment_state).into(),
+                deployment_state: deployment_state.into(),
                 management_state,
                 platform_state,
                 platform_updated_at: platform_node
@@ -543,11 +648,17 @@ fn build_node_items(
 }
 
 async fn apply_space_labels(items: &mut [AioNodeListItem], pool: &sqlx::MySqlPool) {
-    if !items.iter().any(|item| item.building_id.is_some()) { return; }
+    if !items.iter().any(|item| item.building_id.is_some()) {
+        return;
+    }
     // 目录暂不可用不影响查看资产；实际选空间和保存仍需实时校验。
     if let Ok(spaces) = crate::infrastructure::project_spaces::read(pool, None).await {
         for item in items {
-            if let Some(path) = item.building_id.as_deref().and_then(|id| crate::domain::common::project_space::path_text(&spaces, id)) {
+            if let Some(path) = item
+                .building_id
+                .as_deref()
+                .and_then(|id| crate::domain::common::project_space::path_text(&spaces, id))
+            {
                 item.space_path = path;
             }
         }
@@ -628,7 +739,76 @@ fn asset_conflicts(
     conflicts
 }
 
-fn calculate_stats(items: &[AioNodeListItem]) -> AioNodeStats {
+fn filter_node_page(
+    items: Vec<AioNodeListItem>,
+    platform_issues: &[PlatformRecordIssue],
+    keyword: &str,
+    state_filter: &str,
+    page: u32,
+    page_size: u32,
+) -> (Vec<AioNodeListItem>, Vec<PlatformRecordIssue>, u32) {
+    let nodes = items
+        .into_iter()
+        .filter(|item| {
+            let keyword_matches = keyword.is_empty()
+                || [
+                    &item.name,
+                    &item.ip,
+                    &item.mac,
+                    &item.location,
+                    &item.space_path,
+                ]
+                .iter()
+                .any(|value| value.to_lowercase().contains(keyword));
+            let state_matches = state_filter == "all"
+                || item.deployment_state == state_filter
+                || item.platform_state == state_filter;
+            keyword_matches && state_matches
+        })
+        .collect::<Vec<_>>();
+    // 无法确认 MAC 身份的平台资料仅在待处理页合并，不能进入部署目标集合。
+    let mut issues = platform_issues
+        .iter()
+        .filter(|issue| {
+            state_filter == "attention"
+                && (keyword.is_empty()
+                    || [
+                        &issue.name,
+                        &issue.ip,
+                        &issue.raw_mac,
+                        &issue.platform_aio_id,
+                        &issue.message,
+                    ]
+                    .iter()
+                    .any(|value| value.to_lowercase().contains(keyword)))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    issues.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.platform_aio_id.cmp(&right.platform_aio_id))
+    });
+    let total = u32::try_from(nodes.len().saturating_add(issues.len())).unwrap_or(u32::MAX);
+    let start =
+        usize::try_from(page.saturating_sub(1).saturating_mul(page_size)).unwrap_or(usize::MAX);
+    let limit = usize::try_from(page_size).unwrap_or(100);
+    let issue_start = start.saturating_sub(nodes.len());
+    let paged = nodes
+        .into_iter()
+        .skip(start)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let paged_issues = issues
+        .into_iter()
+        .skip(issue_start)
+        .take(limit.saturating_sub(paged.len()))
+        .collect();
+    (paged, paged_issues, total)
+}
+
+fn calculate_stats(items: &[AioNodeListItem], issues: &[PlatformRecordIssue]) -> AioNodeStats {
     AioNodeStats {
         total: u32::try_from(items.len()).unwrap_or(u32::MAX),
         online: u32::try_from(
@@ -648,7 +828,29 @@ fn calculate_stats(items: &[AioNodeListItem]) -> AioNodeStats {
         pending: u32::try_from(
             items
                 .iter()
-                .filter(|item| item.management_state == "pending")
+                .filter(|item| item.deployment_state == "pending")
+                .count(),
+        )
+        .unwrap_or(u32::MAX),
+        deployed: u32::try_from(
+            items
+                .iter()
+                .filter(|item| item.deployment_state == "deployed")
+                .count(),
+        )
+        .unwrap_or(u32::MAX),
+        attention: u32::try_from(
+            items
+                .iter()
+                .filter(|item| item.deployment_state == "attention")
+                .count()
+                .saturating_add(issues.len()),
+        )
+        .unwrap_or(u32::MAX),
+        unconfirmed: u32::try_from(
+            items
+                .iter()
+                .filter(|item| item.deployment_state == "unconfirmed")
                 .count(),
         )
         .unwrap_or(u32::MAX),
@@ -664,10 +866,9 @@ fn calculate_stats(items: &[AioNodeListItem]) -> AioNodeStats {
 
 fn deploy_label(state: &str) -> &'static str {
     match state {
-        "managed" => "已管理",
+        "deployed" => "已部署",
         "pending" => "待实施",
-        "platform_existing" => "平台已存在",
-        "conflict" => "信息冲突",
+        "attention" => "待处理",
         _ => "待确认",
     }
 }
@@ -677,11 +878,7 @@ fn display_location(
     platform: Option<&PlatformNodeSnapshot>,
 ) -> String {
     workbench
-        .and_then(|node| {
-            node.location
-                .clone()
-                .or_else(|| node.addr_alias.clone())
-        })
+        .and_then(|node| node.location.clone().or_else(|| node.addr_alias.clone()))
         .or_else(|| platform.and_then(|node| node.addr_alias.clone()))
         .unwrap_or_default()
 }
@@ -706,7 +903,6 @@ fn platform_updated_at(node: &PlatformNodeSnapshot) -> String {
         })
         .unwrap_or_else(|| raw.to_string())
 }
-
 
 fn ensure_session_project(session: &AioImportSession, local_project_id: &str) -> AppResult<()> {
     if session.local_project_id != local_project_id {
@@ -763,9 +959,15 @@ fn timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{asset_conflicts, build_node_items, platform_updated_at, prepare_node_create, session_is_expired};
-    use crate::domain::aio::assets::ServiceVersionRecord;
-    use crate::domain::aio::inventory::{ImportClassification, InventoryValues, PlatformNodeSnapshot, WorkbenchNodeSnapshot, validate_inventory_values};
+    use super::{
+        asset_conflicts, build_node_items, calculate_stats, filter_node_page, platform_updated_at,
+        prepare_node_create, session_is_expired,
+    };
+    use crate::domain::aio::assets::{PlatformRecordIssue, ServiceVersionRecord};
+    use crate::domain::aio::inventory::{
+        ImportClassification, InventoryValues, PlatformNodeSnapshot, WorkbenchNodeSnapshot,
+        validate_inventory_values,
+    };
     use std::collections::HashMap;
 
     fn workbench() -> WorkbenchNodeSnapshot {
@@ -788,29 +990,52 @@ mod tests {
     }
 
     fn create_values() -> InventoryValues {
-        InventoryValues { name: "node".into(), ip: "192.0.2.1".into(), mac: "00:11:22:33:44:55".into(), ..InventoryValues::default() }
+        InventoryValues {
+            name: "node".into(),
+            ip: "192.0.2.1".into(),
+            mac: "00:11:22:33:44:55".into(),
+            ..InventoryValues::default()
+        }
     }
 
     #[test]
     fn manual_create_and_csv_share_field_validation() {
-        let csv = crate::infrastructure::csv_inventory::parse_inventory_text("name,ip,mac\n node ,192.0.2.1,00:11:22:33:44:55\n").unwrap();
+        let csv = crate::infrastructure::csv_inventory::parse_inventory_text(
+            "name,ip,mac\n node ,192.0.2.1,00:11:22:33:44:55\n",
+        )
+        .unwrap();
         let mut values = create_values();
         values.name = " node ".into();
         assert_eq!(validate_inventory_values(2, values), csv[0]);
         let mut invalid = create_values();
-        invalid.name = " ".into(); invalid.ip = "192.0.2.999".into(); invalid.mac = "invalid".into();
+        invalid.name = " ".into();
+        invalid.ip = "192.0.2.999".into();
+        invalid.mac = "invalid".into();
         assert_eq!(validate_inventory_values(1, invalid).errors.len(), 3);
     }
 
     #[test]
     fn manual_create_only_allows_unregistered_local_nodes() {
         let row = || validate_inventory_values(1, create_values());
-        assert_eq!(prepare_node_create(row(), &[], &[]).unwrap()[0].classification, ImportClassification::NewPending);
+        assert_eq!(
+            prepare_node_create(row(), &[], &[]).unwrap()[0].classification,
+            ImportClassification::NewPending
+        );
         assert!(prepare_node_create(row(), &[], &[platform()]).is_err());
         assert!(prepare_node_create(row(), &[workbench()], &[platform()]).is_err());
-        let mut changed = create_values(); changed.name = "changed".into();
-        assert!(prepare_node_create(validate_inventory_values(1, changed.clone()), &[workbench()], &[platform()]).is_err());
-        assert!(prepare_node_create(validate_inventory_values(1, changed), &[], &[platform()]).is_err());
+        let mut changed = create_values();
+        changed.name = "changed".into();
+        assert!(
+            prepare_node_create(
+                validate_inventory_values(1, changed.clone()),
+                &[workbench()],
+                &[platform()]
+            )
+            .is_err()
+        );
+        assert!(
+            prepare_node_create(validate_inventory_values(1, changed), &[], &[platform()]).is_err()
+        );
         assert!(prepare_node_create(row(), &[], &[platform(), platform()]).is_err());
     }
 
@@ -843,6 +1068,164 @@ mod tests {
         assert!(asset_conflicts(Some(&workbench), &[&platform]).is_empty());
         platform.ip = "192.0.2.2".into();
         assert_eq!(asset_conflicts(Some(&workbench), &[&platform]).len(), 1);
+    }
+
+    #[test]
+    fn platform_registration_defines_deployment_independent_of_shared_history() {
+        for (shared, expected_management) in [
+            (vec![workbench()], "managed"),
+            (Vec::new(), "platform_existing"),
+        ] {
+            let platform = vec![platform()];
+            let merged =
+                crate::infrastructure::aio_inventory_source::merge_sources(&[], &shared, &platform);
+            let nodes = build_node_items(&merged, &platform, &[], &HashMap::new(), &HashMap::new());
+            assert_eq!(nodes[0].management_state, expected_management);
+            assert_eq!(nodes[0].deployment_state, "deployed");
+            assert_eq!(nodes[0].deploy_label, "已部署");
+            let dto = serde_json::to_value(&nodes[0]).unwrap();
+            assert_eq!(dto["deploymentState"], "deployed");
+            assert_eq!(dto["managementState"], expected_management);
+        }
+    }
+
+    #[test]
+    fn deployment_projection_distinguishes_pending_unknown_and_conflict() {
+        let mut local = workbench();
+        local.platform_aio_id = None;
+        for (raw, expected, label) in [
+            ("pending", "pending", "待实施"),
+            ("managed", "unconfirmed", "待确认"),
+            ("unexpected", "unconfirmed", "待确认"),
+            ("conflict", "attention", "待处理"),
+        ] {
+            local.management_state = raw.into();
+            let nodes = build_node_items(
+                std::slice::from_ref(&local),
+                &[],
+                &[],
+                &HashMap::new(),
+                &HashMap::new(),
+            );
+            assert_eq!(nodes[0].management_state, raw);
+            assert_eq!(nodes[0].deployment_state, expected);
+            assert_eq!(nodes[0].deploy_label, label);
+        }
+        let duplicate = build_node_items(
+            &[],
+            &[platform(), platform()],
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(duplicate[0].deployment_state, "attention");
+        assert_eq!(duplicate[0].conflicts[0].code, "PLATFORM_DUPLICATE_MAC");
+        let missing = build_node_items(&[workbench()], &[], &[], &HashMap::new(), &HashMap::new());
+        assert_eq!(missing[0].deployment_state, "attention");
+        assert_eq!(missing[0].conflicts[0].code, "LINKED_PLATFORM_NODE_MISSING");
+    }
+
+    fn issue(id: &str, name: &str) -> PlatformRecordIssue {
+        PlatformRecordIssue {
+            platform_aio_id: id.into(),
+            name: name.into(),
+            ip: "192.0.2.9".into(),
+            raw_mac: "bad-mac".into(),
+            code: "PLATFORM_MAC_INVALID".into(),
+            message: "MAC 地址格式无效".into(),
+        }
+    }
+
+    #[test]
+    fn attention_filter_paginates_nodes_and_platform_issues_without_polluting_selection() {
+        let mut local = workbench();
+        local.platform_aio_id = None;
+        local.management_state = "pending".into();
+        let mut pending =
+            build_node_items(&[local], &[], &[], &HashMap::new(), &HashMap::new()).remove(0);
+        pending.name = "pending".into();
+        let mut deployed =
+            build_node_items(&[], &[platform()], &[], &HashMap::new(), &HashMap::new()).remove(0);
+        deployed.name = "deployed".into();
+        let mut conflict_a = build_node_items(
+            &[],
+            &[platform(), platform()],
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .remove(0);
+        conflict_a.name = "attention-a".into();
+        let mut conflict_b = conflict_a.clone();
+        conflict_b.name = "attention-b".into();
+        conflict_b.mac_normalized = "001122334466".into();
+        let mut unconfirmed = pending.clone();
+        unconfirmed.name = "unconfirmed".into();
+        unconfirmed.management_state = "unexpected".into();
+        unconfirmed.deployment_state = "unconfirmed".into();
+        let nodes = vec![conflict_a, conflict_b, deployed, pending, unconfirmed];
+        let issues = vec![
+            issue("3", "issue-c"),
+            issue("1", "issue-a"),
+            issue("2", "issue-b"),
+        ];
+        let stats = calculate_stats(&nodes, &issues);
+        assert_eq!(
+            (
+                stats.total,
+                stats.pending,
+                stats.deployed,
+                stats.attention,
+                stats.unconfirmed,
+                stats.conflicts
+            ),
+            (5, 1, 1, 5, 1, 2)
+        );
+        let (all, page_issues, total) = filter_node_page(nodes.clone(), &issues, "", "all", 1, 100);
+        assert_eq!(all.len(), 5);
+        assert_eq!(total, 5);
+        assert!(page_issues.is_empty());
+        let (first, first_issues, total) =
+            filter_node_page(nodes.clone(), &issues, "", "attention", 1, 3);
+        assert_eq!(total, 5);
+        assert_eq!(
+            first.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(),
+            ["attention-a", "attention-b"]
+        );
+        assert_eq!(
+            first_issues
+                .iter()
+                .map(|i| i.platform_aio_id.as_str())
+                .collect::<Vec<_>>(),
+            ["1"]
+        );
+        let (second, second_issues, total) =
+            filter_node_page(nodes.clone(), &issues, "", "attention", 2, 3);
+        assert_eq!(total, 5);
+        assert!(second.is_empty());
+        assert_eq!(
+            second_issues
+                .iter()
+                .map(|i| i.platform_aio_id.as_str())
+                .collect::<Vec<_>>(),
+            ["2", "3"]
+        );
+        let (last, last_issues, total) =
+            filter_node_page(nodes.clone(), &issues, "", "attention", 3, 3);
+        assert_eq!(total, 5);
+        assert!(last.is_empty() && last_issues.is_empty());
+        let (matched, matched_issues, total) =
+            filter_node_page(nodes.clone(), &issues, "issue-b", "attention", 1, 3);
+        assert_eq!(total, 1);
+        assert!(matched.is_empty());
+        assert_eq!(matched_issues[0].platform_aio_id, "2");
+        for state in ["deployed", "pending", "unconfirmed"] {
+            let (matched, matched_issues, total) =
+                filter_node_page(nodes.clone(), &issues, "", state, 1, 3);
+            assert_eq!(total, 1);
+            assert_eq!(matched[0].deployment_state, state);
+            assert!(matched_issues.is_empty());
+        }
     }
 
     #[test]

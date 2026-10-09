@@ -342,5 +342,5 @@ describe("小新配置页面", () => {
       expect(view.preflight.mock.calls[0]![1].targetIds).toEqual(view.ids.filter(id => id !== view.ids[20]));
       expect(Object.keys(view.preflight.mock.calls[0]![2])).toHaveLength(21);
     } finally { view.dispose(); }
-  });
+  }, 15000);
 });

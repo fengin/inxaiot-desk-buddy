@@ -329,7 +329,7 @@ async function activateProjectContext(projectId?: string) {
     return;
   }
   selectedMacs.value = eligibleNodes.value
-    .filter((node) => node.managementState === "managed" && node.platformState === "online")
+    .filter((node) => node.deploymentState === "deployed" && node.platformState === "online")
     .slice(0, 4)
     .map((node) => node.mac);
 }

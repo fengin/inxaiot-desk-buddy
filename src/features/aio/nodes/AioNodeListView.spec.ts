@@ -1,6 +1,7 @@
 import { createPinia } from "pinia";
 import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
+import { NCheckbox, NPagination, NSelect } from "naive-ui";
 import { i18n } from "@/app/i18n";
 import { router } from "@/app/router";
 import { FixtureAioAdapter } from "@/dev-fixtures/aioFixtureAdapter";
@@ -10,8 +11,65 @@ import { configureActivityAdapter } from "@/shared/api/activityAdapter";
 import { useActivityStore } from "@/stores/activity";
 import { useAioNodesStore } from "@/stores/aioNodes";
 import { useProjectStore } from "@/stores/projects";
+import { usePreferencesStore } from "@/stores/preferences";
 
 describe("一体机服务检查入口", () => {
+  it("统一四种部署状态，待处理合并冲突与平台异常并按后端页展示原因", async () => {
+    Object.defineProperty(window, "matchMedia", { configurable: true, value: vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })) });
+    const adapter = new FixtureAioAdapter();
+    const original = adapter.listNodes.bind(adapter);
+    const issues = Array.from({ length: 22 }, (_, index) => ({ platformAioId: `issue-${index}`, name: `异常节点${index}`, ip: `192.0.2.${index + 1}`, code: "INVALID_MAC", rawMac: "无效地址", message: `MAC 格式无效：${index}` }));
+    const list = vi.spyOn(adapter, "listNodes").mockImplementation(async (projectId, query) => {
+      const result = await original(projectId, query);
+      if (query.state !== "attention") return { ...result, platformIssues: issues, stats: { ...result.stats, attention: 23 } };
+      const conflicts = (await original(projectId, { ...query, page: 1 })).items;
+      const filteredIssues = issues.filter(issue => !query.search || issue.message.includes(query.search));
+      const matchingConflicts = query.search ? [] : conflicts;
+      const start = (query.page - 1) * query.pageSize;
+      return {
+        ...result, total: matchingConflicts.length + filteredIssues.length,
+        items: matchingConflicts.slice(start, start + query.pageSize), platformIssues: issues,
+        pagePlatformIssues: filteredIssues.slice(Math.max(0, start - matchingConflicts.length), Math.max(0, start + query.pageSize - matchingConflicts.length)),
+        stats: { ...result.stats, attention: 23 }
+      };
+    });
+    configureAioAdapter(adapter); configureActivityAdapter(new FixtureActivityAdapter());
+    const { default: App } = await import("@/app/App.vue");
+    await router.push("/aio/nodes"); await router.isReady();
+    const pinia = createPinia();
+    usePreferencesStore(pinia).pageSize = 20;
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [pinia, router, i18n], stubs: { teleport: true } } });
+    try {
+      await flushPromises();
+      const select = wrapper.findAllComponents(NSelect).find(component => component.classes().includes("state-select"))!;
+      expect(select.props("options")).toEqual([
+        { label: "全部状态", value: "all" }, { label: "待实施", value: "pending" },
+        { label: "已部署", value: "deployed" }, { label: "待处理", value: "attention" },
+        { label: "待确认", value: "unconfirmed" }
+      ]);
+      expect(wrapper.get(".node-table tbody").text()).not.toContain("平台已存在");
+      expect(wrapper.get(".node-table tbody").text()).not.toContain("已管理");
+      expect(wrapper.get('[data-testid="attention-summary"]').text()).toContain("23");
+      await wrapper.get('[data-testid="attention-summary"]').trigger("click");
+      await vi.waitFor(() => expect(wrapper.findAll(".platform-issue-row")).toHaveLength(19));
+      expect(wrapper.findAll(".node-table tbody tr")).toHaveLength(20);
+      expect(wrapper.get(".asset-footer-summary").text()).toContain("共 23 条");
+      expect(wrapper.get(".node-table tbody tr .n-tag").attributes("title")).toContain("名称和 IP 与平台记录不一致");
+      expect(wrapper.get(".platform-issue-row").text()).toContain("MAC 格式无效：0");
+      expect(wrapper.get(".platform-issue-row").getComponent(NCheckbox).props("disabled")).toBe(true);
+      expect(wrapper.get(".node-table-header").getComponent(NCheckbox).props("disabled")).toBe(true);
+      wrapper.getComponent(NPagination).vm.$emit("update:page", 2);
+      await vi.waitFor(() => expect(wrapper.findAll(".platform-issue-row")).toHaveLength(3));
+      expect(wrapper.get(".platform-issue-row").text()).toContain("异常节点19");
+      expect(wrapper.find(".empty-inline").exists()).toBe(false);
+      expect(list.mock.lastCall?.[1]).toMatchObject({ page: 2, state: "attention" });
+      await wrapper.get(".search-input input").setValue("MAC 格式无效：21");
+      await vi.waitFor(() => expect(wrapper.findAll(".platform-issue-row")).toHaveLength(1));
+      expect(wrapper.get(".asset-footer-summary").text()).toContain("共 1 条");
+      expect(list.mock.lastCall?.[1]).toMatchObject({ page: 1, search: "MAC 格式无效：21", state: "attention" });
+    } finally { wrapper.unmount(); }
+  }, 30000);
+
   it("工作台连接或初始化恢复后自动刷新记录提示", async () => {
     Object.defineProperty(window, "matchMedia", { configurable: true, value: vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })) });
     const adapter = new FixtureAioAdapter();

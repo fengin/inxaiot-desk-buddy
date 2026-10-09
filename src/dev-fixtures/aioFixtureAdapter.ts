@@ -4,6 +4,7 @@ import { getProjectSpacePath, projectSpacePath, resolveProjectSpacePath } from "
 import { demoNodes } from "@/shared/fixtures/demoData";
 import type {
   AioImportSession,
+  AioDeploymentState,
   AioNodeListItem,
   AioNodeStats,
   ImportSelection,
@@ -15,6 +16,8 @@ import { publishFixtureTaskEvent } from "@/dev-fixtures/activityFixtureAdapter";
 
 function mapNode(node: EdgeNode): AioNodeListItem {
   const macNormalized = node.mac.replaceAll(":", "");
+  const deploymentState: AioDeploymentState = node.managementState === "conflict" ? "attention"
+    : node.platformId ? "deployed" : node.managementState === "pending" ? "pending" : "unconfirmed";
   return {
     mac: node.mac,
     macNormalized,
@@ -22,7 +25,8 @@ function mapNode(node: EdgeNode): AioNodeListItem {
     ip: node.ip,
     location: node.location,
     managementState: node.managementState,
-    deployLabel: node.deployLabel,
+    deploymentState,
+    deployLabel: { pending: "待实施", deployed: "已部署", attention: "待处理", unconfirmed: "待确认" }[deploymentState],
     platformState: node.platformState,
     platformUpdatedAt: node.platformUpdatedAt,
     serviceState: "unknown",
@@ -55,7 +59,10 @@ function stats(nodes: AioNodeListItem[]): AioNodeStats {
     total: nodes.length,
     online: nodes.filter((node) => node.platformState === "online").length,
     offline: nodes.filter((node) => node.platformState === "offline").length,
-    pending: nodes.filter((node) => node.managementState === "pending").length,
+    pending: nodes.filter((node) => node.deploymentState === "pending").length,
+    deployed: nodes.filter((node) => node.deploymentState === "deployed").length,
+    attention: nodes.filter((node) => node.deploymentState === "attention").length,
+    unconfirmed: nodes.filter((node) => node.deploymentState === "unconfirmed").length,
     conflicts: nodes.filter((node) => node.managementState === "conflict").length
   };
 }
@@ -109,7 +116,7 @@ export class FixtureAioAdapter implements AioAdapter {
     const keyword = query.search?.toLocaleLowerCase();
     const filtered = all.filter((node) =>
       (!keyword || [node.name, node.ip, node.mac, node.location, node.spacePath ?? ""].some((value) => value.toLocaleLowerCase().includes(keyword)))
-      && (!query.state || query.state === "all" || node.managementState === query.state || node.platformState === query.state)
+      && (!query.state || query.state === "all" || node.deploymentState === query.state || node.platformState === query.state)
     );
     const start = (query.page - 1) * query.pageSize;
     return {
@@ -119,6 +126,7 @@ export class FixtureAioAdapter implements AioAdapter {
       pageSize: query.pageSize,
       stats: stats(all),
       platformIssues: [],
+      pagePlatformIssues: [],
       latestImportSessionId: this.sessions.get(_projectId)?.state === "preview" ? this.sessions.get(_projectId)?.id : undefined,
       refreshedAt: new Date().toISOString()
     };

@@ -638,45 +638,6 @@ a {
   border-color: var(--inx-color-warning);
 }
 
-.platform-issue-summary {
-  border-color: color-mix(in srgb, var(--inx-color-warning) 42%, var(--inx-color-border));
-}
-
-.platform-issue-popover {
-  display: grid;
-  gap: 7px;
-  max-width: min(420px, calc(100vw - 36px));
-}
-
-.platform-issue-popover > p {
-  margin: 0;
-  color: var(--inx-color-text-secondary);
-  font-size: 12px;
-}
-
-.platform-issue-popover ul {
-  display: grid;
-  max-height: 260px;
-  margin: 0;
-  padding: 0;
-  overflow: auto;
-  list-style: none;
-  border-top: 1px solid var(--inx-color-border);
-}
-
-.platform-issue-popover li {
-  display: grid;
-  gap: 2px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--inx-color-border);
-}
-
-.platform-issue-popover li > span {
-  color: var(--inx-color-text-secondary);
-  font-size: 11px;
-  overflow-wrap: anywhere;
-}
-
 .platform-issue-row {
   cursor: default;
 }

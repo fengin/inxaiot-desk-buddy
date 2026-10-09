@@ -100,6 +100,43 @@ describe("aio nodes store", () => {
     expect(store.stats.total).toBe(8);
   });
 
+  it("已部署筛选合并两种平台注册记录，待处理与待实施独立统计", async () => {
+    const store = useAioNodesStore();
+    await store.refresh(projectId, "", "deployed");
+    expect(store.nodes).toHaveLength(6);
+    expect(store.nodes.every(node => node.deploymentState === "deployed" && node.deployLabel === "已部署")).toBe(true);
+    expect(store.nodes.some(node => node.managementState === "managed")).toBe(true);
+    expect(store.nodes.some(node => node.managementState === "platform_existing")).toBe(true);
+    expect(store.stats).toMatchObject({ total: 8, deployed: 6, pending: 1, attention: 1, unconfirmed: 0 });
+    await store.refresh(projectId, "", "attention");
+    expect(store.nodes.map(node => node.deployLabel)).toEqual(["待处理"]);
+    expect(store.nodes[0]?.conflicts[0]?.message).toContain("名称和 IP");
+    await store.refresh(projectId, "", "pending");
+    expect(store.nodes.map(node => node.deployLabel)).toEqual(["待实施"]);
+    await store.refresh(projectId, "", "unconfirmed");
+    expect(store.nodes).toHaveLength(0);
+  });
+
+  it("待处理当前页与平台异常全集分别保存，切换筛选不保留上一页异常", async () => {
+    const adapter = new FixtureAioAdapter();
+    const original = adapter.listNodes.bind(adapter);
+    const issues = Array.from({ length: 30 }, (_, index) => ({ platformAioId: String(index), name: `异常${index}`, ip: "", rawMac: "", code: "MISSING_MAC", message: "MAC 地址缺失" }));
+    vi.spyOn(adapter, "listNodes").mockImplementation(async (id, query) => ({
+      ...await original(id, query), platformIssues: issues,
+      pagePlatformIssues: query.state === "attention" ? issues.slice(20, 30) : []
+    }));
+    configureAioAdapter(adapter);
+    const store = useAioNodesStore();
+    await store.refresh(projectId, "", "attention");
+    expect(store.platformIssues).toHaveLength(30);
+    expect(store.pagePlatformIssues.map(issue => issue.platformAioId)).toEqual(issues.slice(20).map(issue => issue.platformAioId));
+    await store.previewImport("C:/demo/inventory.csv");
+    expect(store.pagePlatformIssues).toHaveLength(10);
+    await store.refresh(projectId, "", "deployed");
+    expect(store.platformIssues).toHaveLength(30);
+    expect(store.pagePlatformIssues).toHaveLength(0);
+  });
+
   it("previews selections and applies only selected final assets in browser mode", async () => {
     const store = useAioNodesStore();
     await store.refresh(projectId);
@@ -145,8 +182,9 @@ describe("aio nodes store", () => {
         total: all.length,
         page: query.page,
         pageSize: query.pageSize,
-        stats: { total: 250, online: 250, offline: 0, pending: 0, conflicts: 0 },
+        stats: { total: 250, online: 250, offline: 0, pending: 0, deployed: 250, attention: 0, unconfirmed: 0, conflicts: 0 },
         platformIssues: [],
+        pagePlatformIssues: [],
         refreshedAt: new Date().toISOString()
       };
     });

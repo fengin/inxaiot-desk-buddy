@@ -61,6 +61,8 @@ export interface NodeServiceCheckSnapshot {
   lastAttempt?: ServiceCheckReport;
 }
 
+export type AioDeploymentState = "pending" | "deployed" | "attention" | "unconfirmed";
+
 export interface AioNodeListItem {
   mac: string;
   macNormalized: string;
@@ -70,6 +72,7 @@ export interface AioNodeListItem {
   buildingId?: string;
   spacePath?: string;
   managementState: string;
+  deploymentState: AioDeploymentState;
   deployLabel: string;
   platformState: "online" | "offline" | "unknown";
   platformUpdatedAt: string;
@@ -90,6 +93,9 @@ export interface AioNodeStats {
   online: number;
   offline: number;
   pending: number;
+  deployed: number;
+  attention: number;
+  unconfirmed: number;
   conflicts: number;
 }
 
@@ -110,6 +116,7 @@ export interface AioNodeListPage {
   pageSize: number;
   stats: AioNodeStats;
   platformIssues: PlatformRecordIssue[];
+  pagePlatformIssues: PlatformRecordIssue[];
   latestImportSessionId?: string;
   refreshedAt: string;
 }

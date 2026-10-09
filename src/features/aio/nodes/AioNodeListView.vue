@@ -8,7 +8,6 @@ import {
   NInput,
   NModal,
   NPagination,
-  NPopover,
   NSelect,
   NSpace,
   NSpin,
@@ -63,8 +62,6 @@ const router = useRouter();
 const dialogs = useSystemDialogAdapter();
 const search = ref("");
 const stateFilter = ref("all");
-const viewMode = ref<"nodes" | "platform_issues">("nodes");
-const issuePage = ref(1);
 const selectedNode = ref<AioNodeListItem>();
 const versionOpen = ref(false);
 const importOpen = ref(false);
@@ -76,10 +73,8 @@ let refreshTimer: number | undefined;
 
 const filteredNodes = computed(() => aio.nodes);
 const stats = computed(() => aio.stats);
-const platformIssueCount = computed(() => aio.platformIssues.length);
-const showingPlatformIssues = computed(() => viewMode.value === "platform_issues");
 function canSelectNode(node: AioNodeListItem) { return /^[0-9a-f]{12}$/i.test(node.macNormalized) && node.managementState !== "conflict" && !node.conflicts.length; }
-const selectablePage = computed(() => showingPlatformIssues.value ? [] : filteredNodes.value.filter(canSelectNode));
+const selectablePage = computed(() => filteredNodes.value.filter(canSelectNode));
 const allPageSelected = computed(() => selectablePage.value.length > 0 && selectablePage.value.every(node => selectedMacs.value.includes(node.macNormalized)));
 const somePageSelected = computed(() => !allPageSelected.value && selectablePage.value.some(node => selectedMacs.value.includes(node.macNormalized)));
 function selectNode(node: AioNodeListItem, checked: boolean) {
@@ -95,7 +90,7 @@ async function openBatchOperations() {
   await router.push({ name: "aio-operations", query: { targets: [...selectedMacs.value], project: projects.activeProjectId } });
 }
 async function createdNode() {
-  viewMode.value = "nodes"; search.value = ""; stateFilter.value = "all"; aio.page = 1;
+  search.value = ""; stateFilter.value = "all"; aio.page = 1;
   await refresh();
 }
 async function editedNode() {
@@ -105,18 +100,6 @@ async function editedNode() {
     if (mac && projects.activeProjectId === projectId) await aio.loadDetail(mac);
   } catch { message.warning("资料已保存，但列表刷新失败，请手动刷新核对"); }
 }
-const filteredPlatformIssues = computed(() => {
-  const keyword = search.value.trim().toLocaleLowerCase();
-  if (!keyword) return aio.platformIssues;
-  return aio.platformIssues.filter((issue) =>
-    [issue.name, issue.ip, issue.platformAioId, issue.rawMac]
-      .some((value) => value.toLocaleLowerCase().includes(keyword))
-  );
-});
-const pagedPlatformIssues = computed(() => {
-  const start = (issuePage.value - 1) * aio.pageSize;
-  return filteredPlatformIssues.value.slice(start, start + aio.pageSize);
-});
 const importSession = computed(() => aio.importPreview?.session);
 const versionNodes = computed(() => aio.selectionNodes.length ? aio.selectionNodes : aio.nodes);
 
@@ -129,11 +112,14 @@ const detailInspectionStage = computed(() => {
   return serviceInspectionStageLabel(activity.lastEvent?.localTaskId === taskId ? activity.lastEvent?.stage : task?.stage);
 });
 
-function managementTone(node: AioNodeListItem) {
-  if (node.managementState === "managed") return "success";
-  if (node.managementState === "conflict") return "error";
-  if (node.managementState === "platform_existing") return "info";
-  return "warning";
+function deploymentTone(node: AioNodeListItem) {
+  if (node.deploymentState === "deployed") return "success";
+  if (node.deploymentState === "attention") return "error";
+  return node.deploymentState === "pending" ? "warning" : "default";
+}
+
+function deploymentReason(node: AioNodeListItem) {
+  return node.conflicts.map((conflict) => conflict.message).join("；");
 }
 
 function classificationLabel(value: ImportClassification) {
@@ -185,25 +171,8 @@ async function refresh() {
 }
 
 function selectNodeFilter(value: string) {
-  const wasShowingPlatformIssues = showingPlatformIssues.value;
-  const stateChanged = stateFilter.value !== value;
-  viewMode.value = "nodes";
   stateFilter.value = value;
   aio.page = 1;
-  if (wasShowingPlatformIssues && !stateChanged) void refresh();
-}
-
-function selectPlatformIssues() {
-  viewMode.value = "platform_issues";
-  issuePage.value = 1;
-}
-
-function selectListFilter(value: string) {
-  if (value === "platform_issues") {
-    selectPlatformIssues();
-    return;
-  }
-  selectNodeFilter(value);
 }
 
 function scheduleRefresh() {
@@ -323,10 +292,6 @@ function closeImport() {
 }
 
 watch([search, stateFilter], () => {
-  if (showingPlatformIssues.value) {
-    issuePage.value = 1;
-    return;
-  }
   aio.page = 1;
   scheduleRefresh();
 });
@@ -334,13 +299,12 @@ watch(() => projects.activeProject?.connectionState, () => { void refresh(); });
 watch(
   () => aio.page,
   () => {
-    if (!showingPlatformIssues.value) void refresh();
+    void refresh();
   }
 );
 watch(
   () => projects.activeProjectId,
   () => {
-    viewMode.value = "nodes";
     selectedMacs.value = []; createOpen.value = false; editOpen.value = false;
     selectedNode.value = undefined;
     versionOpen.value = false;
@@ -395,61 +359,36 @@ onBeforeUnmount(() => {
     </n-alert>
 
     <div class="summary-strip">
-      <button class="summary-item" :class="{ active: !showingPlatformIssues && stateFilter === 'all' }" type="button" @click="selectNodeFilter('all')">
+      <button class="summary-item" :class="{ active: stateFilter === 'all' }" type="button" @click="selectNodeFilter('all')">
         <span class="summary-label summary-label--all"><Boxes :size="14" />全部一体机</span>
-        <span class="summary-value"><strong>{{ stats.total }}</strong><small>当前项目资产视图</small></span>
+        <span class="summary-value"><strong>{{ stats.total }}</strong><small>可识别的一体机</small></span>
       </button>
-      <button class="summary-item" :class="{ active: !showingPlatformIssues && stateFilter === 'online' }" type="button" @click="selectNodeFilter('online')">
+      <button class="summary-item" :class="{ active: stateFilter === 'online' }" type="button" @click="selectNodeFilter('online')">
         <span class="summary-label summary-label--online"><Wifi :size="14" />平台在线</span>
         <span class="summary-value"><strong>{{ stats.online }}</strong><small>以平台状态时间为准</small></span>
       </button>
-      <button class="summary-item" :class="{ active: !showingPlatformIssues && stateFilter === 'offline' }" type="button" @click="selectNodeFilter('offline')">
+      <button class="summary-item" :class="{ active: stateFilter === 'offline' }" type="button" @click="selectNodeFilter('offline')">
         <span class="summary-label summary-label--offline"><WifiOff :size="14" />平台离线</span>
         <span class="summary-value"><strong>{{ stats.offline }}</strong><small>执行前仍会检查SSH</small></span>
       </button>
-      <button class="summary-item" :class="{ active: !showingPlatformIssues && stateFilter === 'pending' }" type="button" @click="selectNodeFilter('pending')">
+      <button class="summary-item" :class="{ active: stateFilter === 'pending' }" type="button" @click="selectNodeFilter('pending')">
         <span class="summary-label summary-label--pending"><Box :size="14" />待实施</span>
         <span class="summary-value"><strong>{{ stats.pending }}</strong><small>已确认但尚未部署</small></span>
       </button>
-      <button class="summary-item warning" :class="{ active: !showingPlatformIssues && stateFilter === 'conflict' }" type="button" @click="selectNodeFilter('conflict')">
-        <span class="summary-label summary-label--conflict"><CircleAlert :size="14" />信息冲突</span>
-        <span class="summary-value"><strong>{{ stats.conflicts }}</strong><small>处理后才能执行</small></span>
+      <button class="summary-item" :class="{ active: stateFilter === 'deployed' }" type="button" @click="selectNodeFilter('deployed')">
+        <span class="summary-label summary-label--online"><CheckCircle2 :size="14" />已部署</span>
+        <span class="summary-value"><strong>{{ stats.deployed }}</strong><small>已在平台注册</small></span>
       </button>
-      <n-popover v-if="platformIssueCount" trigger="hover" placement="bottom-end" :width="420">
-        <template #trigger>
-          <button
-            class="summary-item warning platform-issue-summary"
-            :class="{ active: showingPlatformIssues }"
-            type="button"
-            data-testid="platform-issue-summary"
-            @click="selectPlatformIssues"
-          >
-            <span class="summary-label summary-label--conflict"><CircleAlert :size="14" />平台待处理</span>
-            <span class="summary-value"><strong>{{ platformIssueCount }}</strong><small>MAC 信息待补充</small></span>
-          </button>
-        </template>
-        <section class="platform-issue-popover" data-testid="platform-issue-popover">
-          <strong>请在平台补充正确的 MAC 地址</strong>
-          <p>以下记录暂不参与资产匹配；修正后刷新列表即可自动纳入。</p>
-          <ul>
-            <li v-for="issue in aio.platformIssues" :key="issue.platformAioId">
-              <strong>{{ issue.name || '未命名一体机' }}</strong>
-              <span>IP：{{ issue.ip || '未填写' }} · 平台编号：{{ issue.platformAioId }}</span>
-              <span>当前 MAC：{{ issue.rawMac || '未填写' }}（{{ issue.message }}）</span>
-            </li>
-          </ul>
-        </section>
-      </n-popover>
       <button
-        v-else
-        class="summary-item platform-issue-summary"
-        :class="{ active: showingPlatformIssues }"
+        class="summary-item"
+        :class="{ active: stateFilter === 'attention', warning: stats.attention > 0 }"
         type="button"
-        data-testid="platform-issue-summary"
-        @click="selectPlatformIssues"
+        data-testid="attention-summary"
+        title="包含资料冲突及平台 MAC 异常记录；MAC 无法识别的记录不计入全部一体机"
+        @click="selectNodeFilter('attention')"
       >
-        <span class="summary-label summary-label--conflict"><CircleAlert :size="14" />平台待处理</span>
-        <span class="summary-value"><strong>0</strong><small>暂无待处理记录</small></span>
+        <span class="summary-label summary-label--conflict"><CircleAlert :size="14" />待处理</span>
+        <span class="summary-value"><strong>{{ stats.attention }}</strong><small>{{ stats.attention ? '资料异常，查看具体原因' : '暂无待处理记录' }}</small></span>
       </button>
     </div>
 
@@ -460,17 +399,17 @@ onBeforeUnmount(() => {
           <template #prefix><Search :size="15" /></template>
         </n-input>
         <n-select
-          :value="showingPlatformIssues ? 'platform_issues' : stateFilter"
+          :value="stateFilter"
+          :fallback-option="(value) => ({ value, label: value === 'online' ? '平台在线' : value === 'offline' ? '平台离线' : '待确认' })"
           size="small"
           class="state-select"
-          @update:value="selectListFilter"
+          @update:value="selectNodeFilter"
           :options="[
             { label: '全部状态', value: 'all' },
-            { label: '已管理', value: 'managed' },
             { label: '待实施', value: 'pending' },
-            { label: '平台已存在', value: 'platform_existing' },
-            { label: '信息冲突', value: 'conflict' },
-            { label: '平台待处理', value: 'platform_issues' }
+            { label: '已部署', value: 'deployed' },
+            { label: '待处理', value: 'attention' },
+            { label: '待确认', value: 'unconfirmed' }
           ]"
         />
         <n-button size="small" quaternary title="刷新列表" :loading="aio.loading" @click="refresh">
@@ -481,37 +420,24 @@ onBeforeUnmount(() => {
       <div class="node-table-header">
         <table class="workbench-table node-table">
           <colgroup>
-            <col v-if="!showingPlatformIssues" class="node-col-select" />
+            <col class="node-col-select" />
             <col class="node-col-name" /><col class="node-col-ip" /><col class="node-col-mac" />
             <col class="node-col-location" /><col class="node-col-deploy" /><col class="node-col-platform" />
             <col class="node-col-service" /><col class="node-col-action" />
           </colgroup>
-          <thead><tr><th v-if="!showingPlatformIssues" class="node-select-cell"><n-checkbox aria-label="选择当前页一体机" :checked="allPageSelected" :indeterminate="somePageSelected" :disabled="aio.loading || !selectablePage.length" @update:checked="selectPage" /></th><th>名称</th><th>IP</th><th>MAC地址</th><th>位置</th><th>部署状态</th><th>平台状态</th><th>最近服务检查</th><th></th></tr></thead>
+          <thead><tr><th class="node-select-cell"><n-checkbox aria-label="选择当前页一体机" :checked="allPageSelected" :indeterminate="somePageSelected" :disabled="aio.loading || !selectablePage.length" @update:checked="selectPage" /></th><th>名称</th><th>IP</th><th>MAC地址</th><th>位置</th><th>部署状态</th><th>平台状态</th><th>最近服务检查</th><th></th></tr></thead>
         </table>
       </div>
       <div class="table-scroll">
         <n-spin :show="aio.loading">
           <table class="workbench-table node-table">
             <colgroup>
-              <col v-if="!showingPlatformIssues" class="node-col-select" />
+              <col class="node-col-select" />
               <col class="node-col-name" /><col class="node-col-ip" /><col class="node-col-mac" />
               <col class="node-col-location" /><col class="node-col-deploy" /><col class="node-col-platform" />
               <col class="node-col-service" /><col class="node-col-action" />
             </colgroup>
             <tbody>
-              <template v-if="showingPlatformIssues">
-                <tr v-for="issue in pagedPlatformIssues" :key="issue.platformAioId" class="platform-issue-row">
-                  <td><strong>{{ issue.name || '未命名一体机' }}</strong><small>平台编号：{{ issue.platformAioId }}</small></td>
-                  <td class="mono">{{ issue.ip || '—' }}</td>
-                  <td class="mono muted-cell">{{ issue.rawMac || '—' }}</td>
-                  <td>—</td>
-                  <td><n-tag size="small" :bordered="false" type="warning">待处理</n-tag></td>
-                  <td><n-tag size="small" :bordered="false" type="warning">MAC 需修正</n-tag></td>
-                  <td><n-tag size="small" :bordered="false">未纳入资产</n-tag></td>
-                  <td>—</td>
-                </tr>
-              </template>
-              <template v-else>
                 <tr
                   v-for="node in filteredNodes"
                   :key="node.macNormalized"
@@ -526,7 +452,7 @@ onBeforeUnmount(() => {
                   <td class="mono">{{ node.ip }}</td>
                   <td class="mono muted-cell">{{ node.mac }}</td>
                   <td class="node-space-cell" :title="[node.spacePath, node.location].filter(Boolean).join(' · ')"><span>{{ node.spacePath || (node.buildingId ? '原空间待核实' : '未选择空间') }}</span><small v-if="node.location">{{ node.location }}</small></td>
-                  <td><n-tag size="small" :bordered="false" :type="managementTone(node)">{{ node.deployLabel }}</n-tag></td>
+                  <td><n-tag size="small" :bordered="false" :type="deploymentTone(node)" :title="deploymentReason(node)">{{ node.deployLabel }}</n-tag></td>
                   <td>
                     <span class="state-with-time" :class="node.platformState">
                       <i></i>
@@ -539,21 +465,30 @@ onBeforeUnmount(() => {
                   <td class="service-check-cell"><n-tag size="small" :bordered="false" :type="nodeServicePresentation(node).tone">{{ nodeServicePresentation(node).label }}</n-tag><small>{{ node.serviceCheck?.lastFullCheckAt ? formatDisplayDateTime(node.serviceCheck.lastFullCheckAt) : '整机未检查' }}</small></td>
                   <td><ChevronRight :size="16" class="row-chevron" /></td>
                 </tr>
-              </template>
+                <tr v-for="issue in aio.pagePlatformIssues" :key="`issue-${issue.platformAioId}`" class="platform-issue-row">
+                  <td class="node-select-cell"><n-checkbox disabled :aria-label="`选择${issue.name || '未命名一体机'}`" :title="issue.message" /></td>
+                  <td><strong>{{ issue.name || '未命名一体机' }}</strong><small :title="issue.message">{{ issue.message }}</small></td>
+                  <td class="mono">{{ issue.ip || '—' }}</td>
+                  <td class="mono muted-cell">{{ issue.rawMac || '—' }}</td>
+                  <td>—</td>
+                  <td><n-tag size="small" :bordered="false" type="warning" :title="issue.message">待处理</n-tag></td>
+                  <td>—</td>
+                  <td><n-tag size="small" :bordered="false">无检查记录</n-tag></td>
+                  <td>—</td>
+                </tr>
             </tbody>
           </table>
-          <div v-if="!aio.loading && !(showingPlatformIssues ? filteredPlatformIssues.length : filteredNodes.length)" class="empty-inline">
+          <div v-if="!aio.loading && !filteredNodes.length && !aio.pagePlatformIssues.length" class="empty-inline">
             <XCircle :size="34" />
-            <strong>{{ showingPlatformIssues ? '没有匹配的待处理记录' : '没有匹配的一体机' }}</strong>
-            <span>{{ showingPlatformIssues ? '调整搜索条件或刷新列表后再试。' : '调整搜索条件、状态筛选或项目连接后再试。' }}</span>
+            <strong>{{ stateFilter === 'attention' ? '没有匹配的待处理记录' : '没有匹配的一体机' }}</strong>
+            <span>调整搜索条件、状态筛选或项目连接后再试。</span>
           </div>
         </n-spin>
       </div>
-      <asset-list-footer :selected-count="showingPlatformIssues ? undefined : selectedMacs.length" :disabled="aio.loading || !projects.isReady" :disabled-reason="aio.loading ? '列表正在刷新，请稍候' : '请先连接并登录当前项目'" batch-test-id="aio-batch-operations" @batch="openBatchOperations">
-        <template #summary>{{ showingPlatformIssues ? `每页 ${aio.pageSize} 条 · 共 ${filteredPlatformIssues.length} 条平台待处理记录` : `每页 ${aio.pageSize} 条 · 共 ${aio.total} 条` }}</template>
+      <asset-list-footer :selected-count="selectedMacs.length" :disabled="aio.loading || !projects.isReady" :disabled-reason="aio.loading ? '列表正在刷新，请稍候' : '请先连接并登录当前项目'" batch-test-id="aio-batch-operations" @batch="openBatchOperations">
+        <template #summary>每页 {{ aio.pageSize }} 条 · 共 {{ aio.total }} 条</template>
         <template #pagination>
-          <n-pagination v-if="showingPlatformIssues && filteredPlatformIssues.length > aio.pageSize" v-model:page="issuePage" :page-size="aio.pageSize" :item-count="filteredPlatformIssues.length" :page-slot="5" size="small" />
-          <n-pagination v-else-if="!showingPlatformIssues && aio.total > aio.pageSize" v-model:page="aio.page" :page-size="aio.pageSize" :item-count="aio.total" :page-slot="5" size="small" />
+          <n-pagination v-if="aio.total > aio.pageSize" v-model:page="aio.page" :page-size="aio.pageSize" :item-count="aio.total" :page-slot="5" size="small" />
         </template>
         <template #meta>数据更新时间：{{ formatDisplayDateTime(aio.refreshedAt) }}</template>
       </asset-list-footer>
@@ -574,7 +509,7 @@ onBeforeUnmount(() => {
             <div>
               <h3 class="device-detail-section-title">资产关系</h3>
               <dl class="device-detail-facts">
-                <div><dt>工作台状态</dt><dd :title="aio.detail.node.deployLabel">{{ aio.detail.node.deployLabel }}</dd></div>
+                <div><dt>部署状态</dt><dd :title="deploymentReason(aio.detail.node) || aio.detail.node.deployLabel">{{ aio.detail.node.deployLabel }}</dd></div>
                 <div><dt>平台对象ID</dt><dd class="mono" :title="String(aio.detail.node.platformId ?? '尚未关联')">{{ aio.detail.node.platformId ?? "尚未关联" }}</dd></div>
                 <div><dt>资产来源</dt><dd :title="sourceLabel(aio.detail.node.source)">{{ sourceLabel(aio.detail.node.source) }}</dd></div>
                 <div><dt>资料保存</dt><dd>{{ aio.detail.platform ? '平台业务库' : '当前电脑' }}</dd></div>

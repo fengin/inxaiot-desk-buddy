@@ -15,7 +15,7 @@ import type {
 import { usePreferencesStore } from "@/stores/preferences";
 import { useActivityStore } from "@/stores/activity";
 
-const emptyStats = (): AioNodeStats => ({ total: 0, online: 0, offline: 0, pending: 0, conflicts: 0 });
+const emptyStats = (): AioNodeStats => ({ total: 0, online: 0, offline: 0, pending: 0, deployed: 0, attention: 0, unconfirmed: 0, conflicts: 0 });
 const SELECTION_PAGE_SIZE = 100;
 const MAX_SELECTION_NODES = 10_000;
 
@@ -38,6 +38,7 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
   const detailLoading = ref(false);
   const importPreview = ref<InventoryPreview>();
   const platformIssues = ref<PlatformRecordIssue[]>([]);
+  const pagePlatformIssues = ref<PlatformRecordIssue[]>([]);
   const selectionNodes = ref<AioNodeListItem[]>([]);
   const selectionLoading = ref(false);
   const importLoading = ref(false);
@@ -65,6 +66,7 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
       importPreview.value = undefined;
       latestImportSessionId.value = "";
       platformIssues.value = [];
+      pagePlatformIssues.value = [];
       selectionRequest += 1;
       selectionNodes.value = [];
     }
@@ -88,6 +90,7 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
         refreshedAt.value = result.refreshedAt;
         latestImportSessionId.value = result.latestImportSessionId ?? "";
         platformIssues.value = result.platformIssues;
+        pagePlatformIssues.value = result.pagePlatformIssues;
       }
     } catch (cause) {
       if (request === listRequest) {
@@ -96,6 +99,7 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
         stats.value = emptyStats();
         total.value = 0;
         platformIssues.value = [];
+        pagePlatformIssues.value = [];
       }
     } finally {
       if (request === listRequest) loading.value = false;
@@ -327,7 +331,7 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
 
   return {
     realBackend, nodes, stats, total, page, pageSize, refreshedAt, latestImportSessionId,
-    loading, error, metadataWarning, detail, detailLoading, importPreview, importLoading, platformIssues,
+    loading, error, metadataWarning, detail, detailLoading, importPreview, importLoading, platformIssues, pagePlatformIssues,
     selectionNodes, selectionLoading, serviceInspections, serviceInspection,
     refresh, loadSelectionNodes, loadDetail, checkServices, resumeImport, previewImport, updateSelection, applyImport, discardImport
   };

@@ -42,6 +42,16 @@ async function renderSelection(query: LocationQueryRaw) {
 }
 
 describe("一体机列表选择带入部署升级", () => {
+  it("默认勾选已部署且在线节点，包含没有工作台部署历史的平台注册节点，最多四台", async () => {
+    const context = await renderSelection({});
+    try {
+      expect(context.selectedNames()).toEqual(["AIO-1F-弱电间", "AIO-2F-弱电间", "AIO-3F-弱电间", "AIO-B栋-2F"]);
+      expect(context.selectedNames()).not.toContain("AIO-B栋-3F");
+      expect(context.preflight).not.toHaveBeenCalled();
+      expect(context.submit).not.toHaveBeenCalled();
+    } finally { context.wrapper.unmount(); }
+  });
+
   it("只勾选列表指定的离线及待实施设备，兼容MAC格式并去重", async () => {
     const context = await renderSelection({
       targets: ["000c293bb934", "00-0c-29-3b-b9-35", "00:0C:29:3B:B9:34"],

@@ -9,7 +9,7 @@ import { buildMacos } from './build-macos.mjs'
 const fixtureRoot = fileURLToPath(new URL('../.review-tools/macos-build-tests/', import.meta.url))
 mkdirSync(fixtureRoot, { recursive: true })
 
-const binaryFiles = ['android/adb', 'android/libadb.dylib', 'android-build/aapt', 'java/bin/java', 'java/lib/server/libjvm.dylib']
+const binaryFiles = ['android/adb', 'android/lib64/libadb.dylib']
 const signatureSteps = binaryFiles.map(file => `sign-tool:${file}`)
 function machO(arch) {
   const bytes = Buffer.alloc(64)
@@ -43,12 +43,10 @@ function fixture(t, arch = 'arm64', failAt = '') {
         for (const name of binaryFiles) {
           const binary = join(output, 'tools', name)
           mkdirSync(dirname(binary), { recursive: true })
-          writeFileSync(binary, machO(name.startsWith('java/') ? arch : 'x64'))
+          writeFileSync(binary, machO(arch))
         }
-        mkdirSync(join(output, 'tools/android-build/lib'), { recursive: true })
-        writeFileSync(join(output, 'tools/android-build/lib/apksigner.jar'), 'PK mock jar resource')
         writeFileSync(join(output, 'tools/android/NOTICE.txt'), 'license text')
-        writeFileSync(join(output, 'tools/android-manifest.json'), JSON.stringify({ versions: { requiresRosetta: arch === 'arm64' } }))
+        writeFileSync(join(output, 'tools/android-manifest.json'), JSON.stringify({ versions: { os:'darwin', architecture:arch } }))
       } else if (step === 'manifest') {
         assert.deepEqual([...signed].sort(), [...binaryFiles].sort())
         for (const name of binaryFiles) assert.equal(readFileSync(join(output, 'tools', name))[32], 1)
@@ -104,14 +102,15 @@ for (const arch of ['arm64', 'x64']) {
     assert.deepEqual(f.steps.slice(0, 3), ['prepare', 'build', 'arch'])
     assert.deepEqual(f.steps.slice(3, 3 + binaryFiles.length).sort(), [...signatureSteps].sort())
     assert.deepEqual(f.steps.slice(3 + binaryFiles.length), ['manifest', 'sign-outer', 'tools-verify', 'signature-verify'])
-    assert.equal(f.signed[0], 'java/lib/server/libjvm.dylib')
+    assert.equal(f.signed[0], 'android/lib64/libadb.dylib')
     assert.equal(f.calls.filter(call => call.file === '/usr/bin/codesign' && call.args.includes('--sign') && call.args.at(-1) === f.app).length, 1)
     assert.equal(f.calls.every(call => call.options.env.APPLE_SIGNING_IDENTITY === '-'), true)
     assert.equal(f.calls.every(call => call.options.cwd === f.projectRoot && !call.options.shell), true)
     assert.match(f.messages.at(-1), /完整应用包已生成/)
     const note = readFileSync(join(f.resources, 'tools/README-macos.txt'), 'utf8')
-    assert.equal(note.includes('需要 Rosetta'), arch === 'arm64')
-    assert.equal(f.messages.some(message => message.includes('也需要安装 Rosetta')), arch === 'arm64')
+    assert.equal(note.includes('不依赖 Java 或 Rosetta'), true)
+    assert.equal(existsSync(join(f.resources, 'tools/java')), false)
+    assert.equal(existsSync(join(f.resources, 'tools/android-build')), false)
     assert.equal(readdirSync(join(f.projectRoot, 'src-tauri/target')).some(name => name.startsWith('macos-tools-')), false)
   })
 }

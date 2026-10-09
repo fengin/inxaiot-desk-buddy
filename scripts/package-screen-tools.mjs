@@ -1,96 +1,77 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve, relative, sep } from 'node:path';
 import { createHash } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import process from 'node:process';
 import console from 'node:console';
 import { assertManifestTarget, assertToolTarget, buildTarget, executableName } from './screen-tool-platform.mjs';
-import { copyJavaLegalNotices } from './java-legal-notices.mjs';
 
-const args = process.argv.slice(2);
-const option = (name, fallback) => {
-  const index = args.indexOf(name);
-  if (index < 0) return fallback;
-  if (!args[index + 1] || args[index + 1].startsWith('--')) throw new Error(`${name} 缺少参数`);
-  return args[index + 1];
-};
-const target = buildTarget(option('--platform', process.platform), option('--arch', process.arch));
-const output = option('--output');
-if (!output) throw new Error('必须指定 --output：Windows/Linux 为程序目录，macOS 为 Contents/Resources');
-const root = join(resolve(output), 'tools');
-const exe = name => executableName(name, target.platform);
-const run = (file, arguments_) => {
-  const result = spawnSync(file, arguments_, { encoding: 'utf8', windowsHide: true, timeout: 120000 });
-  if (result.error || result.status !== 0) throw new Error(`随包工具运行失败：${file}\n${result.error?.message ?? result.stderr}`);
-  return `${result.stdout}${result.stderr}`.trim();
-};
-const required = [`android/${exe('adb')}`, `android-build/${exe('aapt')}`, 'android-build/lib/apksigner.jar', `java/bin/${exe('java')}`,
-  ...(target.platform === 'win32' ? ['android/AdbWinApi.dll','android/AdbWinUsbApi.dll'] : [])];
-const manifestPath = join(root, 'android-manifest.json');
-const entries = directory => readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+const entries = (directory, manifestPath) => readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
   const path = join(directory, entry.name);
-  if (entry.isSymbolicLink()) throw new Error(`随包工具不接受符号链接：${path}`);
-  return entry.isDirectory() ? entries(path) : path === manifestPath ? [] : [path];
+  if (entry.isSymbolicLink()) throw new Error('随包工具不接受符号链接：' + path);
+  return entry.isDirectory() ? entries(path, manifestPath) : path === manifestPath ? [] : [path];
 });
-const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex');
-const checkBinaries = (adb, aapt, java) => {
-  const binaries = {
-    adb: assertToolTarget(readFileSync(adb), target, { name: 'ADB', allowWindowsX86: true }),
-    aapt: assertToolTarget(readFileSync(aapt), target, { name: 'aapt', allowRosetta: true, allowWindowsX86: true }),
-    java: assertToolTarget(readFileSync(java), target, { name: 'Java' })
+const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+export function packageAdb({ output, sdk, platform = process.platform, arch = process.arch, verify = false, refresh = false, embeddedOutput, run = spawnSync }) {
+  const target = buildTarget(platform, arch), root = join(resolve(output), 'tools');
+  const executable = executableName('adb', target.platform), manifestPath = join(root, 'android-manifest.json');
+  const required = ['android/' + executable, 'android/NOTICE.txt', 'android/source.properties',
+    ...(platform === 'win32' ? ['android/AdbWinApi.dll', 'android/AdbWinUsbApi.dll'] : [])];
+  const smoke = () => {
+    for (const name of required) if (!existsSync(join(root, name))) throw new Error('缺少随包文件：' + name);
+    const actual = assertToolTarget(readFileSync(join(root, 'android', executable)), target, { name: 'ADB', allowWindowsX86: true });
+    const result = run(join(root, 'android', executable), ['version'], { encoding:'utf8', windowsHide:true, timeout:30000 });
+    if (result.error || result.status !== 0) throw new Error('随包 ADB 无法运行：' + (result.error?.message ?? result.stderr));
+    return { toolArchitectures: { adb: actual.architectures } };
   };
-  return { toolArchitectures: Object.fromEntries(Object.entries(binaries).map(([name, value]) => [name, value.architectures])), requiresRosetta: Object.values(binaries).some(value => value.requiresRosetta) };
-};
-const smoke = () => {
-  for (const name of required) if (!existsSync(join(root, name))) throw new Error(`缺少随包文件：${name}`);
-  const binaryInfo = checkBinaries(join(root, 'android', exe('adb')), join(root, 'android-build', exe('aapt')), join(root, 'java/bin', exe('java')));
-  if (binaryInfo.requiresRosetta) console.log('此 Apple Silicon 工具包包含 Intel 版 Android 工具，运行电脑需要 Rosetta 2；Java 使用原生 arm64。');
-  console.log(run(join(root, 'android', exe('adb')), ['version']));
-  console.log(run(join(root, 'android-build', exe('aapt')), ['version']));
-  console.log(run(join(root, 'java/bin', exe('java')), ['-jar', join(root, 'android-build/lib/apksigner.jar'), 'version']));
-  return binaryInfo;
-};
-if (args.includes('--verify')) {
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  assertManifestTarget(manifest.versions, target);
-  const actual = entries(root).map(file => relative(root, file).split(sep).join('/')).sort();
-  const declared = manifest.files.map(file => file.path).sort();
-  if (manifest.formatVersion !== 1 || JSON.stringify(actual) !== JSON.stringify(declared)) throw new Error('工具清单与文件集合不一致');
-  for (const file of manifest.files) if (hash(join(root, file.path)) !== file.sha256) throw new Error(`工具校验失败：${file.path}`);
-  smoke();
-} else {
   let versions;
-  if (args.includes('--refresh-manifest')) {
-    versions = JSON.parse(readFileSync(manifestPath, 'utf8')).versions;
-    assertManifestTarget(versions, target);
+  if (verify || refresh) {
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    if (![1,2].includes(manifest.formatVersion) || (refresh && manifest.formatVersion!==2)) throw new Error('工具清单格式无效');
+    assertManifestTarget(manifest.versions, target);
+    versions = manifest.versions;
+    if (verify) {
+      const actual = entries(root, manifestPath).map(file => relative(root,file).split(sep).join('/')).sort();
+      const declared = manifest.files.map(file=>file.path).sort();
+      if (JSON.stringify(actual)!==JSON.stringify(declared)) throw new Error('工具清单与文件集合不一致');
+      for (const file of manifest.files) {
+        if (!actual.includes(file.path) || hash(readFileSync(join(root,file.path)))!==file.sha256) throw new Error('工具校验失败：'+file.path);
+      }
+      smoke();
+      return root;
+    }
   } else {
-    const sdk = option('--sdk', process.env.ANDROID_SDK_ROOT ?? process.env.ANDROID_HOME);
-    const java = option('--java', process.env.JAVA_HOME);
-    if (!sdk || !java) throw new Error('请提供 Android SDK 和 Java 21 路径（--sdk、--java 或对应环境变量）');
+    if (!sdk) throw new Error('请提供 Android SDK 路径（--sdk 或 ANDROID_SDK_ROOT / ANDROID_HOME）');
     if (existsSync(root)) throw new Error('tools 已存在，请使用新的输出目录');
-    const platform = join(sdk, 'platform-tools'), build = join(sdk, 'build-tools/36.1.0');
-    if (!existsSync(join(platform, 'NOTICE.txt'))) throw new Error('缺少 Android platform-tools 许可证说明');
-    const revision = path => readFileSync(join(path, 'source.properties'), 'utf8').match(/^Pkg.Revision\s*=\s*(.+)$/m)?.[1].trim();
-    const javaRelease = readFileSync(join(java, 'release'), 'utf8');
-    const javaVersion = javaRelease.match(/JAVA_VERSION="([^"]+)"/)?.[1];
-    const vendor = javaRelease.match(/IMPLEMENTOR="([^"]+)"/)?.[1];
-    if (!javaVersion?.startsWith('21.') || !['Eclipse Adoptium', 'JetBrains s.r.o.'].includes(vendor)) throw new Error('随包 Java 必须使用 Temurin/JetBrains Java 21，并保留许可证');
-    if (!(Number(revision(platform)?.split('.')[0]) >= 35) || revision(build) !== '36.1.0') throw new Error('需要 platform-tools 35+ 和 build-tools 36.1.0');
-    if (!existsSync(join(java, 'legal/java.base/LICENSE'))) throw new Error('缺少 Java 许可证');
-    checkBinaries(join(platform, exe('adb')), join(build, exe('aapt')), join(java, 'bin', exe('java')));
-    mkdirSync(join(root, 'android-build/lib'), { recursive: true });
-    cpSync(platform, join(root, 'android'), { recursive: true, dereference: true });
-    for (const name of [exe('aapt'), 'NOTICE.txt', 'source.properties']) cpSync(join(build, name), join(root, 'android-build', name));
-    cpSync(join(build, 'lib/apksigner.jar'), join(root, 'android-build/lib/apksigner.jar'));
-    for (const name of readdirSync(build)) if (/\.(dll|so|dylib)$/.test(name) || name === 'lib64') cpSync(join(build, name), join(root, 'android-build', name), { recursive: true, dereference: true });
-    if (existsSync(join(java, 'jmods'))) {
-      run(join(java, 'bin', exe('jlink')), ['--add-modules','java.base,java.logging,jdk.crypto.ec,jdk.charsets','--strip-debug','--no-header-files','--no-man-pages','--output',join(root,'java')]);
-      copyJavaLegalNotices(java, join(root, 'java'));
-    } else cpSync(java, join(root, 'java'), { recursive: true, dereference: true });
-    versions = { platformTools:revision(platform),buildTools:revision(build),javaRuntime:`${vendor} ${javaVersion}`,os:target.platform,architecture:target.architecture };
+    const source = join(sdk, 'platform-tools');
+    const revision = readFileSync(join(source,'source.properties'),'utf8').match(/^Pkg.Revision\s*=\s*(.+)$/m)?.[1].trim();
+    if (!(Number(revision?.split('.')[0]) >= 35)) throw new Error('需要 platform-tools 35 或以上版本');
+    assertToolTarget(readFileSync(join(source,executable)),target,{name:'ADB',allowWindowsX86:true});
+    mkdirSync(join(root,'android'), { recursive:true });
+    for (const name of required) cpSync(join(source,name.slice('android/'.length)),join(root,name));
+    // Unix ADB 如带独立动态库，随包保留；不再复制 fastboot、文件系统工具或 APK/Java 工具。
+    if (platform !== 'win32') {
+      for (const name of readdirSync(source)) if (/\.(dylib|so)(\.\d+)*$/.test(name) || name==='lib64') cpSync(join(source,name),join(root,'android',name),{recursive:true,dereference:true});
+    }
+    versions = { platformTools:revision, os:platform, architecture:arch };
   }
-  Object.assign(versions, smoke());
-  const files = entries(root).sort().map(file => ({path:relative(root,file).split(sep).join('/'),sha256:hash(file)}));
-  writeFileSync(manifestPath, JSON.stringify({formatVersion:1,versions,files},null,2)+'\n','utf8');
-  console.log(`工具包已生成：${root}（${files.length} 个文件）`);
+  Object.assign(versions,smoke());
+  const files=entries(root,manifestPath).sort().map(file=>({path:relative(root,file).split(sep).join('/'),sha256:hash(readFileSync(file))}));
+  writeFileSync(manifestPath,JSON.stringify({formatVersion:2,versions,files},null,2)+'\n');
+  if (embeddedOutput) {
+    if (platform!=='win32') throw new Error('只有 Windows 构建使用内嵌 ADB');
+    const payload={formatVersion:1,files:[...files.map(file=>({path:file.path,data:readFileSync(join(root,file.path)).toString('base64')})),{path:'android-manifest.json',data:readFileSync(manifestPath).toString('base64')}]};
+    writeFileSync(embeddedOutput,gzipSync(JSON.stringify(payload),{level:9}));
+  }
+  return root;
+}
+if (process.argv[1] && resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
+  const args=process.argv.slice(2), option=(name,fallback)=>{const i=args.indexOf(name);if(i<0)return fallback;if(!args[i+1]||args[i+1].startsWith('--'))throw new Error(name+' 缺少参数');return args[i+1];};
+  try {
+    const output=option('--output');if(!output)throw new Error('必须指定 --output');
+    const root=packageAdb({output,sdk:option('--sdk',process.env.ANDROID_SDK_ROOT??process.env.ANDROID_HOME),platform:option('--platform',process.platform),arch:option('--arch',process.arch),verify:args.includes('--verify'),refresh:args.includes('--refresh-manifest'),embeddedOutput:option('--embedded-output')});
+    console.log('ADB 工具检查通过：'+root);
+  } catch(error) {console.error(error.message);process.exitCode=1;}
 }

@@ -6,6 +6,7 @@ pub mod lock_release;
 pub mod takeover;
 pub mod merge;
 pub mod apk;
+mod apk_manifest;
 pub mod value_updates;
 pub mod maintenance;
 pub mod installation_progress;

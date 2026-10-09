@@ -128,7 +128,7 @@ async fn same_size_batch_upgrade_preserves_configuration_and_verifies_running()
             retry_of_operation_id: None,
             expected_targets: Default::default(),
         };
-        eprintln!("{size}寸：开始真实签名与安装条件检查");
+        eprintln!("{size}寸：开始真实设备与安装条件检查");
         let preview = maintenance::preflight(&state, &project, input.clone()).await?;
         if let Some(blocked) = preview.items.iter().find(|item| item.state != "ready") {
             return Err(format!("安装检查未通过：{} {}", blocked.name, blocked.reason).into());

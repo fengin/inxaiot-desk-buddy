@@ -50,16 +50,13 @@ export function binaryTarget(bytes) {
   throw new Error('无法识别可执行文件平台');
 }
 
-export function assertToolTarget(bytes, target, { name, allowRosetta = false, allowWindowsX86 = false } = {}) {
+export function assertToolTarget(bytes, target, { name, allowWindowsX86 = false } = {}) {
   const actual = binaryTarget(bytes);
   if (actual.platform !== target.platform) throw new Error(`${name ?? '工具'} 平台不匹配：需要 ${target.platform}，实际 ${actual.platform}`);
   if (actual.architectures.includes(target.architecture)) return { ...actual, requiresRosetta: false };
-  // 官方 Windows ADB 可为 32 位，x64 Windows 可运行；Java 仍使用目标原生架构。
+  // 官方 Windows ADB 可为 32 位，x64 Windows 可运行。
   if (allowWindowsX86 && target.platform === 'win32' && target.architecture === 'x64' && actual.architectures.includes('ia32')) {
     return { ...actual, requiresRosetta: false };
-  }
-  if (allowRosetta && target.platform === 'darwin' && target.architecture === 'arm64' && actual.architectures.includes('x64')) {
-    return { ...actual, requiresRosetta: true };
   }
   throw new Error(`${name ?? '工具'} 架构不匹配：需要 ${target.architecture}，实际 ${actual.architectures.join('/') || '未知'}`);
 }

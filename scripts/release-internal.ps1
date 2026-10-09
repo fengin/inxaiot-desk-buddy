@@ -112,7 +112,7 @@ try {
         & (Join-Path $PSScriptRoot "generate-sbom.ps1") -OutputPath (Join-Path $staging "sbom.cdx.json") -Commit $commit
     }
     Invoke-NativeStep "构建内部免安装Release程序" {
-        pnpm tauri build --no-bundle --config src-tauri/tauri.release.conf.json
+        pnpm build:windows
     }
     $buildDependencyMetadata = Join-Path $projectRoot "src-tauri\target\release\deps\inxaiot_desk_buddy_lib.d"
     if (-not [System.IO.File]::Exists($buildDependencyMetadata)) {
@@ -143,18 +143,11 @@ try {
 
     $portableTarget = Join-Path $staging "inxaiot-desk-buddy-$version-x64.exe"
     Copy-Item -LiteralPath $portableSource -Destination $portableTarget
-    Invoke-NativeStep "生成并验证智能屏随包工具" {
-        node (Join-Path $PSScriptRoot 'package-screen-tools.mjs') --platform win32 --arch x64 --output $staging
-    }
     $roles = [ordered]@{
         (Split-Path -Leaf $portableTarget) = "portable"
         "sbom.cdx.json" = "sbom"
     }
     $files = @()
-    foreach ($tool in Get-ChildItem -LiteralPath (Join-Path $staging 'tools') -File -Recurse) {
-        $relativeName = [IO.Path]::GetRelativePath($staging, $tool.FullName).Replace('\', '/')
-        $roles[$relativeName] = 'screen-tool'
-    }
     foreach ($name in $roles.Keys) {
         $file = Get-Item -LiteralPath (Join-Path $staging $name)
         $files += [ordered]@{
@@ -165,14 +158,14 @@ try {
         }
     }
     $manifest = [ordered]@{
-        schemaVersion = 4
+        schemaVersion = 5
         product = "INX 实施工作台"
         identifier = "com.inxaiot.desk-buddy"
         version = $version
         distribution = [ordered]@{
             os = "windows"
             architecture = "x64"
-            package = "portable-directory"
+            package = "portable-exe"
             runtime = "Microsoft Edge WebView2 Evergreen Runtime"
             applicationData = "per-user-standard-app-data"
         }

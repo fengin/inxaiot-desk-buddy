@@ -32,7 +32,7 @@ function macosToolBinaries(root) {
     try { length = readSync(descriptor, header, 0, header.length, 0) } finally { closeSync(descriptor) }
     try { return binaryTarget(header.subarray(0, length)).platform === 'darwin' ? [file] : [] } catch { return [] }
   })
-  // 先处理较深目录中的动态库，再处理上层工具；普通数据、说明及 JAR 不参与签名。
+  // 先处理较深目录中的动态库，再处理 ADB；普通数据与许可证不参与签名。
   return collect(root).sort((a, b) => b.split(sep).length - a.split(sep).length || a.localeCompare(b))
 }
 
@@ -79,9 +79,6 @@ export function buildMacos({
   try {
     // 编译前确认 Mac 工具可运行，避免生成缺少设备管理工具的应用包。
     tools(staging)
-    const toolManifest = JSON.parse(readFileSync(join(staging, 'tools/android-manifest.json'), 'utf8'))
-    const requiresRosetta = toolManifest.versions?.requiresRosetta === true
-    if (requiresRosetta) log('此 arm64 应用包含 Intel 版 Android 工具，使用它的 Apple Silicon Mac 也需要安装 Rosetta。')
     execute('pnpm', ['tauri', 'build', '--bundles', 'app', '--config', 'src-tauri/tauri.macos.conf.json'])
     const config = JSON.parse(readFileSync(join(projectRoot, 'src-tauri/tauri.conf.json'), 'utf8'))
     const appPath = join(targetRoot, 'release/bundle/macos', `${config.productName}.app`)
@@ -103,12 +100,8 @@ export function buildMacos({
     cpSync(join(staging, 'tools'), destination, { recursive: true, dereference: true })
     writeFileSync(join(destination, 'README-macos.txt'), [
       `INX 实施工作台 macOS ${targetArch} 随包工具`,
-      '本目录包含 macOS 版 ADB、APK 校验工具、Java 运行时及许可证，不使用 Windows 的 adb.exe。',
+      '本目录仅包含支持当前 Mac 架构的 ADB、必要动态库及许可证。APK 信息由工作台自行解析，不依赖 Java 或 Rosetta。',
       '请保留完整应用包，不单独复制或替换工具文件。',
-      ...(requiresRosetta ? [
-        '此包的部分 Android 工具为 Intel 版本，使用此应用的 Apple Silicon Mac 需要 Rosetta。',
-        '如果系统提示安装 Rosetta，请完成安装后重新打开工作台；仅构建电脑安装 Rosetta 不足以满足使用电脑的要求。',
-      ] : []),
       '',
     ].join('\n'), 'utf8')
 

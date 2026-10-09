@@ -168,10 +168,6 @@ pub async fn preflight_with_config(
         }
     }
     let id = uuid::Uuid::now_v7().to_string();
-    let directory = state
-        .paths
-        .project_task_dir(project, &id)
-        .map_err(map_formal_error)?;
     let parsed = if input.action == "install" {
         let metadata = input
             .apk
@@ -257,13 +253,7 @@ pub async fn preflight_with_config(
                     } else if let Some(apk) = &parsed {
                         match compatibility(apk, &observation, input.reinstall) {
                             Err(error) => reason = Some(error.to_string()),
-                            Ok(same) => {
-                                match apk::installed_signers(&device,&screen.fields.ip,observation.observed_mac.as_deref().unwrap_or(""),&directory,CancellationToken::new()).await{
-                                    Err(error)=>reason=Some(error.to_string()),
-                                    Ok(Some(signers)) if signers!=apk.signer_sha256=>reason=Some("安装包签名与现有小新不一致，不能保留数据覆盖；不会自动卸载".into()),
-                                    _=>skip=same
-                                }
-                            }
+                            Ok(same) => skip = same,
                         }
                     }
                     if reason.is_none() && input.action == "app_config" {
@@ -921,31 +911,6 @@ async fn execute_install(
         ));
     }
     compatibility(package, &before, true)?;
-    let dir = state
-        .paths
-        .project_task_dir(&plan.project_id, id)
-        .map_err(map_formal_error)?;
-    if let Some(signers) = progress
-        .wait(
-            "核对安装签名",
-            0,
-            "正在核对安装条件及应用签名",
-            apk::installed_signers(
-                &device,
-                &screen.fields.ip,
-                before.observed_mac.as_deref().unwrap_or(""),
-                &dir,
-                cancel.clone(),
-            ),
-        )
-        .await?
-    {
-        if signers != package.signer_sha256 {
-            return Err(AppError::Conflict(
-                "已安装应用签名已变化，未覆盖安装".into(),
-            ));
-        }
-    }
     if cancel.is_cancelled() {
         return Err(AppError::Cancelled);
     }
@@ -1181,7 +1146,6 @@ mod tests {
             min_sdk: 24,
             abis: vec!["armeabi-v7a".into()],
             activity: String::new(),
-            signer_sha256: vec![],
         };
         let mut observation = ScreenObservation {
             sdk: Some(29),

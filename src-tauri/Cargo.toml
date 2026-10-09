@@ -1,6 +1,6 @@
 [package]
 name = "inxaiot-desk-buddy"
-version = "0.2.5"
+version = "0.2.6"
 description = "INX 实施工作台"
 authors = ["INX"]
 edition = "2024"
@@ -16,6 +16,10 @@ desktop-e2e = ["dep:tauri-plugin-wdio-webdriver"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+apk-info-axml = "=1.0.13"
+apk-info-xml = "=1.0.13"
+flate2 = "1.1.9"
+zip = { version = "6.0.0", default-features = false, features = ["deflate-flate2"] }
 aes-gcm = "0.11.1"
 argon2 = "0.5.3"
 aws-lc-rs = "1.18.0"

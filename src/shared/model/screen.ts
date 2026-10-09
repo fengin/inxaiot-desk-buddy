@@ -84,7 +84,6 @@ export interface ScreenApkSelection {
   minSdk?: number;
   abis?: string[];
   activity?: string;
-  signerSha256?: string[];
 }
 
 /** 原型只校验用户所选文件的基本信息，不把后缀检查当作 APK 内容校验。 */

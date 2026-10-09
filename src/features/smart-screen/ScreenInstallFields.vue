@@ -53,7 +53,7 @@ async function pick() {
         <n-button size="tiny" secondary :disabled="packageDisabled" :loading="parsing" data-testid="screen-apk-picker" @click="pick">{{ parsing ? '正在读取' : '选择' }}</n-button>
       </div>
       <small v-if="file" class="operation-file-meta">文件大小：{{ fileSize }}</small>
-      <small v-if="metadata" class="operation-file-meta">小新{{ metadata.appVersion }}-{{ metadata.appVersionCode }} · {{ metadata.abis?.join(' / ') || '不限制处理器架构' }}<br>安装包完整性及签名已校验</small>
+      <small v-if="metadata" class="operation-file-meta">小新{{ metadata.appVersion }}-{{ metadata.appVersionCode }} · {{ metadata.abis?.join(' / ') || '不限制处理器架构' }}<br>安装包信息已读取</small>
       <span v-if="error" class="screen-danger screen-apk-error" role="alert">{{ error }}</span>
     </div>
     <n-checkbox v-model:checked="reinstall" :disabled="disabled" data-testid="screen-install-reinstall">相同版本覆盖安装，保留数据</n-checkbox>

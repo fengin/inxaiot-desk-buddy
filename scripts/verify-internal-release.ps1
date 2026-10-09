@@ -34,7 +34,7 @@ if ((Test-Path -LiteralPath (Join-Path $root "release-manifest.p7s")) -or
     throw "内部无签名产物集不得混入历史签名文件"
 }
 $manifest = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
-if ($manifest.schemaVersion -notin @(2, 3, 4) -or $manifest.integrity.policy -ne "internal-unsigned-sha256" -or
+if ($manifest.schemaVersion -notin @(2, 3, 4, 5) -or $manifest.integrity.policy -ne "internal-unsigned-sha256" -or
     $manifest.integrity.authenticodeRequired -ne $false -or $manifest.git.dirty -ne $false) {
     throw "内部产物清单策略或Git状态无效"
 }
@@ -152,6 +152,16 @@ foreach ($file in Get-ChildItem $root -File -Recurse) {
 if ($manifest.schemaVersion -eq 4) {
     & node (Join-Path $PSScriptRoot 'package-screen-tools.mjs') --platform win32 --arch x64 --output $root --verify
     if ($LASTEXITCODE -ne 0) { throw '智能屏工具不完整或无法运行' }
+}
+if ($manifest.schemaVersion -eq 5) {
+    $portable = $manifest.files | Where-Object { $_.role -eq 'portable' } | Select-Object -First 1
+    $report = Join-Path ([IO.Path]::GetTempPath()) ('inx-adb-verify-' + [Guid]::NewGuid().ToString('N') + '.json')
+    try {
+        $process = Start-Process -FilePath (Join-Path $root $portable.name) -ArgumentList @('--verify-package', ('"' + $report + '"')) -WindowStyle Hidden -PassThru -Wait
+        if ($process.ExitCode -ne 0 -or !(Test-Path -LiteralPath $report)) { throw '内嵌ADB无法运行' }
+        $result = [IO.File]::ReadAllText($report) | ConvertFrom-Json
+        if (!$result.successful -or !$result.embedded) { throw '产物不包含完整的内嵌ADB' }
+    } finally { if (Test-Path -LiteralPath $report) { Remove-Item -LiteralPath $report -Force } }
 }
 
 $projectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))

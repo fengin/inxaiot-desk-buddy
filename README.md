@@ -2,7 +2,7 @@
 
 面向项目实施与维护人员的桌面工作台，根据 `inxaiot-edge-workbench` 的实际能力重新进行产品、技术和工程设计。
 
-当前应用版本：**0.2.5**。功能与验收范围见[版本变更记录](CHANGELOG.md)。
+当前应用版本：**0.2.6**。功能与验收范围见[版本变更记录](CHANGELOG.md)。
 
 Windows 与现有两台一体机、三台智能屏的整体实机回归已完成，包括一体机部署升级、智能屏安装及配置管理、结果回写和异常恢复。验证结果与范围见[整体实机回归记录](doc/27-整体实机回归记录.md)；Mac 原生运行及现场触摸、语音体验仍需在目标设备验收。
 
@@ -34,17 +34,17 @@ Windows 与现有两台一体机、三台智能屏的整体实机回归已完成
 
 步骤7已完成整体流程、双进程操作锁、异常恢复和一体机相关回归。2026-10-08 已补齐跨版本升级、两台 4 寸同批安装及三屏配置修改和还原验证，详见[整体实机回归记录](doc/27-整体实机回归记录.md)。屏首次安装由厂家准备，不属于本轮必验范围；后续验收边界见[接续计划](doc/智能屏/20-智能屏开发测试遗留与接续计划.md)。
 
-智能屏发布必须携带适合运行电脑的工具。已有打包脚本 `scripts/package-screen-tools.mjs` 按 `--platform` 和 `--arch` 参数复制 ADB（Android 调试桥）、APK 解析和验签工具、Java 21 及许可证，校验操作系统、处理器架构和文件完整性，并实际运行工具检查。工具基线为 platform-tools 35 及以上、build-tools 36.1.0 和 Java 21。
+智能屏管理只携带 ADB（Android 调试桥）、必要动态库及许可证，工具基线为 platform-tools 35 及以上。APK 包名、版本、最低系统版本、处理器架构和启动页面由 Rust 程序直接读取，不依赖外部 APK 工具或 Java。工作台不提前验签或比对屏上应用证书，Android 安装时负责签名校验；文件变化、错误应用及设备兼容性检查保留。
 
 | 运行电脑 | 随包工具 | 工具位置 |
 | --- | --- | --- |
-| Windows x64 | Windows 版 `adb.exe`、所需 DLL、APK 工具和 x64 Java 21 | 主程序旁的 `tools` 目录 |
-| macOS Intel x64 | macOS 版 `adb`、APK 工具和 x64 Java 21 | `.app/Contents/Resources/tools` |
-| macOS Apple Silicon arm64 | macOS 版 `adb`、APK 工具和 arm64 Java 21 | `.app/Contents/Resources/tools` |
+| Windows x64 | Windows 版 `adb.exe`、所需 DLL 和许可证 | 压缩内嵌在主程序，首次使用自动释放到当前用户缓存 |
+| macOS Intel x64 | 支持 Intel 的 macOS ADB、必要动态库和许可证 | `.app/Contents/Resources/tools` |
+| macOS Apple Silicon arm64 | 支持 Apple Silicon 的 macOS ADB、必要动态库和许可证 | `.app/Contents/Resources/tools` |
 
-Mac 包不能装入 Windows 的 EXE 或 DLL。官方 macOS ADB 从 32.0.0 起提供 Universal 通用文件，同时支持 Intel 和 Apple Silicon；本项目使用 35 及以上版本，不另维护两套 ADB，打包检查它包含当前目标架构。若 `aapt`（APK 信息读取工具）只有 Intel 版本，Apple Silicon 的构建机和实际使用电脑都需要 Rosetta；只在 CI 安装 Rosetta 不能消除用户电脑的这一要求。Android SDK 按系统提供下载，准备方式见 [Platform-Tools 官方说明](https://developer.android.com/tools/releases/platform-tools)和 [sdkmanager 官方说明](https://developer.android.com/tools/sdkmanager)。
+Mac 包不能装入 Windows 的 EXE 或 DLL。macOS ADB 必须包含当前目标架构，Apple Silicon 不借助 Rosetta 运行 Intel 工具。Android SDK 按系统提供下载，准备方式见 [Platform-Tools 官方说明](https://developer.android.com/tools/releases/platform-tools)和 [sdkmanager 官方说明](https://developer.android.com/tools/sdkmanager)。
 
-Windows 内部发布和多平台压缩包流程都会准备并检查工具，缺少工具时发布失败。`build:windows` 只编译主程序，完整 Windows 交付仍走内部发布脚本；`build:macos` 已包括工具准备、应用构建、工具装入、签名和最终检查，输出完整 `.app`。Windows 已验证随包工具独立运行；macOS 仍需在 Intel 和 Apple Silicon 的 Mac 上分别验收。
+`pnpm build:windows` 在编译前准备 ADB，将压缩工具包嵌入 EXE，并用独立进程检查内嵌工具；正式 Windows 编译缺少内嵌工具时直接失败。Windows 便携压缩包只包含 `INX实施工作台.exe`，不附带 `tools`。缓存位于 `%LOCALAPPDATA%/com.inxaiot.desk-buddy/tool-cache`，按工具包内容区分版本，完整时复用，缺失或损坏时重新准备；运行目录无需写权限。`build:macos` 输出包含 ADB 的完整 `.app`，应用及工具签名流程保留。
 
 ## 智能屏桌面交互原型
 
@@ -90,7 +90,7 @@ pnpm tauri dev
 ## 免安装编译与正式交付
 
 - Windows：`pnpm build:windows`生成`src-tauri/target/release/inxaiot-desk-buddy.exe`，直接运行，不生成安装器；系统需要WebView2运行时。
-- macOS：在对应架构的 Mac 上准备 macOS Android SDK 和匹配架构的 Java 21，再执行 `pnpm build:macos`；输出带工具的完整 `.app`，整体复制到“应用程序”目录。该命令不支持在 Windows 打 Mac 包，也不支持在另一架构的 Mac 上交叉构建。
+- macOS：在对应架构的 Mac 上准备 macOS Android SDK 的 platform-tools，再执行 `pnpm build:macos`；输出带 ADB 的完整 `.app`，整体复制到“应用程序”目录。该命令不支持在 Windows 打 Mac 包，也不支持在另一架构的 Mac 上交叉构建。
 - Linux：在Linux上执行`pnpm build:linux`生成当前架构的可执行文件。需要按Tauri要求安装WebKitGTK等系统依赖，并提供兼容`org.freedesktop.secrets`的桌面凭据服务用于保存项目数据库密码；在目标发行版原生验证。
 - 正式Windows产物：使用`scripts/release-internal.ps1`从干净提交构建，再用`scripts/verify-internal-release.ps1`校验。完整说明见[发布与回滚](doc/16-Windows可信发布与回滚说明.md)。
 - 发布参数接受已有RSA、Ed25519、ECDSA私钥内容，继续加密存入工作台库；RSA认证使用SHA-2，无需追加新公钥。
@@ -98,9 +98,9 @@ pnpm tauri dev
 
 ### GitHub多平台发布
 
-- 推送`v*.*.*`标签会触发`.github/workflows/portable-release.yml`；标签必须与`package.json`、Cargo和Tauri中的应用版本一致，当前版本使用`v0.2.5`。
+- 推送`v*.*.*`标签会触发`.github/workflows/portable-release.yml`；标签必须与`package.json`、Cargo和Tauri中的应用版本一致，当前版本使用`v0.2.6`。
 - Actions并行构建Windows x64、Linux x64、macOS Intel x64和Apple Silicon arm64，生成便携压缩包及对应SHA-256文件；全部构建成功后才创建GitHub Release。手动触发只保存7天的Workflow Artifact，不创建Release。
-- macOS 流水线与本机构建共用 `build:macos`，按 x64、arm64 分别准备 SDK 和 Java。默认产物使用 adhoc 签名；没有 Apple Developer 证书和公证，首次从网络下载后仍可能需要用户在系统“隐私与安全性”中允许打开。Apple Silicon 使用 Intel 版随包 Android 工具时，用户电脑也必须具备 Rosetta。
+- macOS 流水线与本机构建共用 `build:macos`，按 x64、arm64 检查 ADB 架构。默认产物使用 adhoc 签名；没有 Apple Developer 证书和公证，首次从网络下载后仍可能需要用户在系统“隐私与安全性”中允许打开。使用工作台不需要 Java 或 Rosetta。
 - GitHub产物用于跨平台构建和原生验收，不能替代目标Mac和Linux发行版上的实际运行、Keychain/Secret Service、文件对话框及SSH/SFTP验证。
 
 ## 质量检查

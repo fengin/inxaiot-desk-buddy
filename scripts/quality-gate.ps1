@@ -34,7 +34,7 @@ try {
         Pop-Location
     }
 
-    Invoke-NativeStep "Windows Release裸程序构建" { pnpm tauri build --no-bundle }
+    Invoke-NativeStep "Windows 内嵌ADB单文件构建" { pnpm build:windows }
     Write-Host "全部本地质量门禁通过。"
 }
 finally {

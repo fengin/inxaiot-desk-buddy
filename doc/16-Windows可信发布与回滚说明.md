@@ -9,8 +9,8 @@
 - `Jenkinsfile.windows`分层定义能力门禁、显式真实环境门禁和内部发布门禁；Runner标签固定为`inxaiot-windows-release`并禁止并发发布。
 - `src-tauri/tauri.release.conf.json`关闭安装器打包；`--no-bundle`只是不生成安装包，仍是优化后的正式Release EXE，不等于debug或desktop-e2e构建。
 - `scripts/generate-sbom.ps1`生成CycloneDX 1.5 SBOM，组件数量以本次清单为准。
-- `scripts/release-internal.ps1`要求Git工作区干净，以版本+12位提交ID创建不可覆盖产物目录，构建后校验Cargo Release依赖元数据绑定同一非dirty提交，并复查工作区、HEAD和Tree未变化；输出免安装 EXE、完整 tools 目录、SBOM、SHA-256 及清单 v4。最终发布采用同卷原子移动。
-- `scripts/verify-internal-release.ps1`离线复验文件集合、大小/SHA-256、Git提交/Tree、目录命名、只读属性和EXE的`NotSigned`状态。v4 包含 portable、sbom 各一份及 screen-tool 文件集合，逐文件验证 tools 并检查工具能否运行；兼容历史 v2/v3，不修改旧产物。旧脚本名继续转发。
+- `scripts/release-internal.ps1`要求Git工作区干净，以版本+12位提交ID创建不可覆盖产物目录，构建后校验Cargo Release依赖元数据绑定同一非dirty提交，并复查工作区、HEAD和Tree未变化；输出内嵌 ADB 的免安装 EXE、SBOM、SHA-256 及清单 v5。最终发布采用同卷原子移动。
+- `scripts/verify-internal-release.ps1`离线复验文件集合、大小/SHA-256、Git提交/Tree、目录命名、只读属性和EXE的`NotSigned`状态。v5 包含 portable、sbom 各一份，并以独立进程验证 EXE 能准备和运行内嵌 ADB；兼容历史 v2/v3/v4，v4 的外置工具按原清单复验。旧脚本名继续转发。
 - 首个正式内部产物集已由干净提交`f9adb6ec6845b8e5267a9bf7a19551b6eb8245fc`生成并通过两次离线复验。
 
 当前状态：P1-20按内部无签名发布策略关闭。历史内部证书Thumbprint `4B6FA6B7CBF774B4BB0BFACEE8EC51EE8A7FC3C1`已从CurrentUser My/Root/TrustedPublisher精确删除，已知CNG容器和私钥文件匹配数均为0；受控产物根继续保留。
@@ -44,9 +44,9 @@
 
 ## 3. 发布、升级与回滚
 
-正式发布必须从干净提交执行。发布机设置 `ANDROID_SDK_ROOT`（Android SDK 路径）和 `JAVA_HOME`（Temurin 或 JetBrains Java 21 路径），准备 platform-tools 35 及以上与 build-tools 36.1.0。SDK 必须属于目标电脑的操作系统，Java 必须匹配目标架构；Windows x64 交付包含 Windows 版 `adb.exe`、`AdbWinApi.dll`、`AdbWinUsbApi.dll` 和 x64 Java。随包脚本缺文件、缺许可证、系统或架构不匹配、校验失败或工具不能运行时停止发布。
+正式发布必须从干净提交执行。发布机设置 `ANDROID_SDK_ROOT`（Android SDK 路径），准备目标系统的 platform-tools 35 及以上。Windows 构建把 `adb.exe`、`AdbWinApi.dll`、`AdbWinUsbApi.dll`、许可证和版本信息压缩后嵌入主程序；不再携带 APK 外部工具或 Java。工具缺失、平台或架构不匹配、校验失败或无法运行时停止发布。
 
-发布结果是完整目录，包含主程序和 `tools`；复制、升级及回滚必须整体处理。内部清单 v4 的分发类型为 `portable-directory`。只复制 EXE 会缺少智能屏所需工具。
+Windows 便携压缩包只包含 `INX实施工作台.exe`，复制、升级及回滚只需更换该程序。内部清单 v5 的分发类型为 `portable-exe`；SBOM 和校验清单用于内部追溯，不要求放在用户程序旁。ADB 首次使用时自动释放到 `%LOCALAPPDATA%/com.inxaiot.desk-buddy/tool-cache`，按内嵌资源内容区分版本并校验后复用。删除缓存后下次使用重新准备；不会写入 EXE 所在目录或修改项目数据。
 
 ```powershell
 $env:INX_RELEASE_ARTIFACT_ROOT = "D:\inxaiot-release-artifacts"
@@ -73,7 +73,7 @@ $env:INX_RELEASE_ARTIFACT_ROOT = "D:\inxaiot-release-artifacts"
 
 ### 3.2 macOS
 
-在 Mac 上安装项目已有 Node/pnpm、Rust 和 Xcode 构建依赖，准备 macOS 的 platform-tools 35 及以上、build-tools 36.1.0，以及与本机架构匹配的 Temurin 或 JetBrains Java 21；通过 `ANDROID_SDK_ROOT` 和 `JAVA_HOME` 指明目录。Android SDK 的准备方式见 [Platform-Tools 官方说明](https://developer.android.com/tools/releases/platform-tools)和 [sdkmanager 官方说明](https://developer.android.com/tools/sdkmanager)。
+在 Mac 上安装项目已有 Node/pnpm、Rust 和 Xcode 构建依赖，准备 macOS 的 platform-tools 35 及以上，通过 `ANDROID_SDK_ROOT` 指明目录。使用工作台不需要 Java。Android SDK 的准备方式见 [Platform-Tools 官方说明](https://developer.android.com/tools/releases/platform-tools)和 [sdkmanager 官方说明](https://developer.android.com/tools/sdkmanager)。
 
 于项目根目录执行 `pnpm build:macos`。已有构建脚本 `scripts/build-macos.mjs` 使用 `--bundles app` 和配置文件 `tauri.macos.conf.json`，输出 `src-tauri/target/release/bundle/macos/INX 实施工作台.app`。Intel x64 与 Apple Silicon arm64 分别在对应架构的 Mac 上构建；可用 `--arch x64` 或 `--arch arm64` 明确目标，但目标必须与构建机一致。不支持 Windows 构建 Mac 包，也不支持另一架构或通用包的交叉构建。
 
@@ -82,10 +82,10 @@ PNG和ICNS图标已经保存在`src-tauri/icons/`，干净检出后可直接用�
 `build:macos` 自动完成以下步骤，多平台发布流水线调用同一命令：
 
 1. 调用已有打包脚本 `scripts/package-screen-tools.mjs`，明确传入 `--platform darwin` 和本机 `--arch`，先检查工具文件和可运行性；工具不满足要求时停止。
-2. 编译应用并确认主程序架构，再将 macOS `adb`、`aapt`（APK 信息读取工具）、验签工具、匹配架构的 Java 及许可证放入 `.app/Contents/Resources/tools`，不带入 Windows EXE 或 DLL。
+2. 编译应用并确认主程序架构，再将 macOS ADB、必要动态库及许可证放入 `.app/Contents/Resources/tools`，不带入 Windows EXE 或 DLL。
 3. 逐个签随包的 Mac 可执行文件和动态库、重算工具清单、签应用外层，最后复验工具完整性、实际运行和应用签名。工具清单同时记录系统与架构，工作台运行时拒绝与当前程序不符的工具包。
 
-默认使用 adhoc 签名；设置环境变量 `APPLE_SIGNING_IDENTITY` 时使用指定签名身份，公证仍需按正式分发流程另行完成。官方 macOS ADB 使用同时包含 Intel 和 Apple Silicon 架构的 Universal 文件，不单独维护两套 ADB；打包要求 ADB 包含目标架构。若 `aapt` 只有 Intel 版本，Apple Silicon 构建机及最终使用电脑都需要 Rosetta。CI 上安装 Rosetta 仅解决 CI 自身运行工具，不能让缺少 Rosetta 的用户电脑直接运行 Intel 工具；交付前必须按实际工具确认并记录这一限制。
+默认使用 adhoc 签名；设置环境变量 `APPLE_SIGNING_IDENTITY` 时使用指定签名身份，公证仍需按正式分发流程另行完成。打包要求 ADB 包含目标架构；Apple Silicon 不借助 Rosetta。Mac 应用及 ADB 的系统签名保留，取消的是工作台对待安装 APK 的提前验签。
 
 把整个`.app`复制到“应用程序”目录再打开，不要只复制包内的可执行文件；不需要PKG安装器。Intel与Apple Silicon需分别构建/验证，不将单架构产物宣称为通用包。macOS凭据使用系统Keychain，普通应用数据不写入`.app`。
 

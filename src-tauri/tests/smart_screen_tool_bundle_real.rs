@@ -1,7 +1,7 @@
 use inxaiot_desk_buddy_lib::infrastructure::smart_screen::{
-    apk::{self, PackageTools},
+    apk,
     device::AndroidTools,
-    tool_bundle::{bundle_root, executable_name},
+    tool_bundle::{current, executable_name},
 };
 
 #[tokio::test]
@@ -21,12 +21,12 @@ async fn bundled_android_tools_work_without_developer_environment()
             "验收进程仍设置{variable}"
         );
     }
-    let root = bundle_root(&std::env::current_exe()?)?;
+    let root = current()?.ok_or("没有随包ADB")?;
     let android = AndroidTools::discover()?;
-    let package = PackageTools::discover(&android)?;
-    assert_eq!(android.adb, root.join("android").join(executable_name("adb")));
-    assert_eq!(package.java, root.join("java/bin").join(executable_name("java")));
-    assert_eq!(package.aapt, root.join("android-build").join(executable_name("aapt")));
+    assert_eq!(
+        android.adb,
+        root.join("android").join(executable_name("adb"))
+    );
     let path = std::env::var_os("INX_STEP7_APK").ok_or("缺少验收APK")?;
     let apk = apk::inspect(
         std::path::Path::new(&path),
@@ -36,9 +36,8 @@ async fn bundled_android_tools_work_without_developer_environment()
     assert_eq!(apk.package_id, "chat.xiaoxin.app");
     assert!(!apk.app_version.is_empty());
     assert!(apk.app_version_code > 0);
-    assert!(!apk.signer_sha256.is_empty());
     println!(
-        "SCREEN_BUNDLED_TOOLS_PASS 小新{}-{}，签名验证通过",
+        "SCREEN_BUNDLED_TOOLS_PASS 小新{}-{}，无SDK和Java环境解析通过",
         apk.app_version, apk.app_version_code
     );
     Ok(())

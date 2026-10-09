@@ -85,16 +85,6 @@ impl ProjectInput {
                 "平台访问地址必须以 http:// 或 https:// 开头".into(),
             ));
         }
-        if let Some(host) = self
-            .platform_url
-            .strip_prefix("http://")
-            .and_then(|value| value.split(['/', ':']).next())
-            && !is_private_network_host(host)
-        {
-            return Err(AppError::InvalidConfig(
-                "非内网平台必须使用HTTPS；HTTP仅允许本机或RFC1918开发地址".into(),
-            ));
-        }
         if !valid_database_name(&self.business_db) || !valid_database_name(&self.workbench_db) {
             return Err(AppError::InvalidConfig("数据库名称包含非法字符".into()));
         }
@@ -127,27 +117,6 @@ pub fn local_project_only(
     [platform_url, db_host, db_user, business_db]
         .iter()
         .all(|value| value.trim().is_empty())
-}
-
-pub fn is_private_network_host(host: &str) -> bool {
-    let host = host.trim().trim_matches(['[', ']']).to_ascii_lowercase();
-    if matches!(host.as_str(), "localhost" | "::1")
-        || host.starts_with("127.")
-        || host.ends_with(".test")
-        || host.ends_with(".localhost")
-    {
-        return true;
-    }
-    if host.starts_with("10.") || host.starts_with("192.168.") {
-        return true;
-    }
-    let Some(rest) = host.strip_prefix("172.") else {
-        return false;
-    };
-    rest.split('.')
-        .next()
-        .and_then(|value| value.parse::<u8>().ok())
-        .is_some_and(|octet| (16..=31).contains(&octet))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

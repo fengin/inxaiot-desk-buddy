@@ -111,9 +111,8 @@ fn release_profile_associates_alternative_ssh_credentials_and_template_errors() 
     assert!(fields.contains_key("values.composeTemplate"));
 }
 
-#[test]
-fn project_input_requires_safe_urls_and_database_names() {
-    let mut input = ProjectInput {
+fn project_input() -> ProjectInput {
+    ProjectInput {
         name: "Project".into(),
         platform_url: "http://platform.test:8055".into(),
         db_host: "database.test".into(),
@@ -123,8 +122,41 @@ fn project_input_requires_safe_urls_and_database_names() {
         db_password: Some("password".into()),
         business_db: "inxvision_iot_dev".into(),
         workbench_db: "inxaiot_desk_buddy".into(),
-    };
+    }
+}
+
+#[test]
+fn project_http_address_is_not_restricted_by_network_range() {
+    let mut input = project_input();
+    input.db_host = "192.171.32.1".into();
+    for url in [
+        "http://192.171.32.5:8055",
+        "http://192.171.32.1:8055",
+        "http://platform.internal:8055",
+        "http://192.168.3.142:8055",
+        "https://192.171.32.5:8055",
+    ] {
+        input.platform_url = url.into();
+        input.db_password = Some("test-password".into());
+        input.validate_for_create().expect("允许保存明确配置的项目地址");
+        input.validate_for_test(None).expect("新项目允许测试连接");
+        input.db_password = None;
+        input.validate_for_update().expect("编辑项目允许保留原密码");
+        input.validate_for_test(Some("existing-project")).expect("已保存项目允许测试连接");
+    }
+}
+
+#[test]
+fn project_input_requires_safe_urls_and_database_names() {
+    let mut input = project_input();
     input.validate_for_create().expect("valid project");
+    for url in ["192.171.32.5:8055", "ftp://192.171.32.5:8055"] {
+        input.platform_url = url.into();
+        assert!(input.validate_for_create().is_err());
+        assert!(input.validate_for_update().is_err());
+        assert!(input.validate_for_test(Some("existing-project")).is_err());
+    }
+    input.platform_url = "http://192.171.32.5:8055".into();
     input.business_db = "inxvision-iot;drop".into();
     assert!(input.validate_for_create().is_err());
 

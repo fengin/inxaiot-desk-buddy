@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RealScreenAdapter, screenSnapshotFromBackend } from "./realScreenAdapter";
+import type { ScreenOperationInput } from "@/shared/model/screen";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -15,6 +16,20 @@ function snapshot() {
 
 describe("智能屏正式调用", () => {
   beforeEach(() => { invoke.mockReset(); });
+  it("NTP先受控读取，再绑定逐屏预检快照执行", async () => {
+    const adapter = new RealScreenAdapter();
+    invoke.mockResolvedValueOnce([{ screenId: "platform-1", readAt: "2026-10-10T00:00:00Z", config: { server: "", autoTime: false, autoTimeZone: true, timeZone: "Asia/Shanghai" }, message: "已读取" }]);
+    await adapter.readNtp("project", ["platform-1"]);
+    expect(invoke).toHaveBeenLastCalledWith("screen_ntp_read", { localProjectId: "project", screenIds: ["platform-1"] });
+    const input: ScreenOperationInput = { action: "ntp", targetIds: ["platform-1"], appVersion: "", abi: "universal", reinstall: false, concurrency: 1 };
+    const patches = { "platform-1": { server: "192.168.3.142" } };
+    invoke.mockResolvedValueOnce({ id: "ntp-check", items: [{ screenId: "platform-1", name: "屏", ip: "192.0.2.1", state: "ready", reason: "通过" }] });
+    await adapter.preflightNtp("project", input, patches); patches["platform-1"].server = "changed.internal";
+    expect(invoke).toHaveBeenLastCalledWith("screen_ntp_preflight", { localProjectId: "project", input, patches: { "platform-1": { server: "192.168.3.142" } } });
+    invoke.mockResolvedValueOnce("ntp-task");
+    await expect(adapter.execute("project", input)).resolves.toBe("ntp-task");
+    expect(invoke).toHaveBeenLastCalledWith("screen_execute", { localProjectId: "project", preflightId: "ntp-check", input });
+  });
   it("分别展示平台与设备版本，并保留注册前的实测", () => {
     const value = screenSnapshotFromBackend(snapshot());
     expect(value.screens[0]).toMatchObject({ appVersion: "2.0.8", observedAppVersion: "2.0.9", appVersionCode: 209, spacePath: "楼幢/楼层", building: "楼幢", floor: "楼层" });

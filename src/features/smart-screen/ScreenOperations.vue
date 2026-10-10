@@ -13,6 +13,7 @@ import { screenOperationFlows } from "./screenOperationFlow";
 import ScreenTargetPicker from "./ScreenTargetPicker.vue";
 import ScreenTaskResults from "./ScreenTaskResults.vue";
 import ScreenAppConfig from "./ScreenAppConfig.vue";
+import ScreenNtpConfig from "./ScreenNtpConfig.vue";
 import ScreenPreflightTable from "./ScreenPreflightTable.vue";
 import CompactOperationTable from "@/shared/components/CompactOperationTable.vue";
 import ScreenInstallFields from "./ScreenInstallFields.vue";
@@ -29,6 +30,7 @@ const step = ref(0), checking = ref(false), submitting = ref(false);
 const checks = ref<ScreenPreflightItem[]>([]), included = ref<string[]>([]), error = ref("");
 const preparedInput = ref<ScreenOperationInput>();
 const retrySource = ref<{id:string;action:string;targets:string[]}>();
+const retryOperationId = computed(() => retrySource.value?.action === store.operation && store.selectedIds.every(id => retrySource.value?.targets.includes(id)) ? retrySource.value.id : undefined);
 const criticalDrafts = computed(() => store.selectedScreens.map((screen) => ({ screen, fields: screenCriticalDraftFields(screen, store.snapshot.platformDrafts?.[screen.id]) })).filter((row) => row.fields.length));
 const registrationPreview = shallowRef<RegistrationPreview | null>(null);
 const macConfirmations = ref<Record<string, ScreenRegistrationMacConfirmation>>({});
@@ -69,7 +71,7 @@ const nextLabel = computed(() => {
   return `${flow.value.executeLabel} ${checks.value.length || registrationPreview.value ? included.value.length : store.selectedIds.length} 台`;
 });
 const installationReady = computed(() => store.operation !== "install" || (!sizeWarning.value && !validateScreenApk(apk.value).length));
-const params = (): ScreenOperationInput => ({ action: store.operation, retryOfOperationId: retrySource.value?.action === store.operation && store.selectedIds.every(id=>retrySource.value?.targets.includes(id)) ? retrySource.value.id : undefined, targetIds: [...store.selectedIds], expectedTargets: Object.fromEntries(store.selectedScreens.map((screen) => [screen.id, screenMaintenanceFingerprint(screen)])), appVersion: apk.value?.appVersion ?? "", abi: "universal", ...form,
+const params = (): ScreenOperationInput => ({ action: store.operation, retryOfOperationId: retryOperationId.value, targetIds: [...store.selectedIds], expectedTargets: Object.fromEntries(store.selectedScreens.map((screen) => [screen.id, screenMaintenanceFingerprint(screen)])), appVersion: apk.value?.appVersion ?? "", abi: "universal", ...form,
   ...(store.operation === "install" ? { applicationId: "xiaoxin", apk: apk.value ? { ...apk.value } : undefined } : {}) });
 
 // 文件用 getter 比较引用，避免 shallowRef 使相同目标列表的刷新也强制重置操作。
@@ -77,7 +79,7 @@ watch([() => store.operation, () => store.selectedIds.join("|"), () => selectedA
   if (step.value === 0) { ++request; checks.value = []; included.value = []; preparedInput.value = undefined; clearRegistration(); checking.value = false; error.value = ""; }
 }, { flush: "sync" });
 watch(() => store.operation, (nextOperation, previousOperation) => {
-  if ([nextOperation,previousOperation].some(value=>['register','app_config'].includes(value))) { fresh(); submitting.value = false; }
+  if ([nextOperation,previousOperation].some(value=>['register','app_config','ntp'].includes(value))) { fresh(); submitting.value = false; }
 }, { flush: "sync" });
 // 预览绑定当前资料与目录。普通轮询中的相同快照不会使预览反复失效。
 const registrationFingerprint = computed(() => JSON.stringify({
@@ -187,6 +189,11 @@ async function next() {
   await execute();
 }
 function retry(previousTask: ScreenTask, ids: string[]) {
+  if(previousTask.action==='ntp'){
+    historyOpen.value=false;fresh();store.selectedIds=[...new Set(ids.flatMap(id=>{const current=store.snapshot.screens.find(screen=>screen.id===id||screen.aliases.includes(id));return current?[current.id]:[];}))];store.operation='ntp';
+    retrySource.value={id:previousTask.id,action:previousTask.action,targets:[...store.selectedIds]};
+    message.info('请重新读取当前NTP设置，核对尚未完成的设置；待核实结果只读取现状，不重复重启。');return;
+  }
   if(previousTask.action==='app_config'){historyOpen.value=false;fresh();store.selectedIds=ids.filter(id=>store.snapshot.screens.some(screen=>screen.id===id));store.operation='app_config';message.info('请重新读取当前配置，只选择未完成的修改。已保存但未重启的屏可直接重启小新。');return;}
   if (previousTask.action === "register") {
     const currentIds = ids.flatMap((id) => {
@@ -228,6 +235,7 @@ function restartConfig(ids:string[]){historyOpen.value=false;fresh();store.selec
     </div>
     <n-alert v-if="error" type="warning" class="screen-ops-alert">{{ error }}</n-alert>
     <screen-app-config v-if="store.operation==='app_config'" v-model:step="step" @busy="checking=$event" />
+    <screen-ntp-config v-else-if="store.operation==='ntp'" v-model:step="step" :retry-of-operation-id="retryOperationId" @busy="checking=$event" @retry="retry" @reset="fresh" />
     <div v-else class="operation-content screen-operation-content" :class="{'selection-scroll-owner':step===0,'screen-result-content':step===lastStep}">
       <div v-if="step === 0" class="operation-stage select-stage screen-select-stage">
         <screen-target-picker :disabled="checking || submitting" />
@@ -291,7 +299,7 @@ function restartConfig(ids:string[]){historyOpen.value=false;fresh();store.selec
       </div>
       <div v-else class="operation-stage screen-final-stage"><screen-task-results v-if="task" :task="task" @retry="retry(task,$event)" @status="emit('status')" @versions="emit('versions', $event)" @detail="emit('detail', $event)" /></div>
     </div>
-    <footer v-if="step > 0 && store.operation!=='app_config'" class="screen-ops-footer"><span>{{ step<lastStep ? `本次${store.operation === 'register' ? '提交' : '执行'} ${included.length} 台${registrationPending ? ` · ${registrationPending} 台待逐屏确认` : ''}` : '结果逐台记录，资产只保留成功后的最终状态' }}</span><n-button @click="previous" v-if="step<lastStep" size="small" :disabled="submitting">上一步</n-button><n-button v-if="step<lastStep" type="success" size="small" :loading="checking||submitting" :disabled="checking || submitting || !store.selectedIds.length || !included.length || !registrationReady" data-testid="screen-operation-submit" @click="next"><template #icon><Play :size="15" /></template>{{ nextLabel }}<ChevronRight :size="14" /></n-button><n-button v-else size="small" :disabled="executing" @click="fresh">新的智能屏操作</n-button></footer>
+    <footer v-if="step > 0 && !['app_config','ntp'].includes(store.operation)" class="screen-ops-footer"><span>{{ step<lastStep ? `本次${store.operation === 'register' ? '提交' : '执行'} ${included.length} 台${registrationPending ? ` · ${registrationPending} 台待逐屏确认` : ''}` : '结果逐台记录，资产只保留成功后的最终状态' }}</span><n-button @click="previous" v-if="step<lastStep" size="small" :disabled="submitting">上一步</n-button><n-button v-if="step<lastStep" type="success" size="small" :loading="checking||submitting" :disabled="checking || submitting || !store.selectedIds.length || !included.length || !registrationReady" data-testid="screen-operation-submit" @click="next"><template #icon><Play :size="15" /></template>{{ nextLabel }}<ChevronRight :size="14" /></n-button><n-button v-else size="small" :disabled="executing" @click="fresh">新的智能屏操作</n-button></footer>
   </section>
 
   <n-modal v-model:show="criticalOpen" preset="card" title="关键资料待提交" class="screen-dialog" style="width:min(720px,94vw)">

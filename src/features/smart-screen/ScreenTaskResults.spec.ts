@@ -104,6 +104,16 @@ function configTask(state: ScreenTask["state"], targets: ScreenTargetState[], re
 }
 
 describe("紧凑操作结果与恢复动作", () => {
+  it("NTP配置保存和生效成功不等于授时成功，未确认来源不显示实际授时源", () => {
+    const value = task("failed", ["failed"]); value.mode = "real"; value.action = "ntp"; value.input!.action = "ntp";
+    value.targets[0]!.result = { device: "failed", business: "not_required", shared: "not_required", evidence: { ntp: { before: { server: "", autoTime: false }, targetServer: "192.168.3.142", after: { server: "192.168.3.142", autoTime: true }, save: "succeeded", activation: "succeeded", sync: "unknown", syncEvidence: { server: "192.168.3.142", clockOffsetSeconds: null, sourceConfirmedBy: "unconfirmed" } } } };
+    const wrapper = render(value); try { expect(wrapper.get("thead").text()).toContain("保存生效授时"); expect(wrapper.text()).toContain("已保存"); expect(wrapper.text()).toContain("已生效"); expect(wrapper.text()).toContain("待核实"); expect(wrapper.text()).toContain("尚未取得授时证据"); expect(wrapper.text()).not.toContain("已确认授时源"); expect(wrapper.text()).not.toContain("null 秒"); expect(wrapper.text()).not.toContain("授时已确认"); } finally { wrapper.unmount(); }
+  });
+  it("同值NTP无需写入，成功授时显示有来源证据的服务器及偏差", () => {
+    const value = task(); value.mode = "real"; value.action = "ntp"; value.input!.action = "ntp";
+    value.targets[0]!.result = { device: "succeeded", business: "not_required", shared: "not_required", evidence: { ntp: { before: { server: "ntp.internal", autoTime: true }, targetServer: "ntp.internal", save: "unchanged", activation: "succeeded", sync: "succeeded", syncEvidence: { server: "ntp.internal", clockOffsetSeconds: 1, sourceConfirmedBy: "same_boot_verified_settings" } } } };
+    const wrapper = render(value); try { expect(wrapper.text()).toContain("无需写入"); expect(wrapper.text()).toContain("授时已确认"); expect(wrapper.text()).toContain("已确认授时源：ntp.internal · 偏差 1 秒"); } finally { wrapper.unmount(); }
+  });
   it.each([
     ["online", "succeeded", "在线", "success"],
     ["offline", "succeeded", "离线", "error"],

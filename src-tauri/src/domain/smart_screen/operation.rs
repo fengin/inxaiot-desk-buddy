@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const READ_ACTIONS: &[&str] = &["ping", "inspect", "mac", "diagnostics"];
-pub const WRITE_ACTIONS: &[&str] = &["install", "time", "adb", "restart", "reboot", "app_config"];
+pub const WRITE_ACTIONS: &[&str] = &["install", "time", "ntp", "adb", "restart", "reboot", "app_config"];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -102,6 +102,7 @@ pub fn action_label(action: &str) -> &str {
         "diagnostics" => "采集诊断",
         "install" => "安装/升级小新",
         "time" => "校准时间",
+        "ntp" => "设置NTP服务器",
         "adb" => "保持 ADB 端口",
         "restart" => "重启小新应用",
         "app_config" => "修改小新配置",

@@ -93,13 +93,13 @@ async fn read<P: DeviceCommandPort>(
 ) -> AppResult<String> {
     device.shell(ip, args, CancellationToken::new()).await
 }
-async fn boot_id<P: DeviceCommandPort>(device: &AdbDevice<P>, ip: &str) -> AppResult<String> {
+pub(super) async fn boot_id<P: DeviceCommandPort>(device: &AdbDevice<P>, ip: &str) -> AppResult<String> {
     let id = read(device, ip, &["cat", "/proc/sys/kernel/random/boot_id"]).await?;
     uuid::Uuid::parse_str(&id)
         .map_err(|_| AppError::Conflict("无法取得可靠的系统启动编号".into()))?;
     Ok(id)
 }
-async fn root_mode<P: DeviceCommandPort>(device: &AdbDevice<P>, ip: &str) -> AppResult<String> {
+pub(super) async fn root_mode<P: DeviceCommandPort>(device: &AdbDevice<P>, ip: &str) -> AppResult<String> {
     if read(device, ip, &["id"]).await?.contains("uid=0(") {
         return Ok("shell".into());
     }
@@ -113,7 +113,7 @@ async fn root_mode<P: DeviceCommandPort>(device: &AdbDevice<P>, ip: &str) -> App
         "当前固件未提供所需的管理权限，不能执行此操作".into(),
     ))
 }
-async fn root_command<P: DeviceCommandPort>(
+pub(super) async fn root_command<P: DeviceCommandPort>(
     device: &AdbDevice<P>,
     ip: &str,
     mode: &str,
@@ -460,7 +460,7 @@ async fn wait_application_started_with_limit<P: DeviceCommandPort>(
         )
     })?
 }
-async fn wait_boot(device: &AdbDevice, screen: &ScreenAsset, capability: &Value) -> AppResult<()> {
+pub(super) async fn wait_boot(device: &AdbDevice, screen: &ScreenAsset, capability: &Value) -> AppResult<()> {
     wait_boot_with_limit(
         device,
         screen,

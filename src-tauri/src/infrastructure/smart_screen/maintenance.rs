@@ -46,6 +46,8 @@ pub struct MaintenancePlan {
     pub request_ids: BTreeMap<String, String>,
     #[serde(default)]
     pub app_config: Option<BTreeMap<String, crate::domain::smart_screen::app_config::AppConfigPatch>>,
+    #[serde(default)]
+    pub ntp: Option<BTreeMap<String, crate::domain::smart_screen::ntp::NtpPatch>>,
 }
 fn local(state: &FormalAppState) -> ScreenRepository {
     ScreenRepository::new(state.local_store.pool().clone())
@@ -122,7 +124,31 @@ pub async fn preflight_with_config(
     input: ScreenOperationInput,
     app_config: Option<BTreeMap<String, crate::domain::smart_screen::app_config::AppConfigPatch>>,
 ) -> AppResult<ScreenPreflight> {
+    preflight_with_settings(state, project, input, app_config, None).await
+}
+pub async fn preflight_with_ntp(
+    state: &FormalAppState,
+    project: &str,
+    input: ScreenOperationInput,
+    ntp: Option<BTreeMap<String, crate::domain::smart_screen::ntp::NtpPatch>>,
+) -> AppResult<ScreenPreflight> {
+    preflight_with_settings(state, project, input, None, ntp).await
+}
+async fn preflight_with_settings(
+    state: &FormalAppState,
+    project: &str,
+    input: ScreenOperationInput,
+    app_config: Option<BTreeMap<String, crate::domain::smart_screen::app_config::AppConfigPatch>>,
+    ntp: Option<BTreeMap<String, crate::domain::smart_screen::ntp::NtpPatch>>,
+) -> AppResult<ScreenPreflight> {
     crate::application::smart_screen::operations::validate_input(&input)?;
+    if input.action == "ntp" {
+        let patches = ntp.as_ref().ok_or_else(||AppError::InvalidConfig("请先读取屏的 NTP 设置并填写服务器地址".into()))?;
+        if patches.keys().collect::<BTreeSet<_>>() != input.target_ids.iter().collect() {
+            return Err(AppError::InvalidConfig("NTP 设置内容与所选屏不一致".into()));
+        }
+        for patch in patches.values() { patch.validate()?; }
+    } else if ntp.is_some() { return Err(AppError::InvalidConfig("此操作不接受 NTP 设置内容".into())); }
     if input.action == "app_config" {
         let patches = app_config.as_ref().ok_or_else(||AppError::InvalidConfig("请先读取小新配置并选择修改内容".into()))?;
         if patches.keys().collect::<BTreeSet<_>>() != input.target_ids.iter().collect() {
@@ -268,7 +294,16 @@ pub async fn preflight_with_config(
                             _ => {}
                         }
                     }
-                    if reason.is_none() && parsed.is_none() && input.action != "app_config" {
+                    if reason.is_none() && input.action == "ntp" {
+                        let checked = async {
+                            super::ntp::read_device(&device, &screen.fields.ip).await?;
+                            super::ntp::capability(&device, &screen, &observation).await?;
+                            super::ntp::check_status(&device, &screen.fields.ip).await?;
+                            Ok::<(), AppError>(())
+                        }.await;
+                        if let Err(error) = checked { reason = Some(error.to_string()); }
+                    }
+                    if reason.is_none() && parsed.is_none() && !["app_config", "ntp"].contains(&input.action.as_str()) {
                         if let Err(error) = super::device_maintenance::capability(
                             &device,
                             &screen,
@@ -329,6 +364,7 @@ pub async fn preflight_with_config(
                 observations,
                 request_ids: BTreeMap::new(),
                 app_config,
+                ntp,
             })
             .map_err(|_| AppError::InvalidConfig("保存设备检查失败".into()))?,
         };
@@ -783,6 +819,8 @@ async fn execute_target(
         .await
     } else if plan.input.action == "app_config" {
         super::app_config::execute(state, id, plan, data, screen, held.as_ref(), &mut result, cancel).await
+    } else if plan.input.action == "ntp" {
+        super::ntp::execute(state, id, plan, data, screen, held.as_ref(), &mut result, cancel).await
     } else {
         match data.observations.get(&screen.id) {
             Some(original) => {
@@ -1336,6 +1374,8 @@ pub fn recover<'a>(
                 if matches!(result.device, ResultState::Pending | ResultState::Unknown) {
                     if plan.input.action == "app_config" {
                         super::app_config::verify(state, &task.id, &plan, &data, screen, result).await?;
+                    } else if plan.input.action == "ntp" {
+                        super::ntp::verify(state, &task.id, &plan, &data, screen, result).await?;
                     } else {
                         super::device_maintenance::verify(state, &task.id, &plan, screen, result).await?;
                     }

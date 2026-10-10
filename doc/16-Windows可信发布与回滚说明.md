@@ -1,5 +1,7 @@
 # Windows免安装发布、macOS应用包与回滚说明
 
+更新日期：2026-10-10。本文按工作台 v0.2.9 代码基线说明交付方式，已发布产物与目标系统实机验收分别记录。
+
 ## 1. 适用范围与当前状态
 
 本文定义 `inxaiot-desk-buddy` 的两类发布方式：公司受控主机通过 Jenkins 生成内部 Windows 产物；GitHub 托管 Runner 根据版本标签构建 Windows、macOS 和 Linux 便携包，并保存到对应仓库的 Actions 与 Release，供目标系统下载验收。源码同步到项目已有 GitLab 和 GitHub 仓库；本机实机凭据、私钥、设备数据和构建缓存不进入 Git，也不传给 GitHub 构建。Windows 交付免安装程序，macOS 交付可整体复制的 `.app`，NSIS 安装器不是前置要求。
@@ -12,6 +14,7 @@
 - `scripts/release-internal.ps1`要求Git工作区干净，以版本+12位提交ID创建不可覆盖产物目录，构建后校验Cargo Release依赖元数据绑定同一非dirty提交，并复查工作区、HEAD和Tree未变化；输出内嵌 ADB 的免安装 EXE、SBOM、SHA-256 及清单 v5。最终发布采用同卷原子移动。
 - `scripts/verify-internal-release.ps1`离线复验文件集合、大小/SHA-256、Git提交/Tree、目录命名、只读属性和EXE的`NotSigned`状态。v5 包含 portable、sbom 各一份，并以独立进程验证 EXE 能准备和运行内嵌 ADB；兼容历史 v2/v3/v4，v4 的外置工具按原清单复验。旧脚本名继续转发。
 - 首个正式内部产物集已由干净提交`f9adb6ec6845b8e5267a9bf7a19551b6eb8245fc`生成并通过两次离线复验。
+- GitHub 多平台流水线已产生 Windows x64、macOS x64、macOS arm64 和 Linux x64 四类正式便携包。当前交付不再携带 Java、`aapt` 或 `apksigner`；APK 基本信息由程序内 Rust 代码解析。构建、工具自检及签名检查通过，不代替 Mac 或 Linux 的设备业务实机验收。
 
 当前状态：P1-20按内部无签名发布策略关闭。历史内部证书Thumbprint `4B6FA6B7CBF774B4BB0BFACEE8EC51EE8A7FC3C1`已从CurrentUser My/Root/TrustedPublisher精确删除，已知CNG容器和私钥文件匹配数均为0；受控产物根继续保留。
 
@@ -71,6 +74,8 @@ $env:INX_RELEASE_ARTIFACT_ROOT = "D:\inxaiot-release-artifacts"
 
 在项目根目录执行`pnpm build:windows`生成`src-tauri/target/release/inxaiot-desk-buddy.exe`。内部正式交付仍使用前述`release-internal.ps1`，以获得受控且可追溯的完整产物集。
 
+不要直接用 `cargo build --release` 代替 Windows 完整构建：构建脚本会拒绝没有内嵌 ADB 资源的正式程序。已有命令行 `--verify-package <报告文件路径> [APK文件路径]` 用于独立进程验收，只验证内嵌 ADB 的准备与运行、可选 APK 解析，不连接设备或项目数据库。
+
 ### 3.2 macOS
 
 在 Mac 上安装项目已有 Node/pnpm、Rust 和 Xcode 构建依赖，准备 macOS 的 platform-tools 35 及以上，通过 `ANDROID_SDK_ROOT` 指明目录。使用工作台不需要 Java。Android SDK 的准备方式见 [Platform-Tools 官方说明](https://developer.android.com/tools/releases/platform-tools)和 [sdkmanager 官方说明](https://developer.android.com/tools/sdkmanager)。
@@ -89,11 +94,19 @@ PNG和ICNS图标已经保存在`src-tauri/icons/`，干净检出后可直接用�
 
 把整个`.app`复制到“应用程序”目录再打开，不要只复制包内的可执行文件；不需要PKG安装器。Intel与Apple Silicon需分别构建/验证，不将单架构产物宣称为通用包。macOS凭据使用系统Keychain，普通应用数据不写入`.app`。
 
-当前 Windows 主机只能完成打包编排的模拟测试与文件格式、架构、清单等纯校验，未生成或实际验证 Mac 产物。Intel 和 Apple Silicon 的真实构建、签名、工具运行及设备操作仍待 Mac 验收。Mac 正式发布还必须记录干净提交、产物完整性和原生 GUI 验收。通过下载渠道分发时 Gatekeeper 仍可能要求可信签名/公证；“复制即可用”描述包的使用方式，不代表绕过系统信任策略。参考[Tauri应用包说明](https://v2.tauri.app/distribute/macos-application-bundle/)与[Windows运行时说明](https://v2.tauri.app/distribute/windows-installer/)。
+Windows 开发机只承担 Mac 打包编排的模拟测试与文件格式、架构、清单等纯校验；两种 Mac 架构的实际构建、应用签名复验和随包 ADB 运行检查由对应 Mac Runner 完成，已有成功产物。原生 GUI、项目连接、设备维护和系统权限等业务实机验收需在 Mac 单独完成，不能用 Runner 构建成功替代。通过下载渠道分发时 Gatekeeper 仍可能要求可信签名/公证；“复制即可用”描述包的使用方式，不代表绕过系统信任策略。参考[Tauri应用包说明](https://v2.tauri.app/distribute/macos-application-bundle/)与[Windows运行时说明](https://v2.tauri.app/distribute/windows-installer/)。
 
 ### 3.3 Linux
 
 在Linux上安装项目已有Node/pnpm、Rust及Tauri要求的WebKitGTK等系统依赖后，执行`pnpm build:linux`生成当前架构的可执行文件。该入口会拒绝在非Linux系统运行，避免在Windows上误把本机产物当作Linux产物。Linux桌面运行、系统凭据、文件对话框和脚本查看仍需在目标发行版原生验收。
+
+Linux 发布流水线在编译后调用已有脚本 `scripts/package-screen-tools.mjs --platform linux --arch x64` 准备并复验 ADB。便携包保留可执行文件及同目录的 `tools` 文件夹，应整体解压和搬移；Windows 的单 EXE 交付规则不适用于 Linux。目标系统仍需具备 Tauri 运行所需系统依赖。
+
+### 3.4 已核实的发布事实
+
+v0.2.7 的四类便携包均已构建成功。该次 GitHub 自动发布作业因账户付款或额度限制未启动，核对同次构建的产物及 SHA-256 后，已通过 GitHub API 补发[正式 Release](https://github.com/fengin/inxaiot-desk-buddy/releases/tag/v0.2.7)。本机证据文件为 `.review-tools/release-0.2.7-published.json`、`release-0.2.7-final-release.json` 及 `release-0.2.7-artifacts/manifest.json`。
+
+上述为一次发布的实际处置，不改变常规标签触发构建和自动发布方式，也不表示四个目标系统的设备业务均已验收。各版本是否已构建、已发布及设备验证范围应分别核对对应记录，不能只按版本号或 Git 标签判断。
 
 ## 4. 历史签名资产清理结果
 

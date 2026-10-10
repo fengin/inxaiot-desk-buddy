@@ -8,6 +8,8 @@ import { screenActionLabel, screenStateLabel } from "@/shared/model/screen";
 import type { ScreenTask, ScreenTaskTarget } from "@/shared/model/screen";
 import { formatDisplayDateTime } from "@/shared/format/dateTime";
 import { appConfigFieldLabel } from "@/shared/model/screenAppConfig";
+import { ntpServerDisplay, ntpStageLabel } from "@/shared/model/screenNtp";
+import type { ScreenNtpEvidence } from "@/shared/model/screenNtp";
 
 const props = defineProps<{ task: ScreenTask }>();
 const emit = defineEmits<{ retry: [ids: string[]]; restart: [ids: string[]]; status: []; logsOpened: []; versions: [ids: string[]]; detail: [id: string] }>();
@@ -17,12 +19,14 @@ let logOpenRequest = 0;
 onBeforeUnmount(() => { ++logOpenRequest; });
 const page = ref(1), pageSize = ref(50), resultBody = ref<HTMLElement>();
 const isConfig = computed(() => props.task.action === "app_config");
+const isNtp = computed(() => props.task.action === "ntp");
 const isPing = computed(() => props.task.action === "ping");
 const showScreenDetail = computed(() => ["ping", "inspect", "mac"].includes(props.task.action));
 const visibleTargets = computed(() => props.task.targets.slice((page.value - 1) * pageSize.value, page.value * pageSize.value));
 const columns = computed(() => [
   { key: "name", label: "目标屏" }, { key: "ip", label: "IP 地址" }, { key: "state", label: isPing.value ? "在线状态" : "状态" },
   ...(isConfig.value ? [{ key: "save", label: "保存" }, { key: "restart", label: "重启" }, { key: "readback", label: "回读" }] : []),
+  ...(isNtp.value ? [{ key: "save", label: "保存" }, { key: "activation", label: "生效" }, { key: "sync", label: "授时" }] : []),
   { key: "message", label: unverifiedInstall.value ? "演示结果 / 处理建议" : "实际结果 / 处理建议" },
   ...(showScreenDetail.value ? [{ key: "detail", label: "查看屏详情" }] : [])
 ]);
@@ -35,6 +39,19 @@ async function diagnostics(exportFile=false){diagnosticBusy.value=true;try{const
 const retryIds = computed(() => props.task.targets.filter((t) => ["failed", "cancelled"].includes(t.state) && !(props.task.action === "install" && (t.result?.device === "succeeded" || ["installed", "verified"].includes(String(t.result?.evidence?.phase)))) && !(props.task.action==='app_config'&&['saved','verified','unchanged'].includes(String(configResult(t)?.save)))).map((t) => t.screenId));
 const resultLabels: Record<string,string> = { not_required:"无需更新",pending:"待保存",succeeded:"已完成",failed:"未完成",unknown:"待核实",skipped:"无需执行",cancelled:"已取消" };
 function configResult(target:ScreenTaskTarget){return target.result?.evidence?.config as Record<string,unknown>|undefined;}
+function ntpResult(target: ScreenTaskTarget) { return target.result?.evidence?.ntp as ScreenNtpEvidence | undefined; }
+const ntpStages = ["save", "activation", "sync"] as const;
+function ntpResultLabel(target: ScreenTaskTarget, stage: typeof ntpStages[number]) {
+  const value = ntpResult(target)?.[stage];
+  return value === "succeeded" ? stage === "save" ? "已保存" : stage === "activation" ? "已生效" : "授时已确认" : ntpStageLabel(value);
+}
+function ntpSummary(target: ScreenTaskTarget) {
+  const value = ntpResult(target);
+  if (!value) return "";
+  const confirmed = value.sync === "succeeded" && value.syncEvidence?.sourceConfirmedBy && value.syncEvidence.sourceConfirmedBy !== "unconfirmed";
+  const source = value.syncEvidence?.sourceType === "firmware_default" ? "固件默认" : value.syncEvidence?.server || "未记录";
+  return [`服务器：${ntpServerDisplay(value.before?.server)} → ${ntpServerDisplay(value.targetServer)}`, value.after ? `自动校时：${value.after.autoTime ? "开启" : "关闭"}` : "", confirmed ? `已确认授时源：${source}${value.syncEvidence!.clockOffsetSeconds == null ? '' : ` · 偏差 ${value.syncEvidence!.clockOffsetSeconds} 秒`}` : "尚未取得授时证据"].filter(Boolean).join(" · ");
+}
 const configRestartIds=computed(()=>props.task.action==='app_config'?props.task.targets.filter(target=>{
   const result=configResult(target);return target.state!=='needs_review'&&result&&['saved','verified'].includes(String(result.save))&&result.restartRequired===true&&result.restart!=='succeeded';
 }).map(target=>target.screenId):[]);
@@ -122,7 +139,7 @@ async function openGlobalLogs() {
 </script>
 
 <template>
-  <section class="screen-task-results" :class="{ 'screen-task-results-config': isConfig }">
+  <section class="screen-task-results" :class="{ 'screen-task-results-config': isConfig || isNtp }">
     <div v-if="task.input?.retryOfOperationId" class="screen-muted">重试来源：{{task.input.retryOfOperationId}}</div>
     <div class="screen-result-header"><div class="screen-result-title"><h3>{{ screenActionLabel(task.action) }}</h3><span class="screen-muted">{{ formatDisplayDateTime(task.createdAt) }} · {{ task.targets.length }} 台<template v-if="task.mode !== 'real'"> · 原型模拟</template></span></div><n-tag :bordered="false" :type="task.state === 'succeeded' ? 'success' : running ? 'info' : 'warning'">{{ displayState(task.state) }}</n-tag></div>
     <div v-if="unverifiedInstall" class="screen-callout" data-testid="screen-install-preview-notice"><strong v-if="task.state === 'succeeded'">安装流程演示完成。</strong>APK 元数据未解析；未执行真实安装，未更新版本记录。</div>
@@ -144,7 +161,8 @@ async function openGlobalLogs() {
         <td :title="target.name">{{ target.name }}</td><td :title="target.ip">{{ target.ip }}</td>
         <td><n-tag size="small" :bordered="false" :type="targetStateType(target)">{{ targetStateLabel(target) }}</n-tag></td>
         <template v-if="isConfig"><td v-for="stage in configStages" :key="stage" :class="configStageClass(target, stage)" :title="configStageLabel(target, stage)">{{ configStageLabel(target, stage) }}</td></template>
-        <td><div class="screen-result-message" :title="targetMessage(target)">{{ targetMessage(target) }}</div><div v-if="isConfig && failedFields(target)" class="screen-result-message screen-warning" :title="`未保存字段：${failedFields(target)}`">未保存字段：{{ failedFields(target) }}</div><div v-if="target.result" class="screen-secondary" :title="resultSummary(target)">{{ resultSummary(target) }}</div></td>
+        <template v-if="isNtp"><td v-for="stage in ntpStages" :key="stage" :class="ntpResult(target)?.[stage] === 'failed' ? 'screen-danger' : ntpResult(target)?.[stage] === 'unknown' ? 'screen-warning' : ''" :title="ntpResultLabel(target, stage)">{{ ntpResultLabel(target, stage) }}</td></template>
+        <td><div class="screen-result-message" :title="targetMessage(target)">{{ targetMessage(target) }}</div><div v-if="isNtp" class="screen-secondary" :title="ntpSummary(target)">{{ ntpSummary(target) }}</div><div v-if="isConfig && failedFields(target)" class="screen-result-message screen-warning" :title="`未保存字段：${failedFields(target)}`">未保存字段：{{ failedFields(target) }}</div><div v-if="target.result" class="screen-secondary" :title="resultSummary(target)">{{ resultSummary(target) }}</div></td>
         <td v-if="showScreenDetail"><n-button size="tiny" text type="primary" title="查看本机保存的最新屏详情" @click="emit('detail', target.screenId)">查看屏详情</n-button></td>
       </tr><tr v-if="!task.targets.length"><td :colspan="columns.length" class="screen-muted">暂无设备结果</td></tr></tbody></table></div>
     </div>
@@ -165,6 +183,7 @@ async function openGlobalLogs() {
 .screen-result-table{width:100%;table-layout:fixed}.screen-result-table .result-col-name{width:20%}.screen-result-table .result-col-ip{width:118px}.screen-result-table .result-col-state{width:100px}
 .screen-task-results-config .result-col-name{width:15%}.screen-task-results-config .result-col-ip{width:110px}
 .result-col-save{width:74px}.result-col-restart{width:84px}.result-col-readback{width:104px}
+.result-col-activation{width:74px}.result-col-sync{width:100px}
 .result-col-detail{width:96px}
 .screen-result-table th{padding:6px 8px;font-size:10px;line-height:19px}
 .screen-result-table td{height:var(--inx-table-row-height);padding:4px 8px;line-height:20px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;vertical-align:middle}

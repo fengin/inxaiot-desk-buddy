@@ -7,6 +7,13 @@ vi.mock('@/shared/api/operationHistory', () => ({listBusinessOperationHistory:vi
 afterEach(()=>vi.clearAllMocks());
 const operation={id:'op-a',domainType:'smart_screen',operationType:'reboot',operationName:'重启屏',operatorName:'原操作人',instanceId:'电脑A',state:'running',targetCount:1,successCount:0,failureCount:0,cancelledCount:0,startedAt:'2026-10-03T00:00:00Z'};
 const locks=[{resourceType:'smart_screen',resourceKey:'777:900',ownerInstanceId:'电脑A',ownerUser:'原操作人',fencingToken:4}];
+it('NTP共享历史显示地址变更与保存、生效、授时的独立结果',async()=>{
+  const item={...operation,operationType:'ntp',operationName:'设置NTP服务器',state:'failed'};
+  vi.mocked(api.listBusinessOperationHistory).mockResolvedValue({items:[item],total:1,page:1,pageSize:20});
+  vi.mocked(api.getBusinessOperationHistoryDetail).mockResolvedValue({operation:item,targets:[{resourceType:'smart_screen',resourceKey:'777:900',state:'failed',resultSummary:'已保存，尚未确认授时',details:{targetName:'办公室屏',ntp:{beforeServer:'',targetServer:'192.168.3.142',afterServer:'192.168.3.142',save:'succeeded',activation:'succeeded',sync:'unknown',clockOffsetSeconds:null}}}]});
+  const wrapper=mount(ScreenSharedHistory,{props:{projectId:'项目A'},global:{stubs:{teleport:true}}});
+  try{await flushPromises();await wrapper.findAll('button').find(button=>button.text().includes('设置NTP服务器'))!.trigger('click');await flushPromises();expect(wrapper.text()).toContain('未设置（固件默认） → 192.168.3.142');expect(wrapper.text()).toContain('保存：已确认 · 生效：已确认 · 授时：待核实');expect(wrapper.text()).not.toContain('应用版本');expect(wrapper.text()).not.toContain('null 秒');}finally{wrapper.unmount();}
+});
 it('配置共享结果显示修改字段、允许共享的前后值及三个处理阶段',async()=>{
   const item={...operation,operationType:'app_config',operationName:'小新配置',state:'succeeded'};
   vi.mocked(api.listBusinessOperationHistory).mockResolvedValue({items:[item],total:1,page:1,pageSize:20});

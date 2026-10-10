@@ -11,6 +11,7 @@ import { screenMaintenanceFingerprint } from "@/shared/model/screenMaintenance";
 import { screenPlatformFields } from "@/shared/model/screenRegistration";
 import { confirmScreenTakeover, screenTakeoverConflicts } from "./screenTakeover";
 import type { ScreenAppConfigPatch, ScreenAppConfigRead, ScreenAppConfigDraft } from "@/shared/model/screenAppConfig";
+import type { ScreenNtpPatch, ScreenNtpRead } from "@/shared/model/screenNtp";
 
 interface BackendSnapshot extends Omit<ScreenSnapshot, "screens" | "tasks"> {
   screens: (Pick<SmartScreen, "id" | "source" | "name" | "ip" | "mac" | "size" | "spaceId" | "location" | "revision" | "appVersion" | "platformStatus" | "aliases">)[];
@@ -73,6 +74,17 @@ export class RealScreenAdapter implements ScreenAdapter {
   private previewRequests = new Map<string, number>();
   private preflights = new Map<string, string>();
   private configPatches = new Map<string, Record<string, ScreenAppConfigPatch>>();
+  private ntpPatches = new Map<string, Record<string, ScreenNtpPatch>>();
+  readNtp(projectId: string, screenIds: string[]) {
+    return call<ScreenNtpRead[]>("screen_ntp_read", { localProjectId: projectId, screenIds });
+  }
+  async preflightNtp(projectId: string, input: Parameters<ScreenAdapter["execute"]>[1], patches: Record<string, ScreenNtpPatch>) {
+    const generation = (this.previewRequests.get(projectId) ?? 0) + 1; this.previewRequests.set(projectId, generation);
+    const snapshot = structuredClone(patches);
+    const preview = await call<{ id: string; items: ScreenPreflightItem[] }>("screen_ntp_preflight", { localProjectId: projectId, input, patches: snapshot });
+    if (this.previewRequests.get(projectId) === generation) { this.preflights.set(projectId, preview.id); this.ntpPatches.set(projectId, snapshot); }
+    return preview.items;
+  }
   loadAppConfigDraft(projectId: string) { return call<ScreenAppConfigDraft|null>('screen_app_config_draft_load',{localProjectId:projectId}); }
   saveAppConfigDraft(projectId: string,draft: ScreenAppConfigDraft|null) { return call<void>('screen_app_config_draft_save',{localProjectId:projectId,draft}); }
   readAppConfig(projectId: string, screenIds: string[]) {
@@ -203,6 +215,8 @@ export class RealScreenAdapter implements ScreenAdapter {
     let current={...input};
     const configPatches=input.action==='app_config'?structuredClone(this.configPatches.get(projectId)):undefined;
     if(input.action==='app_config'&&!configPatches)return Promise.reject(new Error('请先检查配置修改内容'));
+    const ntpPatches=input.action==='ntp'?structuredClone(this.ntpPatches.get(projectId)):undefined;
+    if(input.action==='ntp'&&!ntpPatches)return Promise.reject(new Error('请先检查NTP设置'));
     const baseline=this.snapshots.get(projectId);
     return this.withTakeover(projectId,()=>call<string>("screen_execute",{localProjectId:projectId,preflightId,input:current}),async(latest,assertCurrent)=>{
       const fingerprints:Record<string,string>={};
@@ -213,7 +227,8 @@ export class RealScreenAdapter implements ScreenAdapter {
         fingerprints[id]=screenMaintenanceFingerprint(after);
       }
       current={...input,expectedTargets:fingerprints};
-      const fresh=await call<{id:string;items:ScreenPreflightItem[]}>(input.action==='app_config'?'screen_app_config_preflight':'screen_preflight',{localProjectId:projectId,input:current,...(configPatches?{patches:Object.fromEntries(input.targetIds.map(id=>[id,configPatches[id]]))}:{})});assertCurrent();
+      const patches = configPatches ?? ntpPatches;
+      const fresh=await call<{id:string;items:ScreenPreflightItem[]}>(input.action==='app_config'?'screen_app_config_preflight':input.action==='ntp'?'screen_ntp_preflight':'screen_preflight',{localProjectId:projectId,input:current,...(patches?{patches:Object.fromEntries(input.targetIds.map(id=>[id,patches[id]]))}:{})});assertCurrent();
       if(input.targetIds.some(id=>!fresh.items.some(item=>item.screenId===id&&item.state==='ready')))throw new Error(`重新检查后部分目标不能执行或无需执行，请核对后继续。${fresh.items.filter(item=>item.state!=='ready').map(item=>`${item.name}：${item.reason}`).join('；')}`);
       preflightId=fresh.id;this.preflights.set(projectId,fresh.id);
     });

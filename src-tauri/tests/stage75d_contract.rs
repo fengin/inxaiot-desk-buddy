@@ -89,10 +89,9 @@ fn distribution_has_explicit_windows_macos_and_linux_entries() {
         .parent()
         .unwrap();
     let release = std::fs::read_to_string(root.join("scripts/release-internal.ps1")).unwrap();
-    assert!(release.contains("tauri build --no-bundle"));
-    assert!(release.contains("schemaVersion = 4"));
-    assert!(release.contains("portable-directory"));
-    assert!(release.contains("package-screen-tools.mjs"));
+    assert!(release.contains("pnpm build:windows"));
+    assert!(release.contains("schemaVersion = 5"));
+    assert!(release.contains("package = \"portable-exe\""));
     assert!(!release.contains("--bundles nsis"));
     assert!(!release.contains("-setup.exe"));
     let windows: serde_json::Value =
@@ -107,6 +106,27 @@ fn distribution_has_explicit_windows_macos_and_linux_entries() {
     );
     let package: serde_json::Value =
         serde_json::from_str(include_str!("../../package.json")).unwrap();
+    assert_eq!(
+        package["scripts"]["build:windows"],
+        "node scripts/build-windows.mjs"
+    );
+    let windows_builder = std::fs::read_to_string(root.join("scripts/build-windows.mjs")).unwrap();
+    let prepare_adb = windows_builder
+        .find("scripts/package-screen-tools.mjs")
+        .unwrap();
+    let build_app = windows_builder
+        .find("node_modules/@tauri-apps/cli/tauri.js")
+        .unwrap();
+    let verify_package = windows_builder.find("--verify-package").unwrap();
+    assert!(prepare_adb < build_app && build_app < verify_package);
+    assert!(windows_builder.contains("--embedded-output"));
+    assert!(windows_builder.contains("INX_EMBEDDED_ADB:archive"));
+    assert!(
+        windows_builder
+            .contains("'build','--no-bundle','--config','src-tauri/tauri.release.conf.json'")
+    );
+    assert!(windows_builder.contains("readFileSync(executable).includes(readFileSync(archive))"));
+    assert!(windows_builder.contains("!checked.successful || !checked.embedded"));
     assert_eq!(
         package["scripts"]["build:linux"],
         "node scripts/build-linux.mjs"
@@ -127,6 +147,8 @@ fn distribution_has_explicit_windows_macos_and_linux_entries() {
     assert!(workflow.contains("runner: macos-15"));
     assert!(workflow.contains("runs-on: ubuntu-22.04"));
     assert!(workflow.contains("runs-on: windows-latest"));
+    assert!(workflow.contains("run: pnpm build:windows"));
+    assert!(workflow.contains("scripts/build-windows.test.mjs"));
     assert!(workflow.contains("APPLE_SIGNING_IDENTITY: \"-\""));
     assert!(workflow.contains("pnpm install --frozen-lockfile"));
     assert!(workflow.contains("softprops/action-gh-release@v3"));

@@ -15,6 +15,15 @@ use crate::interface::error::CommandErrorDto;
 use tauri::State;
 
 #[tauri::command]
+pub async fn screen_ntp_read(state: State<'_, FormalAppState>, local_project_id: String, screen_ids: Vec<String>) -> Result<Vec<crate::domain::smart_screen::ntp::NtpRead>,CommandErrorDto> {
+    crate::infrastructure::smart_screen::ntp::read(&state,&local_project_id,&screen_ids).await.map_err(Into::into)
+}
+#[tauri::command]
+pub async fn screen_ntp_preflight(state: State<'_, FormalAppState>, local_project_id: String, input: ScreenOperationInput, patches: std::collections::BTreeMap<String,crate::domain::smart_screen::ntp::NtpPatch>) -> Result<ScreenPreflight,CommandErrorDto> {
+    crate::infrastructure::smart_screen::ntp::preflight(&state,&local_project_id,input,patches).await.map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn screen_app_config_draft_load(state: State<'_, FormalAppState>, local_project_id: String) -> Result<Option<serde_json::Value>,CommandErrorDto> {
     crate::infrastructure::smart_screen::app_config::load_draft(&state,&local_project_id).await.map_err(Into::into)
 }

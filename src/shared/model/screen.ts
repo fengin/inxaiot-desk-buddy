@@ -5,7 +5,7 @@ import type { ScreenVersionSyncRecord } from "./screenMaintenance";
 
 export type ScreenSize = "4" | "10" | "unknown";
 export type ScreenOnline = "online" | "offline" | "unknown";
-export type ScreenAction = "install" | "ping" | "inspect" | "mac" | "time" | "reboot" | "restart" | "adb" | "diagnostics" | "register" | "app_config";
+export type ScreenAction = "install" | "ping" | "inspect" | "mac" | "time" | "ntp" | "reboot" | "restart" | "adb" | "diagnostics" | "register" | "app_config";
 export type ScreenTargetState = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "needs_review";
 
 export interface SmartScreen {
@@ -267,10 +267,11 @@ export const screenActions: { value: ScreenAction; label: string; description: s
   { value: "install", label: "安装/升级小新", description: "安装/升级端屏的智能小新应用" },
   { value: "register", label: "注册/更新到平台", description: "登记新屏或更新平台资料" },
   { value: "app_config", label: "修改小新配置", description: "读取和修改小新配置，按需重启并回读" },
+  { value: "time", label: "校准时间", description: "以当前电脑时间校准并回读偏差" },
+  { value: "ntp", label: "设置NTP服务器", description: "读取和修改网络授时地址，启用自动校时并验证生效" },
   { value: "ping", label: "检查屏在离线", description: "检查屏IP连通性" },
   { value: "inspect", label: "检查设备", description: "读取管理连接、系统、应用" },
   { value: "mac", label: "获取/核对 MAC", description: "采集网卡地址，核对设备身份" },
-  { value: "time", label: "校准时间", description: "以当前电脑时间校准并回读偏差" },
   { value: "adb", label: "保持ADB端口", description: "10 寸屏重启仍保持 5555端口" },
   { value: "restart", label: "重启小新应用", description: "保留应用数据，只恢复小新应用" },
   { value: "reboot", label: "重启屏", description: "重启智能屏系统" },

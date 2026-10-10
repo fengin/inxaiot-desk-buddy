@@ -272,6 +272,8 @@ pub fn run() {
             interface::commands::smart_screen::screen_app_config_draft_load,
             interface::commands::smart_screen::screen_app_config_draft_save,
             interface::commands::smart_screen::screen_app_config_preflight,
+            interface::commands::smart_screen::screen_ntp_read,
+            interface::commands::smart_screen::screen_ntp_preflight,
             interface::commands::smart_screen::screen_export_diagnostics,
             interface::commands::smart_screen::screen_select_project,
             interface::commands::smart_screen::screen_save_local,

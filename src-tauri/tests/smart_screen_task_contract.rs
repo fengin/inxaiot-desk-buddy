@@ -446,6 +446,7 @@ async fn cancelled_maintenance_batch_never_calls_devices_and_releases_local_guar
         detail: serde_json::to_value(maintenance::MaintenancePlan {
             apk: None,
             app_config: None,
+            ntp: None,
             observations: Default::default(),
             request_ids: Default::default(),
         })
@@ -503,5 +504,43 @@ async fn cancelled_maintenance_batch_never_calls_devices_and_releases_local_guar
             .all(|r| r.device
                 == inxaiot_desk_buddy_lib::domain::smart_screen::model::ResultState::Cancelled)
     );
+    support::close(state).await;
+}
+
+#[tokio::test]
+async fn ntp_terminal_unconfirmed_sync_is_not_reverified_during_result_finalization() {
+    use inxaiot_desk_buddy_lib::{
+        domain::{common::task::TaskState,smart_screen::{model::{ResultState,ScreenTargetResult},ntp::NtpPatch,operation::{ScreenPlan,ScreenResults}}},
+        infrastructure::smart_screen::{maintenance,previews},
+    };
+    use serde_json::json;
+    let temp=tempfile::tempdir().unwrap();
+    let state=support::state_at(temp.path(),false).await;
+    let project=Stage75Adapter::new(&state).create_project(support::local_input()).await.unwrap().project.id;
+    let repo=ScreenRepository::new(state.local_store.pool().clone());
+    let id=repo.save_local(&project,&fields("192.0.2.4"),None,None).await.unwrap();
+    let screen=repo.asset(&project,&id).await.unwrap();
+    let mut request=input(vec![id.clone()]); request.action="ntp".into();
+    let plan=ScreenPlan {
+        project_id:project.clone(),input:request.clone(),targets:vec![screen],business_project_id:None,data_source_id:None,
+        operator:"测试".into(),instance_id:"测试电脑".into(),created_at:inxaiot_desk_buddy_lib::infrastructure::local_sqlite::screen_repository::now(),
+        detail:serde_json::to_value(maintenance::MaintenancePlan { apk:None,app_config:None,ntp:Some([(id.clone(),NtpPatch{server:"192.0.2.142".into()})].into()),observations:Default::default(),request_ids:Default::default() }).unwrap(),
+    };
+    let preview=uuid::Uuid::now_v7().to_string();
+    previews::save(&state,&preview,&plan,maintenance::PREVIEW).await.unwrap();
+    let task=maintenance::submit(&state,&project,&preview,request).await.unwrap();
+    let evidence=json!({"phase":"ntp_rebooted","ntp":{"targetServer":"192.0.2.142","save":"succeeded","activation":"succeeded","sync":"unknown"}});
+    let original=ScreenTargetResult{format_version:1,screen_id:id.clone(),device:ResultState::Failed,business:ResultState::NotRequired,shared:ResultState::NotRequired,evidence:evidence.clone(),message:"NTP 配置已生效，自动授时未确认".into(),..Default::default()};
+    task_data::save_results(state.local_store.pool(),&project,&task,&ScreenResults{targets:[(id.clone(),original.clone())].into(),finished:true}).await.unwrap();
+    state.task_repository.transition(&task,TaskState::Queued,TaskState::Running,None,None).await.unwrap();
+    state.task_repository.transition(&task,TaskState::Running,TaskState::FinalizingFailed,None,None).await.unwrap();
+    let record=state.task_repository.get(&task).await.unwrap();
+    // 缺少原设备观测，任何错误的重新核实都会在访问设备之前失败。
+    maintenance::recover(&state,&record,false).await.unwrap();
+    let result=task_data::read_results(state.local_store.pool(),&project,&task).await.unwrap();
+    assert_eq!(result.targets[&id].device,ResultState::Failed);
+    assert_eq!(result.targets[&id].evidence,evidence);
+    assert_eq!(result.targets[&id].message,original.message);
+    assert_eq!(state.task_repository.get(&task).await.unwrap().state,TaskState::Failed);
     support::close(state).await;
 }

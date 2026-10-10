@@ -6,20 +6,23 @@ import { listBusinessOperationHistory,getBusinessOperationHistoryDetail } from "
 import { commandErrorText } from "@/shared/api/errors";
 import { formatDisplayDateTime } from "@/shared/format/dateTime";
 import { appConfigFieldLabel,appConfigDisplay } from "@/shared/model/screenAppConfig";
+import { ntpServerDisplay, ntpStageLabel } from "@/shared/model/screenNtp";
 import type { OperationHistoryPage,OperationHistoryDetail,OperationHistoryTarget } from "@/shared/model/deploymentWorkflow";
 import CompactOperationTable from "@/shared/components/CompactOperationTable.vue";
 const props=defineProps<{projectId:string}>();
 const page=ref(1),loading=ref(false),error=ref(""),detail=ref<OperationHistoryDetail>();
 const data=ref<OperationHistoryPage>({items:[],total:0,page:1,pageSize:20});
 const targetPage=ref(1),targetPageSize=ref(50);
-const targetColumns=computed(()=>[{key:'name',title:'目标屏',width:'18%'},{key:'ip',title:'IP 地址',width:'104px'},{key:'state',title:'结果',width:'84px'},{key:'change',title:detail.value?.operation.operationType==='app_config'?'修改内容':'应用版本',width:'23%'},{key:'message',title:'说明'}]);
+const targetColumns=computed(()=>[{key:'name',title:'目标屏',width:'18%'},{key:'ip',title:'IP 地址',width:'104px'},{key:'state',title:'结果',width:'84px'},{key:'change',title:detail.value?.operation.operationType==='app_config'?'修改内容':detail.value?.operation.operationType==='ntp'?'NTP 授时':'应用版本',width:'23%'},{key:'message',title:'说明'}]);
 const visibleTargets=computed(()=>detail.value?.targets.slice((targetPage.value-1)*targetPageSize.value,targetPage.value*targetPageSize.value)??[]);
 const lockColumns=[{key:'resource',title:'占用范围',width:'32%'},{key:'user',title:'操作人',width:'24%'},{key:'computer',title:'来源电脑'}];
 watch(()=>detail.value?.operation.id,()=>{targetPage.value=1;});
 watch(targetPageSize,()=>{targetPage.value=1;});
 function changeSummary(target:OperationHistoryTarget){return target.details?.configuration?.changes?.map(change=>`${appConfigFieldLabel(change.field)}：${appConfigDisplay(change.before,change.field==='environments.current')} → ${appConfigDisplay(change.after,change.field==='environments.current')}`).join('；')||'';}
 function configSummary(target:OperationHistoryTarget){const config=target.details?.configuration;return config?`保存：${configLabels[config.save??'pending']} · 重启：${configLabels[config.restart??'pending']} · 回读：${configLabels[config.readback??'pending']}`:'';}
-function targetSummary(target:OperationHistoryTarget){return [target.resultSummary||target.errorSummary||'—',target.details?`设备：${labels[target.details.device??'not_required']} · 平台数据：${labels[target.details.business??'not_required']}`:'',configSummary(target),target.details?.observedAt?`实测时间：${formatDisplayDateTime(target.details.observedAt)}`:''].filter(Boolean).join('\n');}
+function ntpSummary(target:OperationHistoryTarget){const ntp=target.details?.ntp;return ntp?`保存：${ntpStageLabel(ntp.save)} · 生效：${ntpStageLabel(ntp.activation)} · 授时：${ntpStageLabel(ntp.sync)}`:'';}
+function ntpAddressSummary(target:OperationHistoryTarget){const ntp=target.details?.ntp;return ntp?`${ntp.beforeServer == null ? '未读取' : ntpServerDisplay(ntp.beforeServer)} → ${ntp.targetServer == null ? '未记录' : ntpServerDisplay(ntp.targetServer)}`:'未记录';}
+function targetSummary(target:OperationHistoryTarget){return [target.resultSummary||target.errorSummary||'—',target.details?`设备：${labels[target.details.device??'not_required']} · 平台数据：${labels[target.details.business??'not_required']}`:'',configSummary(target),ntpSummary(target),target.details?.observedAt?`实测时间：${formatDisplayDateTime(target.details.observedAt)}`:''].filter(Boolean).join('\n');}
 const releaseBusy=ref(false),notice=ref("");
 const releasePreview=ref<{project:string;operation:string;locks:ScreenOperationLock[]}>();
 async function prepareRelease(){
@@ -69,7 +72,18 @@ onBeforeUnmount(()=>{++request;++detailRequest;});
           <p v-if="detail.targets[0]?.details?.retryOfOperationId" class="screen-muted shared-long-text" :title="detail.targets[0].details.retryOfOperationId">重试来源：{{detail.targets[0].details.retryOfOperationId}}</p>
           <p v-if="detail.targets[0]?.details?.package?.name" class="screen-muted shared-long-text" :title="`SHA-256：${detail.targets[0].details.package.sha256||'未记录'}`">安装包：{{detail.targets[0].details.package.name}} · {{detail.targets[0].details.package.version}}-{{detail.targets[0].details.package.versionCode}}</p>
           <p class="screen-muted shared-detail-meta"><span>操作人：{{detail.operation.operatorName}}</span><span :title="detail.operation.instanceId">来源电脑：{{detail.operation.instanceId}}</span><span>开始时间：{{formatDisplayDateTime(detail.operation.startedAt)}}</span></p>
-          <compact-operation-table :columns="targetColumns" label="项目共享操作结果" :reset-key="`${detail.operation.id}:${targetPage}:${targetPageSize}`"><tr v-for="target in visibleTargets" :key="target.resourceKey"><td :title="target.details?.targetName||target.resourceKey">{{target.details?.targetName||target.resourceKey}}</td><td :title="target.details?.targetIp||target.details?.observedIp">{{target.details?.targetIp||target.details?.observedIp||'—'}}</td><td><n-tag size="small" :bordered="false">{{labels[target.state]??target.state}}</n-tag></td><td v-if="detail.operation.operationType==='app_config'" :title="`${target.details?.configuration?.fields?.map(appConfigFieldLabel).join('、')||'未记录'}\n${changeSummary(target)}`">{{target.details?.configuration?.fields?.map(appConfigFieldLabel).join('、')||'未记录'}}<small>{{changeSummary(target)}}</small></td><td v-else :title="`${target.beforeVersion||'未记录'} → ${target.afterVersion||'未更新'}`">{{target.beforeVersion||'未记录'}} → {{target.afterVersion||'未更新'}}</td><td :title="targetSummary(target)">{{target.resultSummary||target.errorSummary||'—'}}<small v-if="target.details?.configuration">{{configSummary(target)}}</small><small v-else-if="target.details">设备：{{labels[target.details.device??'not_required']}} · 平台数据：{{labels[target.details.business??'not_required']}}</small></td></tr><tr v-if="!detail.targets.length"><td :colspan="targetColumns.length" class="screen-muted">暂无逐台结果</td></tr></compact-operation-table>
+          <compact-operation-table :columns="targetColumns" label="项目共享操作结果" :reset-key="`${detail.operation.id}:${targetPage}:${targetPageSize}`">
+            <tr v-for="target in visibleTargets" :key="target.resourceKey">
+              <td :title="target.details?.targetName||target.resourceKey">{{target.details?.targetName||target.resourceKey}}</td>
+              <td :title="target.details?.targetIp||target.details?.observedIp">{{target.details?.targetIp||target.details?.observedIp||'—'}}</td>
+              <td><n-tag size="small" :bordered="false">{{labels[target.state]??target.state}}</n-tag></td>
+              <td v-if="detail.operation.operationType==='app_config'" :title="`${target.details?.configuration?.fields?.map(appConfigFieldLabel).join('、')||'未记录'}\n${changeSummary(target)}`">{{target.details?.configuration?.fields?.map(appConfigFieldLabel).join('、')||'未记录'}}<small>{{changeSummary(target)}}</small></td>
+              <td v-else-if="detail.operation.operationType==='ntp'" :title="`${ntpAddressSummary(target)}\n${ntpSummary(target)}`">{{ntpAddressSummary(target)}}<small>{{target.details?.ntp?.clockOffsetSeconds == null ? '未取得时间偏差' : `时间偏差 ${target.details.ntp.clockOffsetSeconds} 秒`}}</small></td>
+              <td v-else :title="`${target.beforeVersion||'未记录'} → ${target.afterVersion||'未更新'}`">{{target.beforeVersion||'未记录'}} → {{target.afterVersion||'未更新'}}</td>
+              <td :title="targetSummary(target)">{{target.resultSummary||target.errorSummary||'—'}}<small v-if="target.details?.ntp">{{ntpSummary(target)}}</small><small v-else-if="target.details?.configuration">{{configSummary(target)}}</small><small v-else-if="target.details">设备：{{labels[target.details.device??'not_required']}} · 平台数据：{{labels[target.details.business??'not_required']}}</small></td>
+            </tr>
+            <tr v-if="!detail.targets.length"><td :colspan="targetColumns.length" class="screen-muted">暂无逐台结果</td></tr>
+          </compact-operation-table>
           <div class="shared-target-pages"><span>共 {{detail.targets.length}} 台</span><n-pagination v-model:page="targetPage" v-model:page-size="targetPageSize" :page-sizes="[20,50,100]" :item-count="detail.targets.length" :page-slot="5" show-size-picker size="small" /></div>
         </template>
         <div v-else class="screen-empty">选择一条记录查看结果。共享记录不会直接重做设备操作。</div>

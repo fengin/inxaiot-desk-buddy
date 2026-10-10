@@ -126,6 +126,9 @@ impl ScreenSharedResults {
             summary["configuration"]["changes"] = serde_json::json!(crate::domain::smart_screen::app_config::shared_changes(config));
         }
         if let Some(package) = result.evidence.get("package") { summary["package"] = package.clone(); }
+        if let Some(ntp) = result.evidence.get("ntp") {
+            summary["ntp"] = serde_json::json!({"beforeServer":ntp["before"]["server"],"targetServer":ntp["targetServer"],"afterServer":ntp["after"]["server"],"autoTime":ntp["after"]["autoTime"],"save":ntp["save"],"activation":ntp["activation"],"sync":ntp["sync"],"rebootRequired":ntp["rebootRequired"],"clockOffsetSeconds":ntp["syncEvidence"]["clockOffsetSeconds"]});
+        }
         summary["targetName"] = result
             .evidence
             .get("targetName")

@@ -8,9 +8,11 @@ import { buildScreenRegistrationItems, screenPlatformFields, screenRegistrationF
 import type { ScreenPlatformFields, ScreenRegistrationExecutionRecord, ScreenRegistrationPreview, ScreenRegistrationSubmission } from "@/shared/model/screenRegistration";
 import { isScreenReadOnlyAction, screenCriticalDraftWarning, screenMaintenanceFingerprint } from "@/shared/model/screenMaintenance";
 import type { ScreenVersionPreview, ScreenVersionSyncRecord } from "@/shared/model/screenMaintenance";
+import { validateNtpServer } from "@/shared/model/screenNtp";
+import type { ScreenNtpConfig, ScreenNtpEvidence, ScreenNtpPatch, ScreenNtpRead } from "@/shared/model/screenNtp";
 
 /** 故障注入仅供测试使用，不是项目属性，不持久化也不暴露于页面适配端口。 */
-type ScreenScenario = "normal" | "platform_offline" | "partial_failure" | "needs_review" | "write_denied" | "status_changed";
+type ScreenScenario = "normal" | "platform_offline" | "partial_failure" | "needs_review" | "ntp_sync_unconfirmed" | "write_denied" | "status_changed";
 
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const now = () => new Date().toISOString();
@@ -27,6 +29,8 @@ export class FixtureScreenAdapter implements ScreenAdapter {
   private deviceVersions = new Map<string, Record<string, string | null>>();
   private versionPreviews = new Map<string, { preview: ScreenVersionPreview; fingerprints: Record<string, string> }>();
   private registrationPreviews = new Map<string, { preview: ScreenRegistrationPreview; fingerprints: Record<string, string>; directory: string }>();
+  private ntpConfigs = new Map<string, Record<string, ScreenNtpConfig>>();
+  private ntpPatches = new Map<string, Record<string, ScreenNtpPatch>>();
   constructor(private readonly storage: Storage = localStorage, private readonly tickMs = 650) {}
 
   private state(projectId: string) {
@@ -37,8 +41,9 @@ export class FixtureScreenAdapter implements ScreenAdapter {
     try {
       const raw = this.storage.getItem(SCREEN_STORAGE_PREFIX + projectId);
       if (raw) {
-        const saved = JSON.parse(raw) as ScreenSnapshot & { schemaVersion?: number; fixtureDeviceVersions?: Record<string, string | null> };
+        const saved = JSON.parse(raw) as ScreenSnapshot & { schemaVersion?: number; fixtureDeviceVersions?: Record<string, string | null>; fixtureNtpConfigs?: Record<string, ScreenNtpConfig> };
         if (saved.fixtureDeviceVersions) this.deviceVersions.set(projectId, saved.fixtureDeviceVersions);
+        if (saved.fixtureNtpConfigs) this.ntpConfigs.set(projectId, saved.fixtureNtpConfigs);
         if (Array.isArray(saved.screens) && Array.isArray(saved.tasks) && Array.isArray(saved.ignoredPairs)) {
           snapshot = { screens: saved.screens, tasks: saved.tasks, ignoredPairs: saved.ignoredPairs, mergeHistory: saved.mergeHistory ?? [], platformDrafts: saved.platformDrafts ?? {}, platformReadAt: saved.platformReadAt, spacesAvailable: saved.spacesAvailable ?? true,
             spaces: Array.isArray(saved.spaces) ? saved.spaces : screenSpaces.map((space) => ({ ...space })), platformAvailable: true };
@@ -83,7 +88,7 @@ export class FixtureScreenAdapter implements ScreenAdapter {
   }
 
   private persist(projectId: string, snapshot: ScreenSnapshot) {
-    this.storage.setItem(SCREEN_STORAGE_PREFIX + projectId, JSON.stringify({ schemaVersion: 3, screens: snapshot.screens, spaces: snapshot.spaces, spacesAvailable: snapshot.spacesAvailable ?? true, tasks: snapshot.tasks, ignoredPairs: snapshot.ignoredPairs, mergeHistory: snapshot.mergeHistory ?? [], platformDrafts: snapshot.platformDrafts ?? {}, platformReadAt: snapshot.platformReadAt, fixtureDeviceVersions: this.deviceVersions.get(projectId) ?? {} }));
+    this.storage.setItem(SCREEN_STORAGE_PREFIX + projectId, JSON.stringify({ schemaVersion: 3, screens: snapshot.screens, spaces: snapshot.spaces, spacesAvailable: snapshot.spacesAvailable ?? true, tasks: snapshot.tasks, ignoredPairs: snapshot.ignoredPairs, mergeHistory: snapshot.mergeHistory ?? [], platformDrafts: snapshot.platformDrafts ?? {}, platformReadAt: snapshot.platformReadAt, fixtureDeviceVersions: this.deviceVersions.get(projectId) ?? {}, fixtureNtpConfigs: this.ntpConfigs.get(projectId) ?? {} }));
   }
 
   private notify(projectId: string, task?: ScreenTask) {
@@ -440,8 +445,39 @@ export class FixtureScreenAdapter implements ScreenAdapter {
     this.persist(projectId, next); this.snapshots.set(projectId, next); this.notify(projectId, task);
   }
 
+  private ntpConfig(projectId: string, id: string) {
+    const values = this.ntpConfigs.get(projectId) ?? {};
+    values[id] ??= { server: "", autoTime: true, autoTimeZone: false, timeZone: "Asia/Shanghai" };
+    this.ntpConfigs.set(projectId, values);
+    return values[id]!;
+  }
+  async readNtp(projectId: string, ids: string[]): Promise<ScreenNtpRead[]> {
+    const state = this.state(projectId);
+    return ids.map(id => {
+      const screen = state.screens.find(screen => screen.id === id);
+      return { screenId: id, readAt: now(), config: screen?.adbAvailable ? copy(this.ntpConfig(projectId, id)) : null,
+        capabilities: screen?.adbAvailable ? { activation: "reboot", rebootRequired: true } : null,
+        message: screen?.adbAvailable ? "原型模拟读取，未连接真实屏" : "模拟 ADB 不可用，无法读取" };
+    });
+  }
+  async preflightNtp(projectId: string, input: ScreenOperationInput, patches: Record<string, ScreenNtpPatch>) {
+    if (input.action !== "ntp") throw new Error("NTP 设置必须使用专用操作");
+    for (const id of input.targetIds) {
+      if (!patches[id]) throw new Error("缺少本次 NTP 地址设置");
+      const error = validateNtpServer(patches[id]!.server);
+      if (error) throw new Error(error);
+    }
+    this.ntpPatches.set(projectId, copy(patches));
+    const checks = await this.preflight(projectId, input);
+    if (this.scenarios.get(projectId) === "platform_offline" && this.state(projectId).screens.some(screen => input.targetIds.includes(screen.id) && screen.source === "platform")) {
+      return checks.map(row => ({ ...row, state: "blocked" as const, reason: "批次包含已注册屏，平台不可用时整批暂停；离线维护请另选未注册屏" }));
+    }
+    return checks.map(row => row.state === "ready" ? { ...row, reason: "模拟检查通过，保存后重启屏并验证授时" } : row);
+  }
+
   async preflight(projectId: string, input: ScreenOperationInput): Promise<ScreenPreflightItem[]> {
     if(input.action==='app_config')throw new Error('原型不模拟配置保存，请使用正式桌面程序');
+    if (input.action === "ntp" && input.targetIds.some(id => !this.ntpPatches.get(projectId)?.[id])) throw new Error("请先检查 NTP 设置");
     if (input.action === "register") throw new Error("注册与更新必须使用专用资料预览和逐屏确认流程");
     const state = this.state(projectId);
     const selected = state.screens.filter((screen) => input.targetIds.includes(screen.id));
@@ -468,9 +504,10 @@ export class FixtureScreenAdapter implements ScreenAdapter {
       else if (!isScreenReadOnlyAction(input.action) && screenCriticalDraftWarning(screen, state.platformDrafts?.[id])) block(screenCriticalDraftWarning(screen, state.platformDrafts?.[id]));
       else if (!isScreenReadOnlyAction(input.action) && screen.source === "platform" && this.scenarios.get(projectId) === "platform_offline") block("平台不可用，设备写操作暂不能取得共享操作条件；仍可执行只读检查");
       else if (this.busy(state, id)) block("该屏有活动任务或待核实结果");
-      else if (["install", "time", "reboot", "restart", "adb"].includes(input.action) && screenMergeCandidates({ ...state, ignoredPairs: [] }).some((c) => c.conflict && [c.local.id, c.platform.id].includes(id))) block("相同 IP 的 MAC 冲突，请先核实身份");
+      else if (["install", "time", "ntp", "reboot", "restart", "adb"].includes(input.action) && screenMergeCandidates({ ...state, ignoredPairs: [] }).some((c) => c.conflict && [c.local.id, c.platform.id].includes(id))) block("相同 IP 的 MAC 冲突，请先核实身份");
       else if (input.action !== "ping" && !screen.adbAvailable) block("ADB 无法连接，请先检查调试端口和授权");
       else if (input.action === "adb" && screen.size !== "10") block("仅适用于已经验证的 10 寸屏");
+      else if (input.action === "ntp" && !["4", "10"].includes(screen.size)) block("请先确认屏尺寸与支持的固件");
       else if (input.action === "restart" && !installedVersion) block("未安装小新应用，请先安装");
       else if (input.action === "install") {
         if (input.appVersion && input.abi !== "universal" && input.abi !== screen.abi) block(`安装包不兼容：设备为 ${screen.abi}`);
@@ -494,6 +531,10 @@ export class FixtureScreenAdapter implements ScreenAdapter {
       targets: checks.map((row) => ({ screenId: row.screenId, name: row.name, ip: row.ip, state: "queued", progress: 0, message: "等待派发" })),
       logs: [{ time: now(), level: "INFO", message: `交互原型：模拟${screenActionLabel(input.action)}，不会连接设备或修改数据库。` }]
     };
+    if (input.action === "ntp") for (const target of task.targets) target.result = { device: "pending", business: "not_required", shared: "not_required", evidence: { ntp: {
+      before: copy(this.ntpConfig(projectId, target.screenId)), targetServer: this.ntpPatches.get(projectId)![target.screenId]!.server,
+      save: "pending", activation: "pending", sync: "pending", rebootRequired: true,
+    } } };
     this.state(projectId).tasks.unshift(task);
     const outcomeScenario = this.scenarios.get(projectId) ?? "normal";
     this.changed(projectId, task);
@@ -524,6 +565,21 @@ export class FixtureScreenAdapter implements ScreenAdapter {
       screen.versionCheckedAt = now(); screen.versionCheckedIp = screen.ip;
     }
     if (task.action === "inspect") this.readVersion(projectId, screen);
+    if (task.action === "ntp") {
+      const evidence = target.result!.evidence!.ntp as ScreenNtpEvidence;
+      const current = this.ntpConfig(projectId, screen.id), unchanged = current.server === evidence.targetServer && current.autoTime;
+      const previouslyActive = this.state(projectId).tasks.some(previous => previous.id !== task.id && previous.action === "ntp" && previous.targets.some(previousTarget => {
+        const previousNtp = previousTarget.result?.evidence?.ntp as ScreenNtpEvidence | undefined;
+        return previousTarget.screenId === screen.id && previousTarget.ip === screen.ip && previousNtp?.targetServer === current.server && previousNtp.activation === "succeeded" && previousNtp.after?.autoTime;
+      }));
+      const after = { ...current, server: evidence.targetServer, autoTime: true };
+      this.ntpConfigs.get(projectId)![screen.id] = after;
+      Object.assign(evidence, { after: copy(after), save: unchanged ? "unchanged" : "succeeded", activation: "succeeded", sync: "succeeded", rebootRequired: !unchanged || !previouslyActive, syncEvidence: { server: after.server || "固件默认（模拟）", clockOffsetSeconds: 1, sourceConfirmedBy: "原型模拟" } });
+      target.result!.device = "succeeded";
+      screen.clockOffsetSeconds = 1;
+      target.message = unchanged && previouslyActive ? "模拟同值 NTP 只验证授时，未写入地址或重启；未连接真实设备" : "模拟地址保存、生效及授时已确认；未连接真实设备";
+      return;
+    }
     if (task.action === "time") screen.clockOffsetSeconds = 1;
     if (task.action === "adb") screen.persistentAdb = true;
     target.message = task.action === "ping" ? `本机 IP ${screen.ping === "online" ? "可达" : "不可达"}`
@@ -544,7 +600,19 @@ export class FixtureScreenAdapter implements ScreenAdapter {
       const index = task.targets.indexOf(target);
       if (scenario === "partial_failure" && index === Math.min(1, task.targets.length - 1)) {
         target.state = "failed"; target.message = "连接中断，未取得成功结果；保留原版本，请检查连接后重试";
+      } else if (task.action === "ntp" && scenario === "ntp_sync_unconfirmed") {
+        this.applyResult(projectId, task, target);
+        if (target.state !== "needs_review") {
+          Object.assign(target.result!.evidence!.ntp as ScreenNtpEvidence, { sync: "unknown", syncEvidence: { server: null, clockOffsetSeconds: null, sourceConfirmedBy: "unconfirmed" } });
+          target.result!.device = "failed"; target.state = "failed";
+          target.message = "模拟地址保存和生效已确认，但授时未确认；本次已结束，请恢复服务器后发起同值验证新任务";
+        }
       } else if (scenario === "needs_review" && index === 0) {
+        if (task.action === "ntp") {
+          this.applyResult(projectId, task, target);
+          Object.assign(target.result!.evidence!.ntp as ScreenNtpEvidence, { activation: "unknown", sync: "unknown", syncEvidence: undefined });
+          target.result!.device = "unknown";
+        }
         target.state = "needs_review"; target.message = "动作已发送，但回读中断；请先核实，勿重复执行";
       } else { target.state = "succeeded"; this.applyResult(projectId, task, target); }
       task.logs.push({ time: now(), level: target.state === "succeeded" ? "INFO" : "WARN", message: `${target.name} · ${target.message}` });
@@ -588,6 +656,22 @@ export class FixtureScreenAdapter implements ScreenAdapter {
     if (!task || task.state !== "needs_review") throw new Error("该任务没有待核实结果");
     if (task.action === "register") return this.verifyRegistration(projectId, task);
     if (task.action === "version_sync") return this.verifyVersionSync(projectId, task);
+    if (task.action === "ntp") {
+      for (const target of task.targets.filter(target => target.state === "needs_review")) {
+        const evidence = target.result?.evidence?.ntp as ScreenNtpEvidence | undefined;
+        const current = this.ntpConfig(projectId, target.screenId), screen = this.find(projectId, target.screenId);
+        if (!evidence || screen.ip !== target.ip || (task.input?.expectedTargets?.[screen.id] && task.input.expectedTargets[screen.id] !== screenMaintenanceFingerprint(screen)) || current.server !== evidence.targetServer || !current.autoTime) {
+          target.message = "模拟当前设置与本次目标不一致，仅核实，未重复修改或重启";
+          continue;
+        }
+        const configurationKnown = ["succeeded", "unchanged"].includes(evidence.save) && ["succeeded", "not_required"].includes(evidence.activation);
+        const syncUnconfirmed = this.scenarios.get(projectId) === "ntp_sync_unconfirmed" || (configurationKnown && evidence.sync !== "succeeded");
+        Object.assign(evidence, { after: copy(current), save: evidence.save === "unchanged" ? "unchanged" : "succeeded", activation: "succeeded", sync: syncUnconfirmed ? "unknown" : "succeeded", syncEvidence: syncUnconfirmed ? { server: null, clockOffsetSeconds: null, sourceConfirmedBy: "unconfirmed" } : { server: current.server || "固件默认（模拟）", clockOffsetSeconds: 1, sourceConfirmedBy: "原型模拟" } });
+        target.result!.device = syncUnconfirmed ? "failed" : "succeeded"; target.state = syncUnconfirmed ? "failed" : "succeeded"; target.progress = 100;
+        target.message = syncUnconfirmed ? "已模拟只读核实保存及生效，授时仍未确认；本次已结束，请发起同值验证新任务" : "已模拟只读核实当前 NTP 设置及授时，未重复修改或重启";
+      }
+      this.finish(task); task.updatedAt = now(); this.changed(projectId, task); return;
+    }
     for (const target of task.targets.filter((t) => t.state === "needs_review")) { target.state = "succeeded"; this.applyResult(projectId, task, target); target.progress = 100; }
     this.finish(task); task.updatedAt = now();
     task.logs.push({ time: now(), level: "INFO", message: "模拟回读确认已有动作结果，没有重新派发设备操作。" });
@@ -621,6 +705,7 @@ export class FixtureScreenAdapter implements ScreenAdapter {
     if (this.state(projectId).tasks.some((task) => ["running", "cancelling"].includes(task.state))) throw new Error("请先等待或取消正在执行的演示任务");
     const snapshot = createScreenSnapshot();
     this.deviceVersions.set(projectId, Object.fromEntries(snapshot.screens.map((screen) => [screen.id, screen.observedAppVersion ?? screen.appVersion])));
+    this.ntpConfigs.delete(projectId); this.ntpPatches.delete(projectId);
     this.scenarios.delete(projectId); this.snapshots.set(projectId, snapshot); this.changed(projectId);
   }
   subscribe(listener: (projectId: string, task?: ScreenTask) => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }

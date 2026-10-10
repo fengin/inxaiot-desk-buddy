@@ -6,6 +6,7 @@ const inspection = (result: string): ScreenOperationFlow => ({
   steps: [{ title: "选屏检查", hint: "选择检查范围" }, { title: result, hint: "查看逐台结果" }], executeLabel: "开始检查", readOnly: true
 });
 export const screenOperationFlows: Record<ScreenAction, ScreenOperationFlow> = {
+  ntp: { steps: [{ title: "选择智能屏", hint: "读取现有授时设置" }, { title: "NTP 设置", hint: "核对地址和生效方式" }, { title: "设置结果", hint: "保存、生效与授时验证" }], executeLabel: "确认设置", readOnly: false },
   app_config: { steps: [{ title: "选择智能屏", hint: "读取屏端当前配置" }, { title: "配置修改", hint: "只修改明确选择的字段" }, { title: "修改结果", hint: "保存、重启和回读" }], executeLabel: "确认修改", readOnly: false },
   register: { steps: [{ title: "选择设备与资料", hint: "补齐本次提交资料" }, { title: "检查并预览", hint: "逐屏核对登记与差异" }, { title: "提交结果", hint: "查看平台回读结果" }], executeLabel: "确认提交", readOnly: false },
   ping: inspection("在线结果"), inspect: inspection("设备检查结果"), mac: inspection("MAC 核对结果"), diagnostics: inspection("诊断结果"),

@@ -339,6 +339,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generated_location_is_visible_in_restored_preview_and_saved_asset() {
+        use crate::domain::{aio::space::resolve_inventory_space, common::project_space::SpaceNode};
+        use crate::infrastructure::local_sqlite::aio_node_repository::LocalAioRepository;
+        let (_directory, store, repository) = setup().await;
+        let spaces = [("1","项目","0","other"),("2","一号楼","1","building"),("3","二层","2","floor")]
+            .into_iter().map(|(id,name,parent,kind)| SpaceNode {id:id.into(),name:name.into(),parent_id:Some(parent.into()),kind:kind.into()}).collect::<Vec<_>>();
+        let mut row = item(2, ImportClassification::NewPending);
+        row.values.space_path = Some("项目/一号楼/二层".into());
+        resolve_inventory_space(&mut row.values, &spaces).unwrap();
+        let session = repository.create_preview("project-a", "inventory.csv", "C:/inventory.csv", &[row]).await.unwrap();
+        let restored = repository.get(&session.id).await.unwrap();
+        assert_eq!(restored.items[0].values.addr_alias.as_deref(), Some("一号楼_二层"));
+        assert_eq!(restored.items[0].values.location.as_deref(), Some("一号楼_二层"));
+        let local = LocalAioRepository::new(store.pool().clone());
+        local.apply_import("project-a", &session.id, &[(restored.items[0].values.clone(), None)]).await.unwrap();
+        let saved = local.list("project-a").await.unwrap();
+        assert_eq!(saved[0].building_id.as_deref(), Some("3"));
+        assert_eq!(saved[0].addr_alias.as_deref(), Some("一号楼_二层"));
+        assert_eq!(saved[0].location, saved[0].addr_alias);
+        store.close().await;
+    }
+
+    #[tokio::test]
     async fn preview_is_local_restorable_selectable_and_sealed_after_apply() {
         let (_directory, store, repository) = setup().await;
         let session = repository

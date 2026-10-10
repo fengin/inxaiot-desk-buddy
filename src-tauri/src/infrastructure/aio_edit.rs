@@ -2,7 +2,7 @@ use std::time::Duration;
 use sqlx::{MySqlPool, Row};
 use crate::application::aio_assets::UpdateAioNodeInput;
 use crate::core::error::{AppError, AppResult};
-use crate::domain::aio::{inventory::validate_inventory_values, mac::MacAddress, space::resolve_inventory_space};
+use crate::domain::aio::{inventory::validate_inventory_values, mac::MacAddress, space::{resolve_inventory_space_for_edit, validate_location}};
 use crate::formal::{app_state::FormalAppState, operation_repository::{OperationRepository,OperationStart,OperationFinalResult,TargetFinalResult}, resource_lease_repository::{LeaseGrant, LeaseRequest, ResourceLeaseRepository}};
 use crate::infrastructure::{client_instance::application_instance_id, local_sqlite::aio_node_repository::LocalAioRepository, platform_aio::PlatformAioRepository, project_context::{map_formal_error, project_operator, project_pools, project_platform_write_pool}, project_spaces};
 
@@ -16,6 +16,7 @@ pub async fn update(state: &FormalAppState, project: &str, mut input: UpdateAioN
     let row = validate_inventory_values(1, input.values.clone());
     if !row.errors.is_empty() { return Err(AppError::InvalidConfig(row.errors.join("；"))); }
     input.values = row.values;
+    validate_location(input.values.building_id.as_deref(), input.values.addr_alias.as_deref())?;
     if input.values.name.chars().count() > 32 || input.values.ip.len() > 32 {
         return Err(AppError::InvalidConfig("名称和 IP 不能超过平台支持的 32 个字符".into()));
     }
@@ -29,7 +30,7 @@ pub async fn update(state: &FormalAppState, project: &str, mut input: UpdateAioN
     let spaces = if input.values.building_id.is_some() || input.values.space_path.is_some() {
         project_spaces::read(&pools.platform, None).await?
     } else { Vec::new() };
-    resolve_inventory_space(&mut input.values, &spaces)?;
+    resolve_inventory_space_for_edit(&mut input.values, &spaces)?;
     if input.platform_base.is_none() {
         let local = LocalAioRepository::new(state.local_store.pool().clone());
         let nodes = local.list(project).await?;
@@ -85,6 +86,7 @@ async fn finish_failed(operations: &OperationRepository, id: &str, mac: &str, ve
 
 /// 字段白名单与共享占用在同一 MySQL 事务中核实；不改 MAC、布点、状态或连接凭据。
 pub async fn save_registered(pool: &MySqlPool, shared_schema: &str, input: &UpdateAioNodeInput, operator: &str, grant: &LeaseGrant) -> AppResult<()> {
+    validate_location(input.values.building_id.as_deref(), input.values.addr_alias.as_deref())?;
     if shared_schema.is_empty() || shared_schema.len() > 64 || !shared_schema.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
         return Err(AppError::InvalidConfig("工作台数据库名无效".into()));
     }
@@ -110,12 +112,14 @@ pub async fn save_registered(pool: &MySqlPool, shared_schema: &str, input: &Upda
         return Err(AppError::Conflict("平台资料已变化，请重新读取后再保存".into()));
     }
     let mut values = input.values.clone();
+    values.normalize_text();
+    values.location = values.addr_alias.clone();
     if let Some(id) = values.building_id.as_deref().filter(|id| *id != "0") {
         let exists: Option<String> = sqlx::query_scalar("SELECT CAST(id AS CHAR) FROM t_project_building WHERE id=? AND delete_flag='0' FOR UPDATE")
             .bind(id).fetch_optional(&mut *tx).await.map_err(db)?;
         if exists.is_none() { return Err(AppError::Conflict("所选空间已删除，请重新选择".into())); }
         let spaces = project_spaces::read(&mut *tx, None).await?;
-        resolve_inventory_space(&mut values, &spaces)?;
+        resolve_inventory_space_for_edit(&mut values, &spaces)?;
     }
     let duplicate: Option<String> = sqlx::query_scalar("SELECT CAST(id AS CHAR) FROM op_edge_aio_server WHERE id<>? AND (name=? OR ip=?) LIMIT 1 FOR UPDATE")
         .bind(&base.id).bind(&values.name).bind(&values.ip).fetch_optional(&mut *tx).await.map_err(db)?;

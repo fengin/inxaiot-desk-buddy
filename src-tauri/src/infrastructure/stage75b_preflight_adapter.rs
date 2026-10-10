@@ -352,6 +352,16 @@ impl Stage75BPreflightAdapter<'_> {
                 }
                 continue;
             };
+            if normalized.mode == DeploymentMode::FirstDeploy {
+                if let Err(error) = crate::domain::aio::space::validate_location(
+                    node.building_id.as_deref(), node.addr_alias.as_deref(),
+                ) {
+                    checks.push(failed(
+                        "registration_location", "一体机具体位置", Some(mac), error.to_string(),
+                        remediation("open_aio_nodes", "补齐一体机资料", Some("/aio/nodes"), Some(mac)),
+                    ));
+                }
+            }
             let deployment_mac = match platform_inventory.deployment_mac(mac) {
                 Ok(value) => value,
                 Err(error) => {

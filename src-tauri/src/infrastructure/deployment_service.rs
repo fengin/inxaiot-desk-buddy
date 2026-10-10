@@ -483,10 +483,7 @@ async fn prepare_deployment(
                     platform_ip: profile.values.platform_host.clone(),
                     platform_port: profile.values.platform_api_port.to_string(),
                     auth_key: profile.credentials.platform_auth_key.clone(),
-                    building_id: node
-                        .building_id
-                        .as_deref()
-                        .and_then(|value| value.parse().ok()).or(Some(0)),
+                    building_id: Some(crate::domain::aio::space::registration_building_id(node.building_id.as_deref())?),
                     addr_alias: node.addr_alias.clone(),
                 },
             },
@@ -1309,7 +1306,7 @@ async fn execute_prepared_targets(
                             &node.registration.auth_key,
                         )?;
                         device.register_if_missing_with_retry(
-                            &crate::infrastructure::aio_registration::compatible_payload(&node.registration),
+                            &node.registration,
                             30,
                             Duration::from_secs(2),
                         )

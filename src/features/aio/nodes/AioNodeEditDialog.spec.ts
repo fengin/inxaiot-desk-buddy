@@ -1,6 +1,6 @@
 import { defineComponent, h, ref } from "vue";
 import { mount, flushPromises } from "@vue/test-utils";
-import { NMessageProvider } from "naive-ui";
+import { NMessageProvider, NPopconfirm } from "naive-ui";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { FixtureAioAdapter } from "@/dev-fixtures/aioFixtureAdapter";
 import { configureAioAdapter } from "@/shared/api/aioAdapter";
@@ -21,6 +21,79 @@ async function localDetail(adapter: FixtureAioAdapter) {
   return adapter.getNodeDetail("a","00:11:22:33:44:77");
 }
 describe("一体机详情编辑",()=>{
+  it("打开时保留自定义具体位置，换空间填建议，清空重输期间不回填且空白不能保存", async () => {
+    const adapter = new FixtureAioAdapter(), detail = await localDetail(adapter);
+    detail.node.buildingId = "floor-a-1";
+    const context = render(adapter, detail), save = vi.spyOn(adapter, "updateNode");
+    try {
+      await flushPromises();
+      const address = context.wrapper.get('[data-testid="aio-edit-address"] input');
+      expect(address.element).toHaveProperty("value", "旧机柜");
+      context.wrapper.getComponent(ProjectSpaceSelect).vm.$emit("update:modelValue", null); await flushPromises();
+      expect(address.element).toHaveProperty("value", "旧机柜");
+      context.wrapper.getComponent(ProjectSpaceSelect).vm.$emit("update:modelValue", "floor-b-2"); await flushPromises();
+      expect(address.element).toHaveProperty("value", "B座_2F");
+      await address.setValue(""); await flushPromises();
+      expect(address.element).toHaveProperty("value", "");
+      await address.setValue("　 ");
+      await context.wrapper.get('[data-testid="aio-edit-save"]').trigger("click"); await flushPromises();
+      expect(context.wrapper.get('[data-testid="aio-edit-error"]').text()).toContain("已选择空间，请填写具体位置");
+      expect(save).not.toHaveBeenCalled();
+      await address.setValue("新的自定义机柜");
+      await context.wrapper.get('[data-testid="aio-edit-save"]').trigger("click"); await flushPromises();
+      expect(save).toHaveBeenCalledWith("a", expect.objectContaining({ values: expect.objectContaining({ buildingId: "floor-b-2", addrAlias: "新的自定义机柜" }) }));
+    } finally { context.wrapper.unmount(); }
+  });
+
+  it("历史记录有空间而位置空白，读取目录后补建议并可明确保存", async () => {
+    const adapter = new FixtureAioAdapter(), detail = await localDetail(adapter);
+    detail.node.buildingId = "area-a-1-room"; detail.node.location = "  ";
+    const context = render(adapter, detail), save = vi.spyOn(adapter, "updateNode");
+    try {
+      await flushPromises();
+      expect(context.wrapper.get('[data-testid="aio-edit-address"] input').element).toHaveProperty("value", "A座_1F");
+      await context.wrapper.get('[data-testid="aio-edit-save"]').trigger("click"); await flushPromises();
+      expect(save).toHaveBeenCalledWith("a", expect.objectContaining({ values: expect.objectContaining({ buildingId: "area-a-1-room", addrAlias: "A座_1F" }) }));
+    } finally { context.wrapper.unmount(); }
+  });
+
+  it("空间目录迟到时不覆盖用户正在清空重写的位置", async () => {
+    const adapter = new FixtureAioAdapter(), detail = await localDetail(adapter);
+    detail.node.buildingId = "floor-a-1"; detail.node.location = "";
+    const spaces = await adapter.listSpaces("a");
+    let finish!: (value: typeof spaces) => void;
+    vi.spyOn(adapter, "listSpaces").mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    const context = render(adapter, detail);
+    try {
+      const address = context.wrapper.get('[data-testid="aio-edit-address"] input');
+      await address.setValue("重写中"); await address.setValue("");
+      finish(spaces); await flushPromises();
+      expect(address.element).toHaveProperty("value", "");
+    } finally { context.wrapper.unmount(); }
+  });
+
+  it.each([false, true])("接手刷新后正确合并空间及位置，已改空间=%s", async (changedSpace) => {
+    const adapter = new FixtureAioAdapter(), detail = await localDetail(adapter);
+    detail.node.buildingId = "floor-a-1"; detail.node.location = "";
+    const fresh = structuredClone(detail);
+    fresh.node.buildingId = "floor-b-2"; fresh.node.location = "平台新机柜"; fresh.node.version += 1;
+    const context = render(adapter, detail);
+    const save = vi.spyOn(adapter, "updateNode").mockRejectedValueOnce({ code: "AIO_EDIT_LOCKED" }).mockResolvedValue(undefined);
+    vi.spyOn(adapter, "getNodeDetail").mockResolvedValue(fresh);
+    try {
+      await flushPromises();
+      if (changedSpace) {
+        context.wrapper.getComponent(ProjectSpaceSelect).vm.$emit("update:modelValue", "area-a-1-room"); await flushPromises();
+      }
+      await context.wrapper.get('[data-testid="aio-edit-name"] input').setValue("本次名称修改");
+      await context.wrapper.get('[data-testid="aio-edit-save"]').trigger("click"); await flushPromises();
+      context.wrapper.getComponent(NPopconfirm).vm.$emit("positiveClick"); await flushPromises();
+      expect(save).toHaveBeenLastCalledWith("a", expect.objectContaining({ forceTakeover: true, expectedVersion: fresh.node.version,
+        values: expect.objectContaining({ name: "本次名称修改", buildingId: changedSpace ? "area-a-1-room" : "floor-b-2",
+          addrAlias: changedSpace ? "A座_1F" : "平台新机柜" }) }));
+    } finally { context.wrapper.unmount(); }
+  });
+
   it("未注册资料只更新当前项目本机记录，空间ID和具体位置分开提交",async()=>{
     const adapter=new FixtureAioAdapter(), detail=await localDetail(adapter), context=render(adapter,detail), save=vi.spyOn(adapter,"updateNode");
     try {

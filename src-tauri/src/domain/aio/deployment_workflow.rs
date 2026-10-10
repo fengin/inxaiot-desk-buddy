@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::core::error::{AppError, AppResult};
-use crate::domain::aio::deployment::DeploymentPlanInput;
+use crate::domain::aio::deployment::{DeploymentMode, DeploymentPlanInput};
 use crate::domain::aio::inventory::WorkbenchNodeSnapshot;
 
 pub const DEPLOYMENT_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
@@ -70,6 +70,13 @@ impl DeploymentExecutionSnapshot {
             return Err(AppError::InvalidConfig(
                 "部署任务目标快照与执行计划不一致".into(),
             ));
+        }
+        if self.plan.mode == DeploymentMode::FirstDeploy {
+            for target in &self.targets {
+                crate::domain::aio::space::validate_location(
+                    target.node.building_id.as_deref(), target.node.addr_alias.as_deref(),
+                )?;
+            }
         }
         Ok(())
     }

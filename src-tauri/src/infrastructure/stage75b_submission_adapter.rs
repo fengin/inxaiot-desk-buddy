@@ -379,6 +379,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn first_deploy_rejects_old_empty_location_but_upgrades_remain_available() {
+        let mut input = snapshot();
+        input.targets[0].node.building_id = Some("103".into());
+        input.plan.mode = DeploymentMode::FirstDeploy;
+        assert!(input.validate("project").is_err());
+        input.targets[0].node.addr_alias = Some(" \t ".into());
+        assert!(input.validate("project").is_err());
+        input.plan.mode = DeploymentMode::FullUpgrade;
+        input.validate("project").unwrap();
+        input.plan.mode = DeploymentMode::ServiceUpgrade;
+        input.validate("project").unwrap();
+        input.plan.mode = DeploymentMode::FirstDeploy;
+        input.targets[0].node.addr_alias = Some("一号楼_二层".into());
+        input.validate("project").unwrap();
+    }
+
     async fn succeeded_preflight(
         state: &FormalAppState,
         task_id: &str,

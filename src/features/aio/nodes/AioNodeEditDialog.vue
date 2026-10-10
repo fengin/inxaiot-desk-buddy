@@ -5,6 +5,7 @@ import { useAioAdapter } from "@/shared/api/aioAdapter";
 import { commandErrorCode, commandErrorText } from "@/shared/api/errors";
 import type { AioNodeDetail, InventoryValues } from "@/shared/model/aio";
 import { projectSpacePath, type ProjectSpaceNode } from "@/shared/model/projectSpace";
+import { AIO_ADDRESS_MAX_LENGTH, aioAddressAfterSpaceChange, aioAddressError, aioAddressSuggestion, hasAioSpace } from "@/shared/model/aioLocation";
 import ProjectSpaceSelect from "@/shared/components/ProjectSpaceSelect.vue";
 import OperationFormTheme from "@/shared/components/OperationFormTheme.vue";
 
@@ -19,6 +20,8 @@ const directoryError = ref("");
 const loading = ref(false), saving = ref(false), error = ref("");
 const occupied = ref("");
 let generation = 0;
+const addressEdited = ref(false);
+let initialForm = { ...form };
 
 function fill(detail: AioNodeDetail) {
   const node = detail.platform;
@@ -30,14 +33,29 @@ watch([show, () => props.projectId], async ([open]) => {
   const request = ++generation; saving.value = false; occupied.value = ""; error.value = "";
   if (!open || !props.detail) return;
   base.value = JSON.parse(JSON.stringify(props.detail)) as AioNodeDetail; fill(base.value);
+  addressEdited.value = false; initialForm = { ...form };
   spaces.value = []; directoryError.value = ""; loading.value = true;
   try {
     const result = await useAioAdapter().listSpaces(props.projectId);
-    if (request === generation) spaces.value = result;
+    if (request === generation) {
+      spaces.value = result;
+      if (!addressEdited.value && !form.addrAlias.trim()) {
+        form.addrAlias = aioAddressSuggestion(result, form.buildingId);
+        initialForm.addrAlias = form.addrAlias;
+      }
+    }
   } catch (cause) { if (request === generation) directoryError.value = commandErrorText(cause, "空间目录读取失败"); }
   finally { if (request === generation) loading.value = false; }
 }, { immediate: true });
 onBeforeUnmount(() => { ++generation; });
+
+function selectSpace(value: string | null) {
+  const buildingId = value || "";
+  if (buildingId === form.buildingId) return;
+  form.addrAlias = aioAddressAfterSpaceChange(spaces.value, form.buildingId, buildingId, form.addrAlias);
+  form.buildingId = buildingId;
+  addressEdited.value = true;
+}
 
 async function save(takeover = false) {
   if (saving.value || loading.value || !base.value) return;
@@ -51,14 +69,19 @@ async function save(takeover = false) {
       const fresh = await adapter.getNodeDetail(project, before.node.mac);
       if (!current()) return;
       // 接手后读取最新资料；未改动字段沿用最新值，保留用户明确修改的字段。
-      const original = { name: before.platform?.name ?? before.node.name, ip: before.platform?.ip ?? before.node.ip,
-        buildingId: (before.platform?.buildingId ?? before.node.buildingId)?.replace(/^0$/, "") ?? "",
-        addrAlias: before.platform?.addrAlias ?? before.node.location };
+      const original = initialForm;
       fill(fresh);
-      for (const key of ["name", "ip", "buildingId", "addrAlias"] as const) if (draft[key] !== original[key]) form[key] = draft[key];
+      if (!form.addrAlias.trim()) form.addrAlias = aioAddressSuggestion(spaces.value, form.buildingId);
+      initialForm = { ...form };
+      for (const key of ["name", "ip"] as const) if (draft[key] !== original[key]) form[key] = draft[key];
+      if (draft.buildingId !== original.buildingId) {
+        form.buildingId = draft.buildingId; form.addrAlias = draft.addrAlias;
+      } else if (draft.addrAlias !== original.addrAlias) form.addrAlias = draft.addrAlias;
       base.value = fresh; before = fresh;
     }
     if (!form.name.trim() || !form.ip.trim()) throw new Error("请填写名称和 IP 地址");
+    const addressError = aioAddressError(form.buildingId, form.addrAlias);
+    if (addressError) throw new Error(addressError);
     const values: InventoryValues = { name: form.name.trim(), ip: form.ip.trim(), mac: before.node.mac,
       buildingId: form.buildingId || undefined, spacePath: projectSpacePath(spaces.value, form.buildingId) || undefined,
       addrAlias: form.addrAlias.trim() || undefined };
@@ -96,8 +119,8 @@ async function save(takeover = false) {
           <n-form-item label="名称" required :show-feedback="false"><n-input v-model:value="form.name" :maxlength="32" data-testid="aio-edit-name" /></n-form-item>
           <n-form-item label="IP 地址" required :show-feedback="false"><n-input v-model:value="form.ip" :maxlength="32" data-testid="aio-edit-ip" /></n-form-item>
           <n-form-item label="MAC 地址" :show-feedback="false"><n-input :value="base?.node.mac" readonly disabled /></n-form-item>
-          <n-form-item label="空间位置" :show-feedback="false"><project-space-select :model-value="form.buildingId" :spaces="spaces" :disabled="saving || loading || !!directoryError" placeholder="可选，请选择空间" :fallback-label="base?.node.spacePath || '原空间待核实'" @update:model-value="form.buildingId = $event || ''" /></n-form-item>
-          <n-form-item label="具体位置" :show-feedback="false" class="edit-wide"><n-input v-model:value="form.addrAlias" :maxlength="128" placeholder="例如：门口弱电柜（可选）" data-testid="aio-edit-address" /></n-form-item>
+          <n-form-item label="空间位置" :show-feedback="false"><project-space-select :model-value="form.buildingId" :spaces="spaces" :disabled="saving || loading || !!directoryError" placeholder="可选，请选择空间" :fallback-label="base?.node.spacePath || '原空间待核实'" @update:model-value="selectSpace" /></n-form-item>
+          <n-form-item label="具体位置" :required="hasAioSpace(form.buildingId)" :show-feedback="false" class="edit-wide"><n-input v-model:value="form.addrAlias" :maxlength="AIO_ADDRESS_MAX_LENGTH" :placeholder="hasAioSpace(form.buildingId) ? '请填写具体位置，可修改自动填入的楼栋楼层' : '例如：门口弱电柜（可选）'" data-testid="aio-edit-address" @update:value="addressEdited = true" /></n-form-item>
         </div>
       </n-form>
       <div class="edit-footer"><n-button :disabled="saving" @click="show = false">取消</n-button><n-button type="primary" :loading="saving" :disabled="loading || saving" data-testid="aio-edit-save" @click="save()">保存修改</n-button></div>

@@ -347,10 +347,10 @@ async fn resolve_import_spaces(
     } else {
         Vec::new()
     };
-    let paths = crate::domain::common::project_space::space_paths(&spaces);
+    let directory = crate::domain::aio::space::InventorySpaceDirectory::new(&spaces);
     for row in rows {
         if let Err(error) =
-            crate::domain::aio::space::resolve_inventory_space_in_directory(&mut row.values, &paths)
+            crate::domain::aio::space::resolve_inventory_space_in_directory(&mut row.values, &directory)
         {
             row.errors
                 .push(format!("第 {} 行：{}", row.row_number, error));

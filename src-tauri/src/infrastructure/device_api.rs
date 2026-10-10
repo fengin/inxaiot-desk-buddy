@@ -173,6 +173,9 @@ fn registration_is_synced(data: &serde_json::Value, expected_mac: &str) -> AppRe
 }
 
 fn validate_payload(payload: &AioRegistrationPayload) -> AppResult<()> {
+    crate::domain::aio::space::validate_location(
+        payload.building_id.as_ref().map(i64::to_string).as_deref(), payload.addr_alias.as_deref(),
+    )?;
     if payload.name.trim().is_empty()
         || payload.ip.trim().is_empty()
         || payload.mac.trim().is_empty()
@@ -215,5 +218,21 @@ mod tests {
         let mut invalid = valid;
         invalid.auth_key.clear();
         assert!(validate_payload(&invalid).is_err());
+    }
+
+    #[test]
+    fn registration_rejects_empty_location_without_rewriting_space() {
+        let mut payload = AioRegistrationPayload {name:"aio".into(),ip:"192.0.2.1".into(),mac:"001122334455".into(),platform_ip:"192.0.2.2".into(),platform_port:"8055".into(),auth_key:"test".into(),building_id:Some(103),addr_alias:None};
+        assert!(validate_payload(&payload).is_err());
+        assert_eq!(payload.building_id, Some(103));
+        payload.addr_alias = Some("   ".into());
+        assert!(validate_payload(&payload).is_err());
+        payload.addr_alias = Some("一号楼_二层".into());
+        validate_payload(&payload).unwrap();
+        payload.building_id = Some(0);
+        payload.addr_alias = None;
+        validate_payload(&payload).unwrap();
+        payload.addr_alias = Some("未关联空间时的位置".into());
+        validate_payload(&payload).unwrap();
     }
 }

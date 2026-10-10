@@ -28,6 +28,61 @@ function render(adapter = new FixtureAioAdapter()) {
 }
 
 describe("单台新增一体机", () => {
+  it("选择空间自动填楼栋楼层，允许清空重输但空白不能提交", async () => {
+    const context = render(), preview = vi.spyOn(context.adapter, "previewCreate");
+    try {
+      await flushPromises(); await context.fill();
+      context.wrapper.getComponent(ProjectSpaceSelect).vm.$emit("update:modelValue", "area-a-1-room");
+      await flushPromises();
+      const address = context.wrapper.get('[data-testid="aio-create-address"] input');
+      expect(address.element).toHaveProperty("value", "A座_1F");
+      await address.setValue("");
+      expect(address.element).toHaveProperty("value", "");
+      await address.setValue("  "); await context.save();
+      expect(context.wrapper.get('[data-testid="aio-create-error"]').text()).toContain("已选择空间，请填写具体位置");
+      expect(preview).not.toHaveBeenCalled();
+      await address.setValue("门口弱电柜"); await context.save();
+      expect(preview).toHaveBeenCalledWith("project-a", expect.objectContaining({ buildingId: "area-a-1-room", addrAlias: "门口弱电柜" }));
+    } finally { context.wrapper.unmount(); }
+  });
+
+  it("更换空间重新生成建议，重复选择不覆盖自定义位置，取消空间后位置可为空", async () => {
+    const context = render(), preview = vi.spyOn(context.adapter, "previewCreate");
+    try {
+      await flushPromises(); await context.fill();
+      const select = context.wrapper.getComponent(ProjectSpaceSelect);
+      const address = context.wrapper.get('[data-testid="aio-create-address"] input');
+      select.vm.$emit("update:modelValue", "floor-a-1"); await flushPromises();
+      await address.setValue("自定义机柜");
+      select.vm.$emit("update:modelValue", "floor-a-1"); await flushPromises();
+      expect(address.element).toHaveProperty("value", "自定义机柜");
+      select.vm.$emit("update:modelValue", null); await flushPromises();
+      expect(address.element).toHaveProperty("value", "自定义机柜");
+      select.vm.$emit("update:modelValue", "floor-b-2"); await flushPromises();
+      expect(address.element).toHaveProperty("value", "B座_2F");
+      select.vm.$emit("update:modelValue", "building-b"); await flushPromises();
+      expect(address.element).toHaveProperty("value", "B座");
+      select.vm.$emit("update:modelValue", null); await flushPromises();
+      expect(address.element).toHaveProperty("value", "");
+      await context.save();
+      expect(preview).toHaveBeenCalledWith("project-a", expect.objectContaining({ buildingId: undefined, addrAlias: undefined }));
+    } finally { context.wrapper.unmount(); }
+  });
+
+  it("空间没有楼栋楼层时不填项目或区域名称，提示手填后才能保存", async () => {
+    const context = render(), preview = vi.spyOn(context.adapter, "previewCreate");
+    vi.spyOn(context.adapter, "listSpaces").mockResolvedValue([{ id: "1", name: "独立区域", kind: "area" }]);
+    try {
+      context.show.value = false; await flushPromises(); context.show.value = true; await flushPromises();
+      await context.fill();
+      context.wrapper.getComponent(ProjectSpaceSelect).vm.$emit("update:modelValue", "1"); await flushPromises();
+      expect(context.wrapper.get('[data-testid="aio-create-address"] input').element).toHaveProperty("value", "");
+      await context.save();
+      expect(context.wrapper.text()).toContain("已选择空间，请填写具体位置");
+      expect(preview).not.toHaveBeenCalled();
+    } finally { context.wrapper.unmount(); }
+  });
+
   it("空间树选择提交真实 ID，保存后显示完整路径", async () => {
     const context = render();
     const preview = vi.spyOn(context.adapter, "previewCreate");

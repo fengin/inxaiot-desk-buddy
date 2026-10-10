@@ -6,6 +6,7 @@ import { commandErrorText } from "@/shared/api/errors";
 import OperationFormTheme from "@/shared/components/OperationFormTheme.vue";
 import ProjectSpaceSelect from "@/shared/components/ProjectSpaceSelect.vue";
 import { projectSpacePath, type ProjectSpaceNode } from "@/shared/model/projectSpace";
+import { AIO_ADDRESS_MAX_LENGTH, aioAddressAfterSpaceChange, aioAddressError, hasAioSpace } from "@/shared/model/aioLocation";
 import type { AioImportSession, InventoryApplyOutcome, InventoryValues } from "@/shared/model/aio";
 
 const props = defineProps<{ projectId: string }>();
@@ -64,6 +65,13 @@ async function close() {
   finally { if (request === generation) busy.value = false; }
 }
 
+function selectSpace(value: string | null) {
+  const buildingId = value || undefined;
+  if (buildingId === form.buildingId) return;
+  form.addrAlias = aioAddressAfterSpaceChange(spaces.value, form.buildingId, buildingId, form.addrAlias);
+  form.buildingId = buildingId;
+}
+
 async function save() {
   if (busy.value || !props.projectId) return;
   const values: InventoryValues = {
@@ -73,7 +81,8 @@ async function save() {
     addrAlias: form.addrAlias?.trim() || undefined,
     remark: form.remark?.trim() || undefined
   };
-  error.value = [!values.name && "请填写名称", !values.ip && "请填写 IP 地址", !values.mac && "请填写 MAC 地址"].filter(Boolean).join("；");
+  error.value = [!values.name && "请填写名称", !values.ip && "请填写 IP 地址", !values.mac && "请填写 MAC 地址",
+    aioAddressError(values.buildingId, values.addrAlias)].filter(Boolean).join("；");
   if (error.value) return;
   const projectId = props.projectId, generation = ++request, adapter = useAioAdapter();
   const current = () => request === generation && props.projectId === projectId && show.value;
@@ -123,8 +132,8 @@ async function save() {
           <n-form-item label="名称" required :show-feedback="false"><n-input v-model:value="form.name" :maxlength="32" placeholder="请输入一体机名称" data-testid="aio-create-name" /></n-form-item>
           <n-form-item label="IP 地址" required :show-feedback="false"><n-input v-model:value="form.ip" placeholder="例如：192.168.3.79" data-testid="aio-create-ip" /></n-form-item>
           <n-form-item label="MAC 地址" required :show-feedback="false"><n-input v-model:value="form.mac" placeholder="例如：AA:BB:CC:DD:EE:01" data-testid="aio-create-mac" /></n-form-item>
-          <n-form-item label="空间位置" :show-feedback="false"><project-space-select :model-value="form.buildingId" :spaces="spaces" :disabled="busy || !!preview || spacesLoading || !!spacesError" :placeholder="spacesLoading ? '正在读取空间' : '可选，请选择空间'" data-testid="aio-create-location" @update:model-value="form.buildingId = $event || undefined" /></n-form-item>
-          <n-form-item label="具体位置" :show-feedback="false"><n-input v-model:value="form.addrAlias" :maxlength="128" placeholder="例如：门口弱电柜（可选）" data-testid="aio-create-address" /></n-form-item>
+          <n-form-item label="空间位置" :show-feedback="false"><project-space-select :model-value="form.buildingId" :spaces="spaces" :disabled="busy || !!preview || spacesLoading || !!spacesError" :placeholder="spacesLoading ? '正在读取空间' : '可选，请选择空间'" data-testid="aio-create-location" @update:model-value="selectSpace" /></n-form-item>
+          <n-form-item label="具体位置" :required="hasAioSpace(form.buildingId)" :show-feedback="false"><n-input v-model:value="form.addrAlias" :maxlength="AIO_ADDRESS_MAX_LENGTH" :placeholder="hasAioSpace(form.buildingId) ? '请填写具体位置，可修改自动填入的楼栋楼层' : '例如：门口弱电柜（可选）'" data-testid="aio-create-address" /></n-form-item>
           <n-form-item label="备注" :show-feedback="false"><n-input v-model:value="form.remark" placeholder="可选" data-testid="aio-create-remark" /></n-form-item>
         </div>
       </n-form>

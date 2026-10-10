@@ -1,6 +1,7 @@
 import type { AioAdapter } from "@/shared/api/aioAdapter";
 import { screenSpaces } from "./screenData";
 import { getProjectSpacePath, projectSpacePath, resolveProjectSpacePath } from "@/shared/model/projectSpace";
+import { aioAddressError, aioAddressSuggestion } from "@/shared/model/aioLocation";
 import { demoNodes } from "@/shared/fixtures/demoData";
 import type {
   AioImportSession,
@@ -187,8 +188,11 @@ export class FixtureAioAdapter implements AioAdapter {
       const path = getProjectSpacePath(screenSpaces, values.buildingId);
       if (!path) throw new Error("所选空间不存在，请重新选择");
       values.spacePath = projectSpacePath(screenSpaces, values.buildingId);
-      values.location = values.addrAlias;
+      if (!values.addrAlias) values.addrAlias = aioAddressSuggestion(screenSpaces, values.buildingId);
     }
+    const addressError = aioAddressError(values.buildingId, values.addrAlias);
+    if (addressError) throw new Error(addressError);
+    values.location = values.addrAlias ?? values.location;
     if (!values.name || !values.ip || !values.mac) throw new Error("名称、IP 和 MAC 不能为空");
     const macNormalized = values.mac.replace(/[:-]/g, "").toUpperCase();
     if (!/^[0-9A-F]{12}$/.test(macNormalized)) throw new Error("MAC 格式无效");
@@ -255,6 +259,8 @@ export class FixtureAioAdapter implements AioAdapter {
     if (detail.node.version !== input.expectedVersion || detail.platform?.id !== input.platformBase?.id) throw new Error("资料已变化，请刷新");
     if (!input.values.name.trim() || !input.values.ip.trim()) throw new Error("名称、IP 不能为空");
     if (input.values.buildingId && !getProjectSpacePath(screenSpaces, input.values.buildingId)) throw new Error("空间不存在");
+    const addressError = aioAddressError(input.values.buildingId, input.values.addrAlias);
+    if (addressError) throw new Error(addressError);
     const node = this.nodesFor(projectId).find(item => item.mac === input.mac)!;
     node.name = input.values.name.trim(); node.ip = input.values.ip.trim(); node.location = input.values.addrAlias?.trim() ?? "";
     const key = `${projectId}:${detail.node.macNormalized}`;

@@ -82,17 +82,21 @@ async fn platform_edits_preserve_device_fields_and_successful_deployment_creates
         let operation=operations.start(OperationStart {domain_type:"aio".into(),operation_type:"first_deploy".into(),operation_name:"首次部署".into(),operator_name:"测试人员".into(),instance_id:"computer-a".into(),targets:vec![("aio".into(),mac.into())],artifact_name:None,artifact_version:None,operation_summary:None,retry_of_operation_id:None}).await.unwrap();
         let grants=leases.acquire_many(vec![request(mac,&operation.id,"computer-a")]).await.unwrap();
         let before:i64=sqlx::query_scalar("SELECT COUNT(*) FROM aio_node WHERE mac_normalized=?").bind(mac).fetch_one(&wp).await.unwrap(); assert_eq!(before,0);
-        let asset=WorkbenchNodeSnapshot {mac_normalized:mac.into(),name:"新部署设备".into(),ip:"192.0.2.20".into(),building_id:Some("103".into()),addr_alias:None,location:None,region_id:None,floor:None,remark:None,platform_aio_id:None,management_state:"pending".into(),source:"local".into(),last_operation_id:None,version:1};
+        let asset=WorkbenchNodeSnapshot {mac_normalized:mac.into(),name:"新部署设备".into(),ip:"192.0.2.20".into(),building_id:Some("103".into()),addr_alias:Some("一号楼_二层".into()),location:Some("一号楼_二层".into()),region_id:None,floor:None,remark:None,platform_aio_id:None,management_state:"pending".into(),source:"local".into(),last_operation_id:None,version:1};
         sqlx::query("INSERT INTO op_edge_aio_server(id,name,ip,mac,building_id,addr_alias,platform_ip,platform_port) VALUES(20,'新部署设备','192.0.2.20','00:11:22:33:44:66',0,'','192.0.2.1','8055')").execute(&bp).await.unwrap();
         let completion=inxaiot_desk_buddy_lib::infrastructure::aio_registration::RegistrationCompletion {pool:bp.clone(),shared_schema:shared.clone()};
+        assert!(completion.confirm(&asset,&grants[0]).await.is_err());
+        let untouched:(i64,String)=sqlx::query_as("SELECT building_id,addr_alias FROM op_edge_aio_server WHERE id=20").fetch_one(&bp).await.unwrap();
+        assert_eq!(untouched,(0,String::new()));
+        sqlx::query("UPDATE op_edge_aio_server SET building_id=103,addr_alias='一号楼_二层' WHERE id=20").execute(&bp).await.unwrap();
         assert_eq!(completion.confirm(&asset,&grants[0]).await.unwrap(),"20");
         let registered:(i64,String)=sqlx::query_as("SELECT building_id,addr_alias FROM op_edge_aio_server WHERE id=20").fetch_one(&bp).await.unwrap();
-        assert_eq!(registered,(103,String::new()));
+        assert_eq!(registered,(103,"一号楼_二层".into()));
         finalize_deployment_atomically(&wp,AtomicDeploymentFinalization {operation:OperationFinalResult {operation_id:operation.id.clone(),expected_version:operation.version,state:"succeeded".into(),result_summary:None,error_code:None,error_summary:None},leases:grants,
             targets:vec![AtomicTargetFinalization {asset:Some(asset),result:TargetFinalResult {operation_id:operation.id.clone(),resource_type:"aio".into(),resource_key:mac.into(),result_state:"succeeded".into(),before_version:None,after_version:None,result_summary:None,error_code:None,error_summary:None},replace_service_versions:true,mark_operation_success:true,
                 service_versions:vec![ServiceVersionWrite {mac:mac.into(),service_name:"device-edge".into(),expected_image_name:Some("device-edge".into()),expected_version:Some("test".into()),observed_image_name:None,observed_version:None,source_operation_id:Some(operation.id.clone())}]}]}).await.unwrap();
         let after:(String,Option<String>)=sqlx::query_as("SELECT management_state,addr_alias FROM aio_node WHERE mac_normalized=?").bind(mac).fetch_one(&wp).await.unwrap();
-        assert_eq!(after,("managed".into(),None));
+        assert_eq!(after,("managed".into(),Some("一号楼_二层".into())));
         bp.close().await; wp.close().await;
     }).catch_unwind().await;
     for schema in [&business,&shared] {

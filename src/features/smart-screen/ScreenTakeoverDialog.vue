@@ -9,7 +9,7 @@ const busy=ref(false);
 let generation=0;
 let accept:((value:ScreenTakeoverConfirmation)=>void)|undefined;
 let reject:((error:Error)=>void)|undefined;
-const deviceAction=computed(()=>pending.value?.conflicts.some(item=>['install','time','adb','restart','reboot'].includes(item.operationType)));
+const deviceAction=computed(()=>pending.value?.conflicts.some(item=>['install','time','adb','restart','reboot','app_config'].includes(item.operationType)));
 function computer(value:string){return value.replace(/-(?:[A-Fa-f0-9]{12}|未知MAC)-(?=[\da-fA-F:.]+$|未联网$)/,' · ');}
 function cancel(){++generation;reject?.(new Error('已取消接手，本次操作未继续'));accept=undefined;reject=undefined;pending.value=undefined;busy.value=false;}
 const unregister=registerScreenTakeoverHandler(request=>new Promise((resolve,rejectRequest)=>{

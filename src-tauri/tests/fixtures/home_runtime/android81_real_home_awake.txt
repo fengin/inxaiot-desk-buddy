@@ -1,0 +1,44 @@
+ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)
+Display #0 (activities from top to bottom):
+  Stack #0:
+  mFullscreen=true
+  isSleeping=false
+    Task id #526
+    * TaskRecord{1a2998e #526 I=chat.xiaoxin.app/.MainActivity U=0 StackId=0 sz=1}
+      autoRemoveRecents=false isPersistable=true numFullscreen=1 taskType=1 mTaskToReturnTo=1
+      * Hist #0: ActivityRecord{dbb6ffb u0 chat.xiaoxin.app/.MainActivity t526}
+          app=ProcessRecord{ed8d5af 14094:chat.xiaoxin.app/u0a46}
+          state=RESUMED stopped=false delayedResume=false finishing=false
+          keysPaused=false inHistory=true visible=true sleeping=false idle=true mStartingWindowState=STARTING_WINDOW_SHOWN
+          mActivityType=HOME_ACTIVITY_TYPE
+    Running activities (most recent first):
+      TaskRecord{1a2998e #526 I=chat.xiaoxin.app/.MainActivity U=0 StackId=0 sz=1}
+        Run #0: ActivityRecord{dbb6ffb u0 chat.xiaoxin.app/.MainActivity t526}
+    mResumedActivity: ActivityRecord{dbb6ffb u0 chat.xiaoxin.app/.MainActivity t526}
+  Stack #1:
+  mFullscreen=true
+  isSleeping=false
+    Task id #14
+    * TaskRecord{abf12ff #14 A=com.android.settings U=0 StackId=1 sz=1}
+      autoRemoveRecents=false isPersistable=true numFullscreen=1 taskType=0 mTaskToReturnTo=1
+      * Hist #0: ActivityRecord{d7c3dcf u0 com.android.settings/.Settings t14}
+          app=ProcessRecord{358c006 2657:com.android.settings/1000}
+          state=STOPPED stopped=true delayedResume=false finishing=false
+          keysPaused=false inHistory=true visible=false sleeping=false idle=true mStartingWindowState=STARTING_WINDOW_REMOVED
+          mActivityType=APPLICATION_ACTIVITY_TYPE
+    Running activities (most recent first):
+      TaskRecord{abf12ff #14 A=com.android.settings U=0 StackId=1 sz=1}
+        Run #0: ActivityRecord{d7c3dcf u0 com.android.settings/.Settings t14}
+    mLastPausedActivity: ActivityRecord{d7c3dcf u0 com.android.settings/.Settings t14}
+  ResumedActivity: ActivityRecord{dbb6ffb u0 chat.xiaoxin.app/.MainActivity t526}
+  mFocusedStack=ActivityStack{1e8d5b8 stackId=0, 1 tasks} mLastFocusedStack=ActivityStack{1e8d5b8 stackId=0, 1 tasks}
+  mCurTaskIdForUser={0=526}
+  mUserStackInFront={}
+  mStacks={0=ActivityStack{1e8d5b8 stackId=0, 1 tasks}, 1=ActivityStack{b7be01b stackId=1, 1 tasks}}
+  KeyguardController:
+    mKeyguardShowing=false
+    mKeyguardGoingAway=false
+    mOccluded=false
+    mDismissingKeyguardActivity=null
+    mDismissalRequested=false
+    mVisibilityTransactionDepth=0

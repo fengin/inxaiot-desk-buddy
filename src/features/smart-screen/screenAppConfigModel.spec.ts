@@ -6,6 +6,20 @@ function configuration(): ScreenAppConfiguration {
   return {customDeviceName:'原名称',environments:{current:'pre',test:{...env},pre:{...env},prod:{...env}}};
 }
 describe('配置修改字段与重启范围',()=>{
+  it('已固定但未激活时显式开启仍产生差异，单独激活不重启',()=>{
+    const config=configuration(),patch={set:{},clear:[],homeEnabled:true};
+    expect(appConfigChanges(config,patch,{supported:true,enabled:true,active:false})).toEqual([{key:'homeEnabled',label:'固定小新为主屏',before:'已固定，激活未确认',after:'固定并激活'}]);
+    expect(appConfigChanges(config,patch,{supported:true,enabled:true,active:true})).toEqual([]);
+    expect(appConfigChanges(config,{set:{},clear:[]},{supported:true,enabled:true,active:false})).toEqual([]);
+    expect(appConfigRestartRequired(config,patch)).toBe(false);
+  });
+  it('主屏修改独立于环境配置，解除固定无需重启且相同值不重复提交',()=>{
+    const config=configuration(),patch={set:{},clear:[],homeEnabled:false};
+    expect(appConfigChanges(config,patch,{supported:true,enabled:true})).toEqual([{key:'homeEnabled',label:'固定小新为主屏',before:'固定',after:'解除固定'}]);
+    expect(appConfigChanges(config,patch,{supported:true,enabled:false})).toEqual([]);
+    expect(appConfigRestartRequired(config,patch)).toBe(false);
+    expect(appConfigChanges(config,{set:{},clear:[]},{supported:true,enabled:true})).toEqual([]);
+  });
   it('名称与环境标识相同时仍按名称原文显示',()=>{
     const config=configuration();config.customDeviceName='test';
     expect(appConfigChanges(config,{set:{customDeviceName:'prod'},clear:[]})[0]).toMatchObject({before:'test',after:'prod'});

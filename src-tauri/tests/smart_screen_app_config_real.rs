@@ -74,6 +74,113 @@ async fn execute(
 fn patch(set: Value, clear: Vec<String>) -> AppConfigPatch {
     serde_json::from_value(json!({"set":set,"clear":clear})).unwrap()
 }
+
+#[tokio::test]
+#[ignore = "需显式指定授权测试屏 INX_HOME_TEST_TARGET；通过正式小新配置任务解除、固定并重复核实主屏"]
+async fn home_configuration_toggle_real() -> Result<(), Box<dyn std::error::Error>> {
+    let ip =
+        std::env::var("INX_HOME_TEST_TARGET").map_err(|_| "请显式指定 INX_HOME_TEST_TARGET")?;
+    if ![
+        "192.168.3.82",
+        "192.168.3.74",
+        "192.168.3.70",
+        "192.168.3.106",
+    ]
+    .contains(&ip.as_str())
+    {
+        return Err("只允许本次授权的测试屏地址".into());
+    }
+    let device = AdbDevice::new(AndroidTools::discover()?);
+    device
+        .connect(&ip, tokio_util::sync::CancellationToken::new())
+        .await?;
+    if ip == "192.168.3.106" {
+        if device
+            .shell(
+                &ip,
+                &["getprop", "ro.serialno"],
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await?
+            != "9c000c3c3643071205d"
+        {
+            return Err("10寸测试屏序列号与本次授权不一致".into());
+        }
+    }
+    if ip == "192.168.3.74"
+        && device.shell(&ip, &["getprop", "ro.serialno"], tokio_util::sync::CancellationToken::new()).await? != "A47A4AK02040"
+    {
+        return Err("4寸测试屏序列号与本次授权不一致".into());
+    }
+    let dir = tempfile::tempdir()?;
+    let state = support::state_at(dir.path(), true).await;
+    let project = Stage75Adapter::new(&state)
+        .create_project(support::local_input())
+        .await?
+        .project
+        .id;
+    let repo = ScreenRepository::new(state.local_store.pool().clone());
+    let id = repo
+        .save_local(
+            &project,
+            &ScreenFields {
+                name: "小新配置主屏开关验收".into(),
+                ip: ip.clone(),
+                size: if ["192.168.3.70", "192.168.3.106"].contains(&ip.as_str()) {
+                    "10"
+                } else {
+                    "4"
+                }
+                .into(),
+                ..Default::default()
+            },
+            None,
+            None,
+        )
+        .await?;
+    let read = app_config::read(&state, &project, &[id.clone()]).await?;
+    let original = read[0].config.clone().ok_or("未读取普通配置")?;
+    if !read[0].home.as_ref().is_some_and(|home| home.supported) {
+        return Err("当前屏不支持主屏开关，未继续测试".into());
+    }
+    let pid = application_pid(&ip).await?;
+    for enabled in [false, true, true] {
+        let patch: AppConfigPatch = serde_json::from_value(json!({"homeEnabled":enabled}))?;
+        let outcome = execute(&state, &project, BTreeMap::from([(id.clone(), patch)])).await?;
+        let evidence = &outcome.targets[&id].evidence;
+        assert_eq!(evidence["home"]["targetEnabled"], enabled);
+        assert_eq!(evidence["home"]["readback"], "succeeded");
+        assert_eq!(
+            evidence["home"]["runtimeReadback"],
+            if enabled { "succeeded" } else { "not_required" }
+        );
+        if enabled {
+            assert_eq!(evidence["home"]["runtimeAfter"]["homeTask"], true);
+            assert_eq!(evidence["home"]["runtimeAfter"]["resumed"], true);
+        } else {
+            assert_eq!(evidence["home"]["activation"], "not_required");
+        }
+        assert_eq!(evidence["config"]["save"], "not_required");
+        assert_eq!(evidence["config"]["restart"], "not_required");
+        assert_eq!(
+            application_pid(&ip).await?,
+            pid,
+            "只修改主屏策略不应重启小新"
+        );
+        println!(
+            "正式配置任务主屏开关={enabled}，策略及适用的系统主屏运行状态回读通过，普通配置未写入、应用未强制重启"
+        );
+    }
+    let after = app_config::read(&state, &project, &[id]).await?[0]
+        .config
+        .clone()
+        .ok_or("未读取结束配置")?;
+    if writable_projection(&after) != writable_projection(&original) {
+        return Err("主屏设置后普通配置发生变化；不输出配置地址或其他内容".into());
+    }
+    support::close(state).await;
+    Ok(())
+}
 fn restore(original: &Value, fields: &[String]) -> AppConfigPatch {
     let mut result = AppConfigPatch::default();
     for field in fields {

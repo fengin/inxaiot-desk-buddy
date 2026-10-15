@@ -10,8 +10,13 @@ pub struct AppConfigPatch {
     pub set: BTreeMap<String, Value>,
     #[serde(default)]
     pub clear: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_enabled: Option<bool>,
 }
 impl AppConfigPatch {
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty() && self.clear.is_empty() && self.home_enabled.is_none()
+    }
     pub fn fields(&self) -> Vec<String> {
         self.set.keys().chain(self.clear.iter()).cloned().collect()
     }
@@ -27,7 +32,12 @@ impl AppConfigPatch {
             if !supported_field(&field) {
                 return Err(invalid());
             }
-            let invalid = || AppError::InvalidConfig(format!("{}内容无效，请检查填写格式或选择明确清空", field_label(&field)));
+            let invalid = || {
+                AppError::InvalidConfig(format!(
+                    "{}内容无效，请检查填写格式或选择明确清空",
+                    field_label(&field)
+                ))
+            };
             let value = self.set.get(&field);
             let parts: Vec<_> = field.split('.').collect();
             if parts.len() == 3 {
@@ -131,14 +141,29 @@ pub fn field_value<'a>(config: &'a Value, path: &str) -> Option<&'a Value> {
 
 /// 共享结果仅保留名称、运行环境和开关的前后值；地址可能含凭据，不共享地址值。
 pub fn shared_changes(evidence: &Value) -> Vec<Value> {
-    evidence["fields"].as_array().into_iter().flatten().filter_map(|item| {
-        let field=item.as_str()?;
-        if field!="customDeviceName" && field!="environments.current" && !field.ends_with(".h5ReadyCheckEnabled") {return None;}
-        let before=field_value(&evidence["before"],field)?;
-        let after=field_value(&evidence["after"],field)?;
-        if before==after || !(before.is_null()||before.is_string()||before.is_boolean()) || !(after.is_null()||after.is_string()||after.is_boolean()) {return None;}
-        Some(serde_json::json!({"field":field,"before":before,"after":after}))
-    }).collect()
+    evidence["fields"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let field = item.as_str()?;
+            if field != "customDeviceName"
+                && field != "environments.current"
+                && !field.ends_with(".h5ReadyCheckEnabled")
+            {
+                return None;
+            }
+            let before = field_value(&evidence["before"], field)?;
+            let after = field_value(&evidence["after"], field)?;
+            if before == after
+                || !(before.is_null() || before.is_string() || before.is_boolean())
+                || !(after.is_null() || after.is_string() || after.is_boolean())
+            {
+                return None;
+            }
+            Some(serde_json::json!({"field":field,"before":before,"after":after}))
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -148,6 +173,19 @@ pub struct AppConfigRead {
     pub read_at: String,
     pub config: Option<Value>,
     pub capabilities: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub home: Option<AppHomeRead>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppHomeRead {
+    pub supported: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
     pub message: String,
 }
 
@@ -155,6 +193,37 @@ pub struct AppConfigRead {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn home_patch_is_explicit_and_separate_from_dart_fields_and_restart() {
+        for enabled in [true, false] {
+            let patch: AppConfigPatch =
+                serde_json::from_value(json!({"homeEnabled":enabled})).unwrap();
+            patch.validate().unwrap();
+            assert!(!patch.is_empty());
+            assert!(patch.fields().is_empty());
+            assert!(!patch.restart_required(&json!({})));
+            assert_eq!(
+                serde_json::to_value(&patch).unwrap()["homeEnabled"],
+                enabled
+            );
+            let restored: AppConfigPatch =
+                serde_json::from_value(serde_json::to_value(&patch).unwrap()).unwrap();
+            assert_eq!(restored.home_enabled, Some(enabled));
+        }
+        let unchanged: AppConfigPatch =
+            serde_json::from_value(json!({"set":{"customDeviceName":"小新"}})).unwrap();
+        assert_eq!(unchanged.home_enabled, None);
+        assert!(
+            serde_json::to_value(unchanged)
+                .unwrap()
+                .get("homeEnabled")
+                .is_none()
+        );
+        let invalid: AppConfigPatch =
+            serde_json::from_value(json!({"set":{"homeEnabled":true}})).unwrap();
+        assert!(invalid.validate().is_err());
+        assert!(serde_json::from_value::<AppConfigPatch>(json!({"homeEnabled":"true"})).is_err());
+    }
     #[test]
     fn whitelist_one_environment_and_explicit_clear() {
         for input in [
@@ -193,8 +262,11 @@ mod tests {
     }
     #[test]
     fn shared_changes_exclude_all_address_values() {
-        let evidence=json!({"fields":["customDeviceName","environments.pre.wsUrl"],"before":{"customDeviceName":"旧名称","environments":{"pre":{"wsUrl":"wss://private.example"}}},"after":{"customDeviceName":"新名称","environments":{"pre":{"wsUrl":"wss://another.example"}}}});
-        let changes=shared_changes(&evidence);
-        assert_eq!(changes,vec![json!({"field":"customDeviceName","before":"旧名称","after":"新名称"})]);
+        let evidence = json!({"fields":["customDeviceName","environments.pre.wsUrl"],"before":{"customDeviceName":"旧名称","environments":{"pre":{"wsUrl":"wss://private.example"}}},"after":{"customDeviceName":"新名称","environments":{"pre":{"wsUrl":"wss://another.example"}}}});
+        let changes = shared_changes(&evidence);
+        assert_eq!(
+            changes,
+            vec![json!({"field":"customDeviceName","before":"旧名称","after":"新名称"})]
+        );
     }
 }

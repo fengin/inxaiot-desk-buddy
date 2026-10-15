@@ -38,7 +38,7 @@ async fn configuration_draft_is_local_project_scoped_and_never_locks_asset() {
         )
         .await
         .unwrap();
-    let draft = json!({"environment":"pre","switchEnvironment":false,"readyMode":"keep","edits":{"h5Url":{"mode":"set","value":"https://example.org"}},"names":{},"targetIds":[screen],"includedIds":[screen],"rows":[]});
+    let draft = json!({"environment":"pre","switchEnvironment":false,"readyMode":"keep","homeMode":"off","edits":{"h5Url":{"mode":"set","value":"https://example.org"}},"names":{},"targetIds":[screen],"includedIds":[screen],"rows":[]});
     app_config::save_draft(&state, &first, Some(draft))
         .await
         .unwrap();
@@ -48,6 +48,8 @@ async fn configuration_draft_is_local_project_scoped_and_never_locks_asset() {
             .unwrap()
             .is_some()
     );
+    assert_eq!(app_config::load_draft(&state, &first).await.unwrap().unwrap()["homeMode"], "off");
+    assert!(app_config::save_draft(&state, &first, Some(json!({"targetIds":[],"rows":[],"homeMode":"invalid"}))).await.is_err());
     assert!(
         app_config::load_draft(&state, &second)
             .await

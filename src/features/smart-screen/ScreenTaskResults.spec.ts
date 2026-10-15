@@ -104,6 +104,41 @@ function configTask(state: ScreenTask["state"], targets: ScreenTargetState[], re
 }
 
 describe("紧凑操作结果与恢复动作", () => {
+  it.each(["succeeded", "unknown", "failed"] as const)("策略已保存但运行核验 %s 时按实际结果展示", (readback) => {
+    const state = readback === "succeeded" ? "succeeded" : readback === "unknown" ? "needs_review" : "failed";
+    const value = task(state, [state]);
+    value.mode = "real"; value.action = "app_config"; value.input!.action = "app_config";
+    const component = "chat.xiaoxin.app/chat.xiaoxin.app.MainActivity";
+    value.targets[0]!.result = { device: readback, business: "not_required", shared: "not_required", evidence: { config: { save: "not_required", restart: "not_required", readback: "not_required" }, home: { component, targetEnabled: true, after: { protocolVersion: 1, packageName: "chat.xiaoxin.app", deviceOwner: true, persistentPreferred: true, resolvedHome: component }, save: "applied", readback: "succeeded", activation: "activated", runtimeReadback: readback, runtimeAfter: { homeTask: readback === "succeeded", resumed: true, pid: 12098, taskId: 23, component } } } };
+    const wrapper = render(value);
+    try {
+      expect(wrapper.get("thead").findAll("th").map(cell => cell.text())).toEqual(["目标屏", "IP 地址", "状态", "保存", "重启", "回读", "实际结果 / 处理建议"]);
+      expect(wrapper.text()).toContain("主屏保存：已提交");
+      expect(wrapper.text()).toContain("激活主屏：已触发");
+      expect(wrapper.text()).toContain(readback === "succeeded" ? "固定小新为主屏 · 已确认" : "固定小新为主屏 · 尚未确认");
+      expect(wrapper.text()).toContain("无需重启");
+      expect(wrapper.findAll("button").some(button => button.text() === "核对版本并同步平台")).toBe(false);
+      if (readback === "unknown") {
+        expect(wrapper.text()).not.toContain("固定小新为主屏 · 已确认");
+        expect(wrapper.findAll("button").some(button => button.text() === "继续核实结果")).toBe(true);
+        expect(wrapper.findAll("button").some(button => button.text().startsWith("重试"))).toBe(false);
+      }
+      if (readback === "failed") {
+        expect(wrapper.text()).toContain("运行核验：未通过");
+        expect(wrapper.findAll("button").some(button => button.text().startsWith("重试"))).toBe(true);
+      }
+    } finally { wrapper.unmount(); }
+  });
+  it.each(["rejected", "pending"])("普通配置已保存但主屏 %s 时允许重新读取，不只提供重启", async save => {
+    const value = configTask("failed", ["failed"], [{ save: "saved", restart: "not_required", readback: "succeeded" }]);
+    value.targets[0]!.result!.evidence!.home = { targetEnabled: true, save, readback: "not_required" };
+    const wrapper = render(value);
+    try {
+      await wrapper.findAll("button").find(button => button.text().startsWith("重试"))!.trigger("click");
+      expect(wrapper.getComponent(ScreenTaskResults).emitted("retry")).toEqual([[["screen-0"]]]);
+      expect(wrapper.text()).toContain(save === "rejected" ? "主屏保存：未保存" : "主屏保存：等待处理");
+    } finally { wrapper.unmount(); }
+  });
   it("NTP配置保存和生效成功不等于授时成功，未确认来源不显示实际授时源", () => {
     const value = task("failed", ["failed"]); value.mode = "real"; value.action = "ntp"; value.input!.action = "ntp";
     value.targets[0]!.result = { device: "failed", business: "not_required", shared: "not_required", evidence: { ntp: { before: { server: "", autoTime: false }, targetServer: "192.168.3.142", after: { server: "192.168.3.142", autoTime: true }, save: "succeeded", activation: "succeeded", sync: "unknown", syncEvidence: { server: "192.168.3.142", clockOffsetSeconds: null, sourceConfirmedBy: "unconfirmed" } } } };

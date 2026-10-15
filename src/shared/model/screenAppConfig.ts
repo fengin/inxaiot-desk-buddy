@@ -14,10 +14,12 @@ export interface ScreenAppConfigRead {
   screenId: string; readAt: string; config: ScreenAppConfiguration | null;
   capabilities: { appVersionName: string; appVersionCode: number; protocolVersion: number; supportedFields: string[]; ready: boolean } | null;
   message: string;
+  home?: { supported: boolean; enabled?: boolean; active?: boolean; message?: string };
 }
-export interface ScreenAppConfigPatch { set: Record<string, string | boolean>; clear: string[] }
+export interface ScreenAppConfigPatch { set: Record<string, string | boolean>; clear: string[]; homeEnabled?: boolean }
 export interface ScreenAppConfigDraft {
   environment: AppEnvironment; switchEnvironment: boolean; readyMode: "keep" | "on" | "off";
+  homeMode?: "keep" | "on" | "off";
   edits: Record<string, { mode: "keep" | "set" | "clear"; value: string }>;
   names: Record<string, { mode: "keep" | "set" | "clear"; value: string }>;
   targetIds: string[]; includedIds: string[]; rows: ScreenAppConfigRead[]; savedAt?: string;
@@ -30,7 +32,7 @@ export function appConfigReadTime(value: string) {
 }
 export function appConfigFieldLabel(field: string) {
   const parts=field.split('.'), key = parts.at(-1)!;
-  const label=({ customDeviceName: "设备名", current: "选择环境", otaUrl: "OTA 地址", wsUrl: "WebSocket(可选)", h5Url: "H5地址(可选)", h5ReadyCheckEnabled: "H5检测", h5ReadyRecord: "网页初始化记录" } as Record<string, string>)[key] ?? field;
+  const label=({ customDeviceName: "设备名", current: "选择环境", otaUrl: "OTA 地址", wsUrl: "WebSocket(可选)", h5Url: "H5地址(可选)", h5ReadyCheckEnabled: "H5检测", homeEnabled: "固定小新为主屏", h5ReadyRecord: "网页初始化记录" } as Record<string, string>)[key] ?? field;
   const environment=parts.length===3?appEnvironments.find(item=>item.value===parts[1])?.label:undefined;
   return environment?`${environment} · ${label}`:label;
 }
@@ -42,10 +44,19 @@ export function appConfigDisplay(value: unknown, environment = false) {
   if (typeof value === "boolean") return value ? "开启" : "关闭";
   return (environment ? appEnvironments.find(e => e.value === value)?.label : undefined) ?? String(value);
 }
-export function appConfigChanges(config: ScreenAppConfiguration, patch: ScreenAppConfigPatch) {
-  return [...Object.entries(patch.set), ...patch.clear.map(key => [key, null] as const)]
+export function appConfigChanges(config: ScreenAppConfiguration, patch: ScreenAppConfigPatch, home?: ScreenAppConfigRead["home"]) {
+  const changes = [...Object.entries(patch.set), ...patch.clear.map(key => [key, null] as const)]
     .filter(([key, value]) => appConfigValue(config, key) !== value)
     .map(([key, value]) => ({ key, label: appConfigFieldLabel(key), before: appConfigDisplay(appConfigValue(config, key), key==='environments.current'), after: value === null ? "清空手动值" : appConfigDisplay(value,key==='environments.current') }));
+  if (typeof patch.homeEnabled === "boolean" && (patch.homeEnabled !== home?.enabled || (patch.homeEnabled && home?.active !== true))) {
+    changes.push({ key: "homeEnabled", label: appConfigFieldLabel("homeEnabled"), before: typeof home?.enabled === "boolean" ? home.enabled ? (patch.homeEnabled && home.active !== true ? "已固定，激活未确认" : "固定") : "未固定" : "未确认", after: patch.homeEnabled ? "固定并激活" : "解除固定" });
+  }
+  return changes;
+}
+export function appHomeDisplay(home?: ScreenAppConfigRead["home"]) {
+  if (!home?.supported || typeof home.enabled !== "boolean") return home?.message || "未确认，当前不可修改";
+  if (!home.enabled) return "未固定";
+  return home.active === true ? "固定并已激活" : home.active === false ? "已固定，待激活" : "已固定，激活待核实";
 }
 export function appConfigRestartRequired(config: ScreenAppConfiguration, patch: ScreenAppConfigPatch) {
   return appConfigChanges(config, patch).some(({ key }) => key === "environments.current" || key.startsWith(`environments.${config.environments.current}.`));

@@ -1,6 +1,6 @@
 [package]
 name = "inxaiot-desk-buddy"
-version = "0.2.10"
+version = "0.2.12"
 description = "INX 实施工作台"
 authors = ["INX"]
 edition = "2024"
@@ -33,6 +33,7 @@ md5 = "0.8"
 netdev = { version = "0.46.1", default-features = false, features = ["gateway"] }
 rand = "0.8"
 regex = "1"
+quick-xml = "=0.41.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["cookies", "json", "rustls"] }
 rsa = { version = "0.9.10", features = ["pem"] }
 russh = { version = "0.63.1", default-features = false, features = ["aws-lc-rs", "flate2"] }

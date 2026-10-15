@@ -157,7 +157,7 @@ async fn preflight_with_settings(
         let mut environments = BTreeSet::new();
         for patch in patches.values() {
             patch.validate()?;
-            if patch.fields().is_empty() { return Err(AppError::InvalidConfig("请至少选择一项修改".into())); }
+            if patch.is_empty() { return Err(AppError::InvalidConfig("请至少选择一项修改".into())); }
             for field in patch.fields() {
                 if field.split('.').count() == 3 { environments.insert(field.split('.').nth(1).unwrap().to_string()); }
             }
@@ -292,6 +292,16 @@ async fn preflight_with_settings(
                                 }
                             }
                             _ => {}
+                        }
+                        if reason.is_none() && patch.home_enabled.is_some() {
+                            if let Err(error) = super::home::query(&device, &screen.fields.ip).await {
+                                reason = Some(error.to_string());
+                            }
+                        }
+                        if reason.is_none() && patch.home_enabled == Some(true) {
+                            if let Err(error) = super::home::query_runtime(&device, &screen.fields.ip, CancellationToken::new()).await {
+                                reason = Some(error.to_string());
+                            }
                         }
                     }
                     if reason.is_none() && input.action == "ntp" {

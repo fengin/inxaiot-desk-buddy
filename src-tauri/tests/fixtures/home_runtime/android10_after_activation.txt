@@ -1,0 +1,84 @@
+ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)
+Display #0 (activities from top to bottom):
+
+  Stack #0: type=home mode=fullscreen
+  isSleeping=false
+  mBounds=Rect(0, 0 - 0, 0)
+    Task id #22
+    mBounds=Rect(0, 0 - 0, 0)
+    mMinWidth=-1
+    mMinHeight=-1
+    mLastNonFullscreenBounds=null
+    * TaskRecord{610eed3 #22 I=chat.xiaoxin.app/.MainActivity U=0 StackId=0 sz=1}
+      userId=0 effectiveUid=u0a106 mCallingUid=0 mUserSetupComplete=true mCallingPackage=null
+      intent={act=android.intent.action.MAIN cat=[android.intent.category.HOME] flg=0x10000100 cmp=chat.xiaoxin.app/.MainActivity}
+      mActivityComponent=chat.xiaoxin.app/.MainActivity
+      autoRemoveRecents=false isPersistable=true numFullscreen=1 activityType=2
+      rootWasReset=false mNeverRelinquishIdentity=true mReuseTask=false mLockTaskAuth=LOCK_TASK_AUTH_WHITELISTED
+      Activities=[ActivityRecord{e426305 u0 chat.xiaoxin.app/.MainActivity t22}]
+      askedCompatMode=false inRecents=true isAvailable=true
+      mRootProcess=ProcessRecord{82c2a10 10104:chat.xiaoxin.app/u0a106}
+      stackId=0
+      hasBeenVisible=true mResizeMode=RESIZE_MODE_UNRESIZEABLE mSupportsPictureInPicture=false isResizeable=false lastActiveTime=347234138 (inactive for 4s)
+      * Hist #0: ActivityRecord{e426305 u0 chat.xiaoxin.app/.MainActivity t22}
+          packageName=chat.xiaoxin.app processName=chat.xiaoxin.app
+          launchedFromUid=0 launchedFromPackage=null userId=0
+          app=ProcessRecord{82c2a10 10104:chat.xiaoxin.app/u0a106}
+          Intent { act=android.intent.action.MAIN cat=[android.intent.category.HOME] flg=0x10000100 cmp=chat.xiaoxin.app/.MainActivity (has extras) }
+          frontOfTask=true task=TaskRecord{610eed3 #22 I=chat.xiaoxin.app/.MainActivity U=0 StackId=0 sz=1}
+          taskAffinity=null
+          mActivityComponent=chat.xiaoxin.app/.MainActivity
+          baseDir=/data/app/chat.xiaoxin.app-1ThP73GQkoRtc4kJUVgeIw==/base.apk
+          dataDir=/data/user/0/chat.xiaoxin.app
+          stateNotNeeded=false componentSpecified=false mActivityType=home
+          compat={180dpi always-compat} labelRes=0x0 icon=0x7f0c0001 theme=0x7f0e00a2
+          mLastReportedConfigurations:
+           mGlobalConfig={1.0 ?mcc?mnc [zh_CN_#Hans,en_US] ldltr sw711dp w1137dp h639dp 180dpi lrg land finger -keyb/v/h -nav/h winConfig={ mBounds=Rect(0, 0 - 1280, 800) mAppBounds=Rect(0, 0 - 1280, 746) mWindowingMode=fullscreen mDisplayWindowingMode=fullscreen mActivityType=undefined mAlwaysOnTop=undefined mRotation=ROTATION_90} s.25}
+           mOverrideConfig={1.0 ?mcc?mnc [zh_CN_#Hans,en_US] ldltr sw711dp w1137dp h639dp 180dpi lrg land finger -keyb/v/h -nav/h winConfig={ mBounds=Rect(0, 0 - 1280, 800) mAppBounds=Rect(0, 0 - 1280, 746) mWindowingMode=fullscreen mDisplayWindowingMode=fullscreen mActivityType=home mAlwaysOnTop=undefined mRotation=ROTATION_90} s.2}
+          CurrentConfiguration={1.0 ?mcc?mnc [zh_CN_#Hans,en_US] ldltr sw711dp w1137dp h639dp 180dpi lrg land finger -keyb/v/h -nav/h winConfig={ mBounds=Rect(0, 0 - 1280, 800) mAppBounds=Rect(0, 0 - 1280, 746) mWindowingMode=fullscreen mDisplayWindowingMode=fullscreen mActivityType=home mAlwaysOnTop=undefined mRotation=ROTATION_90} s.2}
+          RequestedOverrideConfiguration={0.0 ?mcc?mnc ?localeList ?layoutDir ?swdp ?wdp ?hdp ?density ?lsize ?long ?ldr ?wideColorGamut ?orien ?uimode ?night ?touch ?keyb/?/? ?nav/? winConfig={ mBounds=Rect(0, 0 - 0, 0) mAppBounds=null mWindowingMode=undefined mDisplayWindowingMode=undefined mActivityType=home mAlwaysOnTop=undefined mRotation=undefined}}
+          taskDescription: label="XiaoXin" icon=null iconResource=0 iconFilename=null primaryColor=ff36618e
+           backgroundColor=ffffffff
+           statusBarColor=ff000000
+           navigationBarColor=ff000000
+          launchFailed=false launchCount=1 lastLaunchTime=-4s272ms
+          haveState=false icicle=null
+          state=RESUMED stopped=false delayedResume=false finishing=false
+          keysPaused=false inHistory=true visible=true sleeping=false idle=true mStartingWindowState=STARTING_WINDOW_NOT_SHOWN
+          fullscreen=true noDisplay=false immersive=false launchMode=1
+          frozenBeforeDestroy=false forceNewConfig=false
+          mActivityType=home
+           nowVisible=true lastVisibleTime=-2s643ms
+          resizeMode=RESIZE_MODE_UNRESIZEABLE
+          mLastReportedMultiWindowMode=false mLastReportedPictureInPictureMode=false
+
+    Running activities (most recent first):
+      TaskRecord{610eed3 #22 I=chat.xiaoxin.app/.MainActivity U=0 StackId=0 sz=1}
+        Run #0: ActivityRecord{e426305 u0 chat.xiaoxin.app/.MainActivity t22}
+
+    mResumedActivity: ActivityRecord{e426305 u0 chat.xiaoxin.app/.MainActivity t22}
+
+ ResumedActivity:ActivityRecord{e426305 u0 chat.xiaoxin.app/.MainActivity t22}
+
+  ResumedActivity: ActivityRecord{e426305 u0 chat.xiaoxin.app/.MainActivity t22}
+
+ActivityStackSupervisor state:
+  topDisplayFocusedStack=ActivityStack{fc4edb9 stackId=0 type=home mode=fullscreen visible=true translucent=false, 1 tasks}
+  displayId=0 stacks=1
+   mHomeStack=ActivityStack{fc4edb9 stackId=0 type=home mode=fullscreen visible=true translucent=false, 1 tasks}
+   mPreferredTopFocusableStack=ActivityStack{fc4edb9 stackId=0 type=home mode=fullscreen visible=true translucent=false, 1 tasks}
+   mLastFocusedStack=ActivityStack{fc4edb9 stackId=0 type=home mode=fullscreen visible=true translucent=false, 1 tasks}
+  mCurTaskIdForUser={0=22}
+  mUserStackInFront={}
+  isHomeRecentsComponent=false  KeyguardController:
+    mKeyguardShowing=false
+    mAodShowing=false
+    mKeyguardGoingAway=false
+    Occluded=false DismissingKeyguardActivity=null at display=0
+    mDismissalRequested=false
+    mVisibilityTransactionDepth=0
+  LockTaskController
+    mLockTaskModeState=NONE
+    mLockTaskModeTasks=
+    mLockTaskPackages (userId:packages)=
+      u0:[chat.xiaoxin.app]

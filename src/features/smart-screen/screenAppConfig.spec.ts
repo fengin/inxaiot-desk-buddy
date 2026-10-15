@@ -9,6 +9,8 @@ import { useSmartScreensStore } from "@/stores/smartScreens";
 import type { ScreenOperationInput } from "@/shared/model/screen";
 import type { ScreenAppConfigPatch, ScreenAppConfigRead, ScreenAppConfiguration } from "@/shared/model/screenAppConfig";
 import ScreenAppConfig from "./ScreenAppConfig.vue";
+import ScreenTaskResults from "./ScreenTaskResults.vue";
+import { screenActions } from "@/shared/model/screen";
 
 const originalOta = "https://config.example.org";
 const originalWs = "wss://voice.example.org";
@@ -24,7 +26,7 @@ function sampleConfiguration(): ScreenAppConfiguration {
   return { customDeviceName: "原名称", environments: { current: "pre", test: { ...env }, pre: { ...env }, prod: { ...env } } };
 }
 
-async function render(options: { count?: number; failFirst?: boolean; restoreDraft?: boolean; sameEnvironment?: boolean; draftSwitch?: boolean } = {}) {
+async function render(options: { count?: number; failFirst?: boolean; restoreDraft?: boolean; sameEnvironment?: boolean; draftSwitch?: boolean; homeValues?: (boolean | "unsupported" | "unknown")[]; homeActiveValues?: (boolean | undefined)[]; draftHomeMode?: "keep" | "on" | "off" } = {}) {
   const count = options.count ?? 4;
   const pinia = createPinia(), adapter = new FixtureScreenAdapter(localStorage, 20);
   const store = useSmartScreensStore(pinia);
@@ -45,23 +47,26 @@ async function render(options: { count?: number; failFirst?: boolean; restoreDra
       config.environments.pre.otaUrl = "https://different.example.org";
     }
     const failed = options.failFirst && id === ids[0];
-    return { screenId: id, readAt: "2026-10-03T10:00:00Z", config: failed ? null : config, capabilities: null, message: failed ? "请升级小新" : "已读取" };
+    const home = options.homeValues?.[ids.indexOf(id)];
+    return { screenId: id, readAt: "2026-10-03T10:00:00Z", config: failed ? null : config, capabilities: null, message: failed ? "请升级小新" : "已读取",
+      ...(home === undefined ? {} : { home: typeof home === "boolean" ? { supported: true, enabled: home, active: options.homeActiveValues ? options.homeActiveValues[ids.indexOf(id)] : home } : { supported: home === "unknown", message: home === "unsupported" ? "当前小新版本不支持主屏设置" : "未读取到持久主屏规则" } }) };
   }));
   const preflight = vi.fn(async (_project: string, input: ScreenOperationInput, patches: Record<string, ScreenAppConfigPatch>) => input.targetIds.map(id => ({
     screenId: id, name: id, ip: "192.0.2.1", state: "ready" as const, reason: patches[id] ? "检查通过" : "缺少修改内容",
   })));
-  Object.assign(adapter, { readAppConfig: read, preflightAppConfig: preflight });
+  const saveDraft = vi.fn(async () => {});
+  Object.assign(adapter, { readAppConfig: read, preflightAppConfig: preflight, saveAppConfigDraft: saveDraft });
   if (options.restoreDraft) {
     const rows = await read(store.projectId, ids);
     read.mockClear();
     Object.assign(adapter, {
       loadAppConfigDraft: vi.fn(async () => ({
         environment: options.draftSwitch ? "test" : "pre", switchEnvironment: Boolean(options.draftSwitch), readyMode: "keep",
+        homeMode: options.draftHomeMode,
         edits: { otaUrl: { mode: "keep", value: "" }, wsUrl: { mode: "set", value: "wss://draft.example.org" }, h5Url: { mode: "keep", value: "" } },
         names: Object.fromEntries(ids.map(id => [id, { mode: "keep", value: "" }])),
         targetIds: ids, includedIds: ids, rows,
       })),
-      saveAppConfigDraft: vi.fn(async () => {}),
     });
   }
   const execute = vi.spyOn(adapter, "execute").mockResolvedValue("config-task");
@@ -96,12 +101,144 @@ async function render(options: { count?: number; failFirst?: boolean; restoreDra
   };
   const changePage = async (page: number) => { wrapper.getComponent(NPagination).vm.$emit("update:page", page); await flushPromises(); };
   return {
-    wrapper, store, ids, read, preflight, execute, step, button, click, clickLabel, select, input, inputControl, checkbox, changePage,
+    wrapper, store, ids, read, preflight, execute, saveDraft, step, button, click, clickLabel, select, input, inputControl, checkbox, changePage,
     dispose() { wrapper.unmount(); store.stop(); adapter.dispose(); },
   };
 }
 
 describe("小新配置页面", () => {
+  it.each([false, undefined])("已固定但运行状态%s时可显式激活，读取本身不产生修改", async active => {
+    const view = await render({ count: 1, homeValues: [true], homeActiveValues: [active] });
+    try {
+      await view.click("读取 1 台配置");
+      const control = view.wrapper.findAllComponents(NCheckbox).find(item => item.attributes("aria-label") === "固定小新为主屏")!;
+      expect(control.props("checked")).toBe(true);
+      expect(view.wrapper.text()).toContain("本次修改 0 台");
+      expect(view.button("检查修改内容").attributes("disabled")).toBeDefined();
+      await view.clickLabel("激活小新主屏");
+      expect(view.wrapper.text()).toContain("本次修改 1 台 · 预计重启 0 台");
+      expect(view.wrapper.get('[data-testid="screen-config-home"]').attributes("title")).toContain("勾选保存后将切到小新主屏并核验");
+      await view.click("检查修改内容");
+      expect(view.preflight.mock.calls[0]![2]).toEqual({ [view.ids[0]!]: { set: {}, clear: [], homeEnabled: true } });
+      await view.clickLabel("撤销主屏修改");
+      expect(view.wrapper.text()).toContain("本次修改 0 台");
+    } finally { view.dispose(); }
+  });
+  it("混合批次开启时只选择未固定或未激活的屏", async () => {
+    const view = await render({ count: 3, homeValues: [true, true, false], homeActiveValues: [true, false, false] });
+    try {
+      await view.click("读取 3 台配置"); await view.checkbox("固定小新为主屏", true);
+      await view.click("检查修改内容");
+      expect(view.preflight.mock.calls[0]![1].targetIds).toEqual(view.ids.slice(1));
+    } finally { view.dispose(); }
+  });
+  it("主屏选项位于H5检测同一行，初始勾选但未读取时不可修改", async () => {
+    const view = await render({ count: 1, homeValues: [false] });
+    let finishRead: ((rows: ScreenAppConfigRead[]) => void) | undefined;
+    view.read.mockImplementationOnce(() => new Promise(resolve => { finishRead = resolve; }));
+    try {
+      await view.click("读取 1 台配置");
+      const control = view.wrapper.findAllComponents(NCheckbox).find(item => item.attributes("aria-label") === "固定小新为主屏")!;
+      expect(control.props("checked")).toBe(true);
+      expect(control.props("disabled")).toBe(true);
+      expect(control.props("indeterminate")).toBe(false);
+      const group = view.wrapper.get(".screen-config-checks");
+      expect(group.text()).toContain("检查H5地址"); expect(group.text()).toContain("固定小新为主屏");
+      expect(group.element.parentElement!.nextElementSibling!.textContent).toContain("重新读取配置");
+      expect(screenActions.some(action => action.label === "设置主屏应用")).toBe(false);
+    } finally { finishRead?.([]); await flushPromises(); view.dispose(); }
+  });
+
+  it.each([true, false])("读取主屏实际值 %s 后照实展示，未编辑不随其他配置写入", async enabled => {
+    const view = await render({ count: 1, homeValues: [enabled] });
+    try {
+      await view.click("读取 1 台配置");
+      const control = view.wrapper.findAllComponents(NCheckbox).find(item => item.attributes("aria-label") === "固定小新为主屏")!;
+      expect(control.props("checked")).toBe(enabled); expect(control.props("disabled")).toBe(false);
+      await view.input("WebSocket(可选)", "wss://new.example.org");
+      await view.click("检查修改内容");
+      expect(view.preflight.mock.calls[0]![2][view.ids[0]!]).not.toHaveProperty("homeEnabled");
+    } finally { view.dispose(); }
+  });
+
+  it.each([true, false])("显式修改主屏为 %s 与保存共用流程，单独修改无需重启", async enabled => {
+    const view = await render({ count: 1, homeValues: [!enabled] });
+    try {
+      await view.click("读取 1 台配置");
+      await view.checkbox("固定小新为主屏", enabled);
+      expect(view.wrapper.text()).toContain("本次修改 1 台 · 预计重启 0 台");
+      expect(view.wrapper.get('[data-testid="screen-config-home"]').attributes("title")).toContain("取消后仅解除固定，不切换当前桌面");
+      await view.click("检查修改内容");
+      expect(view.preflight.mock.calls[0]![2]).toEqual({ [view.ids[0]!]: { set: {}, clear: [], homeEnabled: enabled } });
+      await view.click("确认修改 1 台");
+      expect(view.execute).toHaveBeenCalledOnce(); expect(view.step.value).toBe(2);
+    } finally { view.dispose(); }
+  });
+
+  it("主屏多台不同显示半选，主动勾选仅修改未固定屏，撤销后各自保留", async () => {
+    const view = await render({ count: 3, homeValues: [true, true, false] });
+    try {
+      await view.click("读取 3 台配置");
+      const control = view.wrapper.findAllComponents(NCheckbox).find(item => item.attributes("aria-label") === "固定小新为主屏")!;
+      expect(control.props("indeterminate")).toBe(true);
+      expect(view.wrapper.text()).toContain("本次修改 0 台");
+      await view.checkbox("固定小新为主屏", true);
+      expect(control.props("indeterminate")).toBe(false);
+      await view.click("检查修改内容");
+      expect(view.preflight.mock.calls[0]![1].targetIds).toEqual([view.ids[2]]);
+      await view.clickLabel("撤销主屏修改");
+      expect(view.wrapper.text()).toContain("本次修改 0 台");
+      expect(control.props("indeterminate")).toBe(true);
+    } finally { view.dispose(); }
+  });
+
+  it.each(["unsupported", "unknown"] as const)("主屏 %s 仅禁用该项，其他配置正常提交", async state => {
+    const view = await render({ count: 2, homeValues: [false, state] });
+    try {
+      await view.click("读取 2 台配置");
+      const control = view.wrapper.findAllComponents(NCheckbox).find(item => item.attributes("aria-label") === "固定小新为主屏")!;
+      expect(control.props("disabled")).toBe(true);
+      expect(view.wrapper.get('[data-testid="screen-config-home"]').text()).toContain("不可改");
+      expect(view.wrapper.get('[data-testid="screen-config-home"]').attributes("title")).toContain("其他配置可继续修改");
+      await view.checkbox("固定小新为主屏", true);
+      await view.input("WebSocket(可选)", "wss://new.example.org");
+      await view.click("检查修改内容");
+      expect(view.preflight.mock.calls[0]![1].targetIds).toEqual(view.ids);
+      for (const patch of Object.values(view.preflight.mock.calls[0]![2])) expect(patch).not.toHaveProperty("homeEnabled");
+    } finally { view.dispose(); }
+  });
+
+  it("主屏草稿保留明确解除意图，重新读取后才能保存，切换环境不重置主屏修改", async () => {
+    const view = await render({ count: 1, homeValues: [true], restoreDraft: true, draftHomeMode: "off" });
+    try {
+      await flushPromises(); await view.click("继续本机未提交修改");
+      const control = view.wrapper.findAllComponents(NCheckbox).find(item => item.attributes("aria-label") === "固定小新为主屏")!;
+      expect(control.props("checked")).toBe(false); expect(control.props("disabled")).toBe(true);
+      expect(view.button("检查修改内容").attributes("disabled")).toBeDefined();
+      await view.click("重新读取配置"); await view.select("选择环境", "test");
+      expect(control.props("checked")).toBe(false);
+      await view.click("检查修改内容");
+      expect(view.preflight.mock.calls[0]![2][view.ids[0]!]).toMatchObject({ homeEnabled: false });
+      await vi.waitFor(() => expect(view.saveDraft).toHaveBeenCalled());
+      expect(view.saveDraft.mock.calls.at(-1)).toEqual([view.store.projectId, expect.objectContaining({ homeMode: "off" })]);
+    } finally { view.dispose(); }
+  });
+
+  it("主屏失败后重试重新读取实际值，不自动重放旧开关或默认勾选", async () => {
+    const view = await render({ count: 1, homeValues: [false] });
+    try {
+      await view.click("读取 1 台配置"); await view.checkbox("固定小新为主屏", true);
+      await view.click("检查修改内容"); await view.click("确认修改 1 台");
+      view.store.selectedIds = view.ids;
+      view.store.snapshot.tasks = [{ id: "config-task", projectId: view.store.projectId, action: "app_config", state: "failed", createdAt: "2026-10-13T00:00:00Z", updatedAt: "2026-10-13T00:00:00Z", targets: [{ screenId: view.ids[0]!, name: "测试屏1", ip: "192.0.2.1", state: "failed", progress: 100, message: "主屏设置被拒绝" }], logs: [] }];
+      view.store.openedTaskId = "config-task"; await flushPromises();
+      view.wrapper.getComponent(ScreenTaskResults).vm.$emit("retry", view.ids); await flushPromises();
+      await view.click("读取 1 台配置");
+      const control = view.wrapper.findAllComponents(NCheckbox).find(item => item.attributes("aria-label") === "固定小新为主屏")!;
+      expect(control.props("checked")).toBe(false);
+      expect(view.wrapper.text()).toContain("本次修改 0 台");
+    } finally { view.dispose(); }
+  });
   it("默认展示三台多数值，保留每台实际值；不同屏可查看详情", async () => {
     const view = await render();
     try {

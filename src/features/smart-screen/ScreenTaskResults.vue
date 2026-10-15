@@ -10,6 +10,7 @@ import { formatDisplayDateTime } from "@/shared/format/dateTime";
 import { appConfigFieldLabel } from "@/shared/model/screenAppConfig";
 import { ntpServerDisplay, ntpStageLabel } from "@/shared/model/screenNtp";
 import type { ScreenNtpEvidence } from "@/shared/model/screenNtp";
+import { screenHomeStagesSummary, screenHomeSummary, type ScreenHomeEvidence } from "@/shared/model/screenHome";
 
 const props = defineProps<{ task: ScreenTask }>();
 const emit = defineEmits<{ retry: [ids: string[]]; restart: [ids: string[]]; status: []; logsOpened: []; versions: [ids: string[]]; detail: [id: string] }>();
@@ -36,10 +37,12 @@ watch(() => props.task.targets.length, count => { page.value = Math.min(page.val
 watch([page, pageSize], () => { if (resultBody.value) resultBody.value.scrollTop = 0; });
 const diagnosticText=ref(""),diagnosticOpen=ref(false),diagnosticBusy=ref(false);
 async function diagnostics(exportFile=false){diagnosticBusy.value=true;try{const adapter=useScreenAdapter();if(exportFile){const path=await adapter.exportDiagnostics?.(props.task.projectId,props.task.id);if(path)message.success(`诊断已导出：${path}`);}else{diagnosticText.value=await adapter.readDiagnostics?.(props.task.projectId,props.task.id)??"";diagnosticOpen.value=true;}}catch(cause){message.error((cause as Error).message);}finally{diagnosticBusy.value=false;}}
-const retryIds = computed(() => props.task.targets.filter((t) => ["failed", "cancelled"].includes(t.state) && !(props.task.action === "install" && (t.result?.device === "succeeded" || ["installed", "verified"].includes(String(t.result?.evidence?.phase)))) && !(props.task.action==='app_config'&&['saved','verified','unchanged'].includes(String(configResult(t)?.save)))).map((t) => t.screenId));
+const retryIds = computed(() => props.task.targets.filter((t) => ["failed", "cancelled"].includes(t.state) && !(props.task.action === "install" && (t.result?.device === "succeeded" || ["installed", "verified"].includes(String(t.result?.evidence?.phase)))) && !(props.task.action==='app_config'&&['saved','verified','unchanged','not_required'].includes(String(configResult(t)?.save))&&!homeNeedsRetry(t))).map((t) => t.screenId));
 const resultLabels: Record<string,string> = { not_required:"无需更新",pending:"待保存",succeeded:"已完成",failed:"未完成",unknown:"待核实",skipped:"无需执行",cancelled:"已取消" };
 function configResult(target:ScreenTaskTarget){return target.result?.evidence?.config as Record<string,unknown>|undefined;}
 function ntpResult(target: ScreenTaskTarget) { return target.result?.evidence?.ntp as ScreenNtpEvidence | undefined; }
+function homeResult(target: ScreenTaskTarget) { return target.result?.evidence?.home as ScreenHomeEvidence | undefined; }
+function homeNeedsRetry(target: ScreenTaskTarget) { const home = homeResult(target); return home?.save === "rejected" || home?.save === "pending" || home?.readback === "failed" || (home?.targetEnabled && (home.activation === "pending" || home.runtimeReadback === "failed")); }
 const ntpStages = ["save", "activation", "sync"] as const;
 function ntpResultLabel(target: ScreenTaskTarget, stage: typeof ntpStages[number]) {
   const value = ntpResult(target)?.[stage];
@@ -111,6 +114,7 @@ function resultSummary(target: ScreenTaskTarget) {
   const result = target.result;
   if (!result) return "";
   return [
+    ...(homeResult(target) ? [`${screenHomeStagesSummary(homeResult(target)!)} · ${screenHomeSummary(homeResult(target))}`] : []),
     ...(!isPing.value && result.device !== "not_required" ? [`设备：${deviceResultLabel(target)}`] : []),
     ...(result.business !== "not_required" ? [`平台数据：${resultLabels[result.business]}`] : []),
     `操作记录：${result.shared === "not_required" ? "保存在本机" : resultLabels[result.shared]}`

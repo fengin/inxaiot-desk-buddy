@@ -7,6 +7,7 @@ import { commandErrorText } from "@/shared/api/errors";
 import { formatDisplayDateTime } from "@/shared/format/dateTime";
 import { appConfigFieldLabel,appConfigDisplay } from "@/shared/model/screenAppConfig";
 import { ntpServerDisplay, ntpStageLabel } from "@/shared/model/screenNtp";
+import { screenHomeStagesSummary, screenHomeSummary } from "@/shared/model/screenHome";
 import type { OperationHistoryPage,OperationHistoryDetail,OperationHistoryTarget } from "@/shared/model/deploymentWorkflow";
 import CompactOperationTable from "@/shared/components/CompactOperationTable.vue";
 const props=defineProps<{projectId:string}>();
@@ -18,11 +19,14 @@ const visibleTargets=computed(()=>detail.value?.targets.slice((targetPage.value-
 const lockColumns=[{key:'resource',title:'占用范围',width:'32%'},{key:'user',title:'操作人',width:'24%'},{key:'computer',title:'来源电脑'}];
 watch(()=>detail.value?.operation.id,()=>{targetPage.value=1;});
 watch(targetPageSize,()=>{targetPage.value=1;});
-function changeSummary(target:OperationHistoryTarget){return target.details?.configuration?.changes?.map(change=>`${appConfigFieldLabel(change.field)}：${appConfigDisplay(change.before,change.field==='environments.current')} → ${appConfigDisplay(change.after,change.field==='environments.current')}`).join('；')||'';}
-function configSummary(target:OperationHistoryTarget){const config=target.details?.configuration;return config?`保存：${configLabels[config.save??'pending']} · 重启：${configLabels[config.restart??'pending']} · 回读：${configLabels[config.readback??'pending']}`:'';}
+function changeSummary(target:OperationHistoryTarget){return [...(target.details?.configuration?.changes?.map(change=>`${appConfigFieldLabel(change.field)}：${appConfigDisplay(change.before,change.field==='environments.current')} → ${appConfigDisplay(change.after,change.field==='environments.current')}`)??[]),...(target.details?.home?[screenHomeSummary(target.details.home)]:[])].join('；');}
+function changeFields(target:OperationHistoryTarget){return [...(target.details?.configuration?.fields?.map(appConfigFieldLabel)??[]),...(target.details?.home?['固定小新为主屏']:[])].join('、')||'未记录';}
+function configSummary(target:OperationHistoryTarget){const config=target.details?.configuration;return config?`保存：${config.save==='not_required'?'无需执行':configLabels[config.save??'pending']} · 重启：${configLabels[config.restart??'pending']} · 回读：${config.readback==='not_required'?'无需执行':configLabels[config.readback??'pending']}`:'';}
 function ntpSummary(target:OperationHistoryTarget){const ntp=target.details?.ntp;return ntp?`保存：${ntpStageLabel(ntp.save)} · 生效：${ntpStageLabel(ntp.activation)} · 授时：${ntpStageLabel(ntp.sync)}`:'';}
 function ntpAddressSummary(target:OperationHistoryTarget){const ntp=target.details?.ntp;return ntp?`${ntp.beforeServer == null ? '未读取' : ntpServerDisplay(ntp.beforeServer)} → ${ntp.targetServer == null ? '未记录' : ntpServerDisplay(ntp.targetServer)}`:'未记录';}
-function targetSummary(target:OperationHistoryTarget){return [target.resultSummary||target.errorSummary||'—',target.details?`设备：${labels[target.details.device??'not_required']} · 平台数据：${labels[target.details.business??'not_required']}`:'',configSummary(target),ntpSummary(target),target.details?.observedAt?`实测时间：${formatDisplayDateTime(target.details.observedAt)}`:''].filter(Boolean).join('\n');}
+function homeStagesSummary(target:OperationHistoryTarget){const home=target.details?.home;return home?screenHomeStagesSummary(home):'';}
+function configAndHomeSummary(target:OperationHistoryTarget){return [configSummary(target),homeStagesSummary(target)].filter(Boolean).join(' · ');}
+function targetSummary(target:OperationHistoryTarget){return [target.resultSummary||target.errorSummary||'—',target.details?`设备：${labels[target.details.device??'not_required']} · 平台数据：${labels[target.details.business??'not_required']}`:'',configSummary(target),ntpSummary(target),homeStagesSummary(target),target.details?.observedAt?`实测时间：${formatDisplayDateTime(target.details.observedAt)}`:''].filter(Boolean).join('\n');}
 const releaseBusy=ref(false),notice=ref("");
 const releasePreview=ref<{project:string;operation:string;locks:ScreenOperationLock[]}>();
 async function prepareRelease(){
@@ -77,10 +81,10 @@ onBeforeUnmount(()=>{++request;++detailRequest;});
               <td :title="target.details?.targetName||target.resourceKey">{{target.details?.targetName||target.resourceKey}}</td>
               <td :title="target.details?.targetIp||target.details?.observedIp">{{target.details?.targetIp||target.details?.observedIp||'—'}}</td>
               <td><n-tag size="small" :bordered="false">{{labels[target.state]??target.state}}</n-tag></td>
-              <td v-if="detail.operation.operationType==='app_config'" :title="`${target.details?.configuration?.fields?.map(appConfigFieldLabel).join('、')||'未记录'}\n${changeSummary(target)}`">{{target.details?.configuration?.fields?.map(appConfigFieldLabel).join('、')||'未记录'}}<small>{{changeSummary(target)}}</small></td>
+              <td v-if="detail.operation.operationType==='app_config'" :title="`${changeFields(target)}\n${changeSummary(target)}`">{{changeFields(target)}}<small>{{changeSummary(target)}}</small></td>
               <td v-else-if="detail.operation.operationType==='ntp'" :title="`${ntpAddressSummary(target)}\n${ntpSummary(target)}`">{{ntpAddressSummary(target)}}<small>{{target.details?.ntp?.clockOffsetSeconds == null ? '未取得时间偏差' : `时间偏差 ${target.details.ntp.clockOffsetSeconds} 秒`}}</small></td>
               <td v-else :title="`${target.beforeVersion||'未记录'} → ${target.afterVersion||'未更新'}`">{{target.beforeVersion||'未记录'}} → {{target.afterVersion||'未更新'}}</td>
-              <td :title="targetSummary(target)">{{target.resultSummary||target.errorSummary||'—'}}<small v-if="target.details?.ntp">{{ntpSummary(target)}}</small><small v-else-if="target.details?.configuration">{{configSummary(target)}}</small><small v-else-if="target.details">设备：{{labels[target.details.device??'not_required']}} · 平台数据：{{labels[target.details.business??'not_required']}}</small></td>
+              <td :title="targetSummary(target)">{{target.resultSummary||target.errorSummary||'—'}}<small v-if="target.details?.configuration || target.details?.home">{{configAndHomeSummary(target)}}</small><small v-else-if="target.details?.ntp">{{ntpSummary(target)}}</small><small v-else-if="target.details">设备：{{labels[target.details.device??'not_required']}} · 平台数据：{{labels[target.details.business??'not_required']}}</small></td>
             </tr>
             <tr v-if="!detail.targets.length"><td :colspan="targetColumns.length" class="screen-muted">暂无逐台结果</td></tr>
           </compact-operation-table>

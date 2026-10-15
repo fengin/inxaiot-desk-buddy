@@ -7,6 +7,22 @@ vi.mock('@/shared/api/operationHistory', () => ({listBusinessOperationHistory:vi
 afterEach(()=>vi.clearAllMocks());
 const operation={id:'op-a',domainType:'smart_screen',operationType:'reboot',operationName:'重启屏',operatorName:'原操作人',instanceId:'电脑A',state:'running',targetCount:1,successCount:0,failureCount:0,cancelledCount:0,startedAt:'2026-10-03T00:00:00Z'};
 const locks=[{resourceType:'smart_screen',resourceKey:'777:900',ownerInstanceId:'电脑A',ownerUser:'原操作人',fencingToken:4}];
+it('配置共享历史同时展示配置与主屏策略回读，不误显示应用版本',async()=>{
+  const item={...operation,operationType:'app_config',operationName:'修改小新配置',state:'succeeded'};
+  const component='chat.xiaoxin.app/chat.xiaoxin.app.MainActivity';
+  vi.mocked(api.listBusinessOperationHistory).mockResolvedValue({items:[item],total:1,page:1,pageSize:20});
+  vi.mocked(api.getBusinessOperationHistoryDetail).mockResolvedValue({operation:item,targets:[{resourceType:'smart_screen',resourceKey:'777:900',state:'succeeded',resultSummary:'配置与主屏设置完成',details:{targetName:'办公室屏',configuration:{fields:['customDeviceName'],save:'saved',readback:'succeeded',restart:'not_required'},home:{component,targetEnabled:true,before:{protocolVersion:1,packageName:'chat.xiaoxin.app',deviceOwner:true,persistentPreferred:false,resolvedHome:component},after:{protocolVersion:1,packageName:'chat.xiaoxin.app',deviceOwner:true,persistentPreferred:true,resolvedHome:component},save:'applied',readback:'succeeded',activation:'verified',runtimeReadback:'succeeded',runtimeAfter:{homeTask:true,resumed:true,pid:12098,taskId:23,component}}}}]});
+  const wrapper=mount(ScreenSharedHistory,{props:{projectId:'项目A'},global:{stubs:{teleport:true}}});
+  try{await flushPromises();await wrapper.findAll('button').find(button=>button.text().includes('修改小新配置'))!.trigger('click');await flushPromises();expect(wrapper.text()).toContain('设备名、固定小新为主屏');expect(wrapper.text()).toContain('固定小新为主屏 · 已确认');expect(wrapper.text()).toContain('保存：已保存');expect(wrapper.text()).toContain('主屏保存：已提交 · 主屏回读：已确认');expect(wrapper.text()).toContain('激活主屏：已核实 · 运行核验：已确认');expect(wrapper.text()).not.toContain('应用版本');}finally{wrapper.unmount();}
+});
+it('仅解除主屏的共享记录准确区分无需保存配置、无需重启与主屏已核实',async()=>{
+  const item={...operation,operationType:'app_config',operationName:'修改小新配置',state:'succeeded'};
+  const component='chat.xiaoxin.app/chat.xiaoxin.app.MainActivity';
+  vi.mocked(api.listBusinessOperationHistory).mockResolvedValue({items:[item],total:1,page:1,pageSize:20});
+  vi.mocked(api.getBusinessOperationHistoryDetail).mockResolvedValue({operation:item,targets:[{resourceType:'smart_screen',resourceKey:'777:900',state:'succeeded',resultSummary:'主屏固定已解除',details:{targetName:'办公室屏',configuration:{fields:[],save:'not_required',readback:'not_required',restart:'not_required'},home:{component,targetEnabled:false,after:{protocolVersion:1,packageName:'chat.xiaoxin.app',deviceOwner:true,persistentPreferred:false,resolvedHome:component},save:'verified',readback:'succeeded'}}}]});
+  const wrapper=mount(ScreenSharedHistory,{props:{projectId:'项目A'},global:{stubs:{teleport:true}}});
+  try{await flushPromises();await wrapper.findAll('button').find(button=>button.text().includes('修改小新配置'))!.trigger('click');await flushPromises();expect(wrapper.text()).toContain('保存：无需执行 · 重启：无需重启 · 回读：无需执行');expect(wrapper.text()).toContain('主屏保存：已核实 · 主屏回读：已确认');expect(wrapper.text()).toContain('解除主屏固定 · 已确认');expect(wrapper.text()).not.toContain('保存：无需重启');expect(wrapper.text()).not.toContain('回读：无需重启');}finally{wrapper.unmount();}
+});
 it('NTP共享历史显示地址变更与保存、生效、授时的独立结果',async()=>{
   const item={...operation,operationType:'ntp',operationName:'设置NTP服务器',state:'failed'};
   vi.mocked(api.listBusinessOperationHistory).mockResolvedValue({items:[item],total:1,page:1,pageSize:20});

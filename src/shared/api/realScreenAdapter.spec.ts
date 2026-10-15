@@ -16,6 +16,17 @@ function snapshot() {
 
 describe("智能屏正式调用", () => {
   beforeEach(() => { invoke.mockReset(); });
+  it("主屏修改通过配置预检与原任务执行接口，缺省不改、显式解除保留布尔值", async () => {
+    const adapter = new RealScreenAdapter();
+    const input: ScreenOperationInput = { action: "app_config", targetIds: ["platform-1"], appVersion: "", abi: "universal", reinstall: false, concurrency: 1 };
+    const patches = { "platform-1": { set: {}, clear: [], homeEnabled: false } };
+    invoke.mockResolvedValueOnce({ id: "home-check", items: [{ screenId: "platform-1", name: "屏", ip: "192.0.2.1", state: "ready", reason: "管理权限已确认" }] });
+    await adapter.preflightAppConfig("project", input, patches);
+    expect(invoke).toHaveBeenLastCalledWith("screen_app_config_preflight", { localProjectId: "project", input, patches });
+    invoke.mockResolvedValueOnce("home-task");
+    await expect(adapter.execute("project", input)).resolves.toBe("home-task");
+    expect(invoke).toHaveBeenLastCalledWith("screen_execute", { localProjectId: "project", preflightId: "home-check", input });
+  });
   it("NTP先受控读取，再绑定逐屏预检快照执行", async () => {
     const adapter = new RealScreenAdapter();
     invoke.mockResolvedValueOnce([{ screenId: "platform-1", readAt: "2026-10-10T00:00:00Z", config: { server: "", autoTime: false, autoTimeZone: true, timeZone: "Asia/Shanghai" }, message: "已读取" }]);

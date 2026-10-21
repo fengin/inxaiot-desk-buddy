@@ -42,6 +42,7 @@ async fn configuration(
         "device_id",
         "client_id",
         "custom_device_name",
+        "auto_start_voice_engine",
         "auth_code",
         "config_password",
         "audio_config",

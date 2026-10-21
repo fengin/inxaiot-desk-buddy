@@ -26,7 +26,7 @@ function sampleConfiguration(): ScreenAppConfiguration {
   return { customDeviceName: "原名称", environments: { current: "pre", test: { ...env }, pre: { ...env }, prod: { ...env } } };
 }
 
-async function render(options: { count?: number; failFirst?: boolean; restoreDraft?: boolean; sameEnvironment?: boolean; draftSwitch?: boolean; homeValues?: (boolean | "unsupported" | "unknown")[]; homeActiveValues?: (boolean | undefined)[]; draftHomeMode?: "keep" | "on" | "off" } = {}) {
+async function render(options: { count?: number; failFirst?: boolean; restoreDraft?: boolean; sameEnvironment?: boolean; draftSwitch?: boolean; homeValues?: (boolean | "unsupported" | "unknown")[]; homeActiveValues?: (boolean | undefined)[]; draftHomeMode?: "keep" | "on" | "off"; voiceValues?: (boolean | "unsupported" | "missing" | "invalid")[]; draftVoiceMode?: "keep" | "on" | "off" } = {}) {
   const count = options.count ?? 4;
   const pinia = createPinia(), adapter = new FixtureScreenAdapter(localStorage, 20);
   const store = useSmartScreensStore(pinia);
@@ -48,7 +48,12 @@ async function render(options: { count?: number; failFirst?: boolean; restoreDra
     }
     const failed = options.failFirst && id === ids[0];
     const home = options.homeValues?.[ids.indexOf(id)];
-    return { screenId: id, readAt: "2026-10-03T10:00:00Z", config: failed ? null : config, capabilities: null, message: failed ? "请升级小新" : "已读取",
+    const voice = options.voiceValues?.[ids.indexOf(id)];
+    if (typeof voice === "boolean") config.autoStartVoiceEngine = voice;
+    else if (voice === "unsupported") config.autoStartVoiceEngine = true;
+    else if (voice === "invalid") config.autoStartVoiceEngine = "false" as unknown as boolean;
+    const capabilities = voice === undefined ? null : { appVersionName: "1.6.0", appVersionCode: 30, protocolVersion: 1, supportedFields: voice === "unsupported" ? [] : ["autoStartVoiceEngine"], ready: true };
+    return { screenId: id, readAt: "2026-10-03T10:00:00Z", config: failed ? null : config, capabilities, message: failed ? "请升级小新" : "已读取",
       ...(home === undefined ? {} : { home: typeof home === "boolean" ? { supported: true, enabled: home, active: options.homeActiveValues ? options.homeActiveValues[ids.indexOf(id)] : home } : { supported: home === "unknown", message: home === "unsupported" ? "当前小新版本不支持主屏设置" : "未读取到持久主屏规则" } }) };
   }));
   const preflight = vi.fn(async (_project: string, input: ScreenOperationInput, patches: Record<string, ScreenAppConfigPatch>) => input.targetIds.map(id => ({
@@ -63,6 +68,7 @@ async function render(options: { count?: number; failFirst?: boolean; restoreDra
       loadAppConfigDraft: vi.fn(async () => ({
         environment: options.draftSwitch ? "test" : "pre", switchEnvironment: Boolean(options.draftSwitch), readyMode: "keep",
         homeMode: options.draftHomeMode,
+        voiceMode: options.draftVoiceMode,
         edits: { otaUrl: { mode: "keep", value: "" }, wsUrl: { mode: "set", value: "wss://draft.example.org" }, h5Url: { mode: "keep", value: "" } },
         names: Object.fromEntries(ids.map(id => [id, { mode: "keep", value: "" }])),
         targetIds: ids, includedIds: ids, rows,
@@ -107,6 +113,141 @@ async function render(options: { count?: number; failFirst?: boolean; restoreDra
 }
 
 describe("小新配置页面", () => {
+  it.each([true, false])("语音启动读取实际值%s后保持原设置，重新读取不产生修改", async enabled => {
+    const view = await render({ count: 1, voiceValues: [enabled] });
+    try {
+      await view.click("读取 1 台配置");
+      const control = view.wrapper.findAllComponents(NCheckbox).find(item => item.attributes("aria-label") === "语音引擎随应用启动")!;
+      expect(control.props("checked")).toBe(enabled);
+      expect(control.props("disabled")).toBe(false);
+      expect(control.props("indeterminate")).toBe(false);
+      await view.click("重新读取配置");
+      expect(view.wrapper.text()).toContain("本次修改 0 台 · 预计重启 0 台");
+      await view.input("WebSocket(可选)", "wss://other.example.org");
+      await view.click("检查修改内容");
+      expect(view.preflight.mock.calls[0]![2][view.ids[0]!]!.set).not.toHaveProperty("autoStartVoiceEngine");
+    } finally { view.dispose(); }
+  });
+
+  it.each([true, false])("语音启动显式修改为%s走原预检提交，顶层字段变化只计一次重启", async enabled => {
+    const view = await render({ count: 1, voiceValues: [!enabled] });
+    try {
+      await view.click("读取 1 台配置");
+      await view.checkbox("语音引擎随应用启动", enabled);
+      expect(view.wrapper.get('[data-testid="screen-config-voice"]').classes()).toContain("is-edited");
+      expect(view.wrapper.text()).toContain("本次修改 1 台 · 预计重启 1 台");
+      await view.click("检查修改内容");
+      expect(view.preflight.mock.calls[0]![2]).toEqual({ [view.ids[0]!]: { set: { autoStartVoiceEngine: enabled }, clear: [] } });
+      await view.clickLabel("查看 测试屏1 配置详情");
+      expect(view.wrapper.text()).toContain("语音引擎随应用启动");
+      expect(view.wrapper.text()).toContain("保存成功后重启小新一次");
+      await view.click("确认修改 1 台");
+      expect(view.execute).toHaveBeenCalledOnce();
+    } finally { view.dispose(); }
+  });
+
+  it("语音启动混合值三态展示，统一只提交不同屏，撤销与还原不自动修改少数屏", async () => {
+    const view = await render({ count: 3, voiceValues: [true, true, false] });
+    try {
+      await view.click("读取 3 台配置");
+      const control = view.wrapper.findAllComponents(NCheckbox).find(item => item.attributes("aria-label") === "语音引擎随应用启动")!;
+      expect(control.props("indeterminate")).toBe(true);
+      expect(view.wrapper.text()).toContain("本次修改 0 台");
+      await view.checkbox("语音引擎随应用启动", true);
+      await view.click("检查修改内容");
+      expect(view.preflight.mock.calls[0]![1].targetIds).toEqual([view.ids[2]]);
+      await view.clickLabel("撤销语音启动修改");
+      expect(view.wrapper.text()).toContain("本次修改 0 台");
+      expect(control.props("indeterminate")).toBe(true);
+      expect(view.button("检查修改内容").attributes("disabled")).toBeDefined();
+      await view.checkbox("语音引擎随应用启动", false);
+      await view.click("检查修改内容");
+      expect(view.preflight.mock.calls[1]![1].targetIds).toEqual(view.ids.slice(0, 2));
+    } finally { view.dispose(); }
+  });
+
+  it.each(["unsupported", "missing", "invalid"] as const)("语音启动%s只禁该项且不当成关闭，其他配置仍可修改", async state => {
+    const view = await render({ count: 2, voiceValues: [false, state] });
+    try {
+      await view.click("读取 2 台配置");
+      const control = view.wrapper.findAllComponents(NCheckbox).find(item => item.attributes("aria-label") === "语音引擎随应用启动")!;
+      expect(control.props("disabled")).toBe(true);
+      expect(control.props("indeterminate")).toBe(true);
+      expect(view.wrapper.get('[data-testid="screen-config-voice"]').attributes("title")).toContain("其他配置可继续修改");
+      await view.checkbox("语音引擎随应用启动", true);
+      await view.input("WebSocket(可选)", "wss://other.example.org");
+      await view.click("检查修改内容");
+      for (const patch of Object.values(view.preflight.mock.calls[0]![2])) expect(patch.set).not.toHaveProperty("autoStartVoiceEngine");
+      await view.clickLabel("查看 测试屏2 配置详情");
+      expect(view.wrapper.text()).toContain("语音引擎随应用启动：未确认，当前不可修改");
+    } finally { view.dispose(); }
+  });
+
+  it("取消不支持屏后可以编辑语音，选择变化使已有检查失效", async () => {
+    const view = await render({ count: 2, voiceValues: [false, "unsupported"] });
+    try {
+      await view.click("读取 2 台配置");
+      await view.checkbox("选择 测试屏2", false);
+      await view.checkbox("语音引擎随应用启动", true);
+      await view.click("检查修改内容");
+      expect(view.preflight.mock.calls[0]![1].targetIds).toEqual([view.ids[0]]);
+      await view.checkbox("选择 测试屏2", true);
+      expect(view.wrapper.findAll("button").some(item => item.text().includes("确认修改"))).toBe(false);
+      expect(view.wrapper.text()).toContain("本次修改 0 台");
+    } finally { view.dispose(); }
+  });
+
+  it("语音明确草稿需重读后提交，切换环境保留全局选择且和环境修改共用一次重启", async () => {
+    const view = await render({ count: 1, voiceValues: [true], restoreDraft: true, draftVoiceMode: "off" });
+    try {
+      await flushPromises(); await view.click("继续本机未提交修改");
+      expect(view.button("检查修改内容").attributes("disabled")).toBeDefined();
+      await view.click("重新读取配置");
+      await view.select("选择环境", "test");
+      await view.click("检查修改内容");
+      expect(view.preflight.mock.calls[0]![2][view.ids[0]!]!.set).toEqual({ autoStartVoiceEngine: false, "environments.current": "test" });
+      expect(view.wrapper.text()).toContain("本次修改 1 台 · 预计重启 1 台");
+      await vi.waitFor(() => expect(view.saveDraft).toHaveBeenCalled());
+      expect(view.saveDraft.mock.calls.at(-1)).toEqual([view.store.projectId, expect.objectContaining({ voiceMode: "off" })]);
+    } finally { view.dispose(); }
+  });
+
+  it("旧草稿没有语音模式仍保留实际值；重读失去能力后不重放已编辑开关", async () => {
+    const options = { count: 1, voiceValues: [true as boolean | "missing"], restoreDraft: true };
+    const view = await render(options);
+    try {
+      await flushPromises(); await view.click("继续本机未提交修改"); await view.click("重新读取配置");
+      await view.click("检查修改内容");
+      expect(view.preflight.mock.calls[0]![2][view.ids[0]!]!.set).not.toHaveProperty("autoStartVoiceEngine");
+      await view.checkbox("语音引擎随应用启动", false);
+      options.voiceValues[0] = "missing";
+      await view.click("重新读取配置");
+      const control = view.wrapper.findAllComponents(NCheckbox).find(item => item.attributes("aria-label") === "语音引擎随应用启动")!;
+      expect(control.props("disabled")).toBe(true);
+      expect(control.props("indeterminate")).toBe(true);
+      await view.click("检查修改内容");
+      expect(view.preflight.mock.calls[1]![2][view.ids[0]!]!.set).not.toHaveProperty("autoStartVoiceEngine");
+    } finally { view.dispose(); }
+  });
+
+  it("重新读取后语音已达到目标时不重复提交，切项目后清除旧语音修改", async () => {
+    const options = { count: 1, voiceValues: [false] };
+    const view = await render(options);
+    try {
+      await view.click("读取 1 台配置"); await view.checkbox("语音引擎随应用启动", true);
+      options.voiceValues[0] = true;
+      await view.click("重新读取配置");
+      expect(view.wrapper.text()).toContain("本次修改 0 台 · 预计重启 0 台");
+      await view.checkbox("语音引擎随应用启动", false);
+      await view.store.bindProject("config-ui-next"); await flushPromises();
+      expect(view.step.value).toBe(0);
+      view.store.selectedIds = [view.store.snapshot.screens[0]!.id];
+      await flushPromises();
+      await view.click("读取 1 台配置");
+      expect(view.wrapper.text()).toContain("本次修改 0 台");
+    } finally { view.dispose(); }
+  });
+
   it.each([false, undefined])("已固定但运行状态%s时可显式激活，读取本身不产生修改", async active => {
     const view = await render({ count: 1, homeValues: [true], homeActiveValues: [active] });
     try {
@@ -144,7 +285,8 @@ describe("小新配置页面", () => {
       expect(control.props("indeterminate")).toBe(false);
       const group = view.wrapper.get(".screen-config-checks");
       expect(group.text()).toContain("检查H5地址"); expect(group.text()).toContain("固定小新为主屏");
-      expect(group.element.parentElement!.nextElementSibling!.textContent).toContain("重新读取配置");
+      expect(group.element.nextElementSibling!.textContent).toContain("重新读取配置");
+      expect(group.text()).toContain("语音引擎随应用启动");
       expect(screenActions.some(action => action.label === "设置主屏应用")).toBe(false);
     } finally { finishRead?.([]); await flushPromises(); view.dispose(); }
   });

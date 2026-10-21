@@ -19,7 +19,7 @@ use std::{collections::BTreeMap, time::Duration};
 // 本测试只覆盖明确授权的三台屏。错误时间准备及人工断电由独立步骤完成，
 // 测试失败或再次运行时不会自动改时间、断网或追加其他设备。
 #[tokio::test]
-#[ignore = "需要明确指定142时间源和set/clear操作，会通过正式任务设置并按需软重启86、87、61三台屏"]
+#[ignore = "需要明确指定142时间源和set/clear操作，只对当前测试说明中的屏执行正式NTP任务及必要软重启"]
 async fn configure_and_verify_authorized_screens() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("INX_SCREEN_TEST_NTP_SERVER").as_deref() != Ok("192.168.3.142") {
         return Err("必须明确设置 INX_SCREEN_TEST_NTP_SERVER=192.168.3.142".into());
@@ -30,7 +30,8 @@ async fn configure_and_verify_authorized_screens() -> Result<(), Box<dyn std::er
         "clear" => "",
         _ => return Err("操作必须明确为 set 或 clear".into()),
     };
-    let authorized = [("192.168.3.86", "4"), ("192.168.3.87", "4"), ("192.168.3.61", "10")];
+    let live = support::live_screens()?;
+    let authorized = live.iter().map(|screen| (screen.ip.as_str(), screen.size.as_str())).collect::<Vec<_>>();
     let requested = std::env::var("INX_SCREEN_TEST_NTP_TARGETS").ok();
     let expected = match requested {
         Some(requested) => {
@@ -38,13 +39,12 @@ async fn configure_and_verify_authorized_screens() -> Result<(), Box<dyn std::er
             if ips.is_empty() || ips.iter().collect::<std::collections::BTreeSet<_>>().len() != ips.len()
                 || ips.iter().any(|ip| !authorized.iter().any(|(known, _)| known == ip))
             {
-                return Err("目标子集只能明确选择61、86、87，不能包含重复或其他地址".into());
+                return Err("目标子集只能选择当前测试说明中的屏，不能包含重复或其他地址".into());
             }
-            authorized.into_iter().filter(|(ip, _)| ips.contains(ip)).collect::<Vec<_>>()
+            authorized.iter().copied().filter(|(ip, _)| ips.contains(ip)).collect::<Vec<_>>()
         }
         None => authorized.to_vec(),
     };
-    let live = support::live_screens()?;
     let directory = support::evidence_dir(&format!("ntp-{mode}"))?;
     let source_case = std::env::var_os("INX_SCREEN_TEST_NTP_SOURCE_CASE").map(std::path::PathBuf::from);
     let source = if let Some(source) = source_case {

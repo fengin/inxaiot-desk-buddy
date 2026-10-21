@@ -38,7 +38,6 @@
 .screen-registration-selected-row strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .screen-registration-selected-row small { font-size: var(--inx-font-size-table); color: var(--inx-color-text-secondary); }
 .screen-registration-selected-row > .n-button { flex: none; }
-.screen-registration-note { margin: 0; color: var(--inx-color-text-secondary); line-height: 1.6; }
 .screen-registration-stage { height: 100%; min-height: 0; overflow: hidden; box-sizing: border-box; }
 @media (max-width: 900px) {
   .screen-registration-preview-layout { grid-template-columns: minmax(320px, 44fr) minmax(0, 56fr); gap: 8px; }

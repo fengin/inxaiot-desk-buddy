@@ -38,7 +38,7 @@ async fn configuration_draft_is_local_project_scoped_and_never_locks_asset() {
         )
         .await
         .unwrap();
-    let draft = json!({"environment":"pre","switchEnvironment":false,"readyMode":"keep","homeMode":"off","edits":{"h5Url":{"mode":"set","value":"https://example.org"}},"names":{},"targetIds":[screen],"includedIds":[screen],"rows":[]});
+    let draft = json!({"environment":"pre","switchEnvironment":false,"readyMode":"keep","homeMode":"off","voiceMode":"off","edits":{"h5Url":{"mode":"set","value":"https://example.org"}},"names":{},"targetIds":[screen],"includedIds":[screen],"rows":[]});
     app_config::save_draft(&state, &first, Some(draft))
         .await
         .unwrap();
@@ -49,7 +49,17 @@ async fn configuration_draft_is_local_project_scoped_and_never_locks_asset() {
             .is_some()
     );
     assert_eq!(app_config::load_draft(&state, &first).await.unwrap().unwrap()["homeMode"], "off");
+    assert_eq!(app_config::load_draft(&state, &first).await.unwrap().unwrap()["voiceMode"], "off");
     assert!(app_config::save_draft(&state, &first, Some(json!({"targetIds":[],"rows":[],"homeMode":"invalid"}))).await.is_err());
+    for invalid in [json!(null), json!(false), json!("false"), json!("invalid")] {
+        assert!(app_config::save_draft(&state, &first, Some(json!({"targetIds":[],"rows":[],"voiceMode":invalid}))).await.is_err());
+    }
+    for mode in ["keep", "on", "off"] {
+        app_config::save_draft(&state, &first, Some(json!({"targetIds":[screen],"rows":[],"voiceMode":mode}))).await.unwrap();
+        assert_eq!(app_config::load_draft(&state, &first).await.unwrap().unwrap()["voiceMode"], mode);
+    }
+    app_config::save_draft(&state, &first, Some(json!({"targetIds":[screen],"rows":[]}))).await.unwrap();
+    assert!(app_config::load_draft(&state, &first).await.unwrap().unwrap().get("voiceMode").is_none());
     assert!(
         app_config::load_draft(&state, &second)
             .await

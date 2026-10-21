@@ -1,14 +1,21 @@
 import { normalizeScreenMac } from "./screen";
 import type { ScreenAction, SmartScreen } from "./screen";
-import { screenPlatformDraftValues } from "./screenRegistration";
+import { screenPlatformDraftValues, screenPlatformFieldEqual } from "./screenRegistration";
 import type { ScreenPlatformDraft } from "./screenRegistration";
 
 export const isScreenReadOnlyAction = (action: ScreenAction) => ["ping", "inspect", "mac", "diagnostics"].includes(action);
 
+/** 仅提示确认地址上的版本观测差异；同步时仍须重新读取，不能直接提交此缓存。 */
+export function screenNeedsVersionSync(screen: SmartScreen): boolean {
+  const observed = screen.observedAppVersion?.trim();
+  return screen.source === "platform" && Boolean(screen.ip.trim()) && Boolean(observed) && screen.appInstalled !== false
+    && screen.versionCheckedIp === screen.ip && observed !== (screen.appVersion?.trim() || "");
+}
+
 export function screenCriticalDraftFields(screen: SmartScreen, draft?: ScreenPlatformDraft): string[] {
   if (screen.source !== "platform" || !draft) return [];
   const next = screenPlatformDraftValues(screen, draft);
-  return [next.ip !== screen.ip ? "IP" : "", normalizeScreenMac(next.mac) !== normalizeScreenMac(screen.mac) ? "MAC" : "", next.size !== screen.size ? "尺寸" : ""].filter(Boolean);
+  return [!screenPlatformFieldEqual("ip", next.ip, screen.ip) ? "IP" : "", !screenPlatformFieldEqual("mac", next.mac, screen.mac) ? "MAC" : "", !screenPlatformFieldEqual("size", next.size, screen.size) ? "尺寸" : ""].filter(Boolean);
 }
 
 export function screenCriticalDraftWarning(screen: SmartScreen, draft?: ScreenPlatformDraft): string {

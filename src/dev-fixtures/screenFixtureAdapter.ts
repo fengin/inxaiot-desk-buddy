@@ -117,10 +117,12 @@ export class FixtureScreenAdapter implements ScreenAdapter {
     return { ...copy(state), platformAvailable: available, spacesAvailable: this.directoryAvailable(projectId) };
   }
 
-  async savePlatformDraft(projectId: string, screenId: string, values: ScreenPlatformFields, expectedRevision?: number) {
+  async savePlatformDraft(projectId: string, screenId: string, values: ScreenPlatformFields, expectedRevision?: number, expectedDraftRevision?: number) {
     const state = this.state(projectId), screen = this.find(projectId, screenId);
     if (screen.source !== "platform") throw new Error("平台待提交资料只适用于已注册屏");
     if (expectedRevision !== undefined && expectedRevision !== screen.revision) throw new Error("平台资料已变化，请重新打开编辑并核对");
+    const existing = state.platformDrafts?.[screenId];
+    if (expectedDraftRevision !== undefined && expectedDraftRevision !== (existing?.revision ?? 0)) throw new Error("本机待提交资料已变化，请重新打开编辑并核对");
     if ([screen.id, ...screen.aliases].some((id) => this.busy(state, id))) throw new Error("存在活动任务或待核实结果，请先处理");
     const clean = screenPlatformFields(values), current = screenPlatformFields(screen);
     const errors = validateLocalScreen(clean);
@@ -128,10 +130,9 @@ export class FixtureScreenAdapter implements ScreenAdapter {
     if (clean.spaceId && !this.directoryAvailable(projectId) && clean.spaceId !== screen.spaceId && clean.spaceId !== state.platformDrafts?.[screenId]?.values.spaceId) throw new Error("空间目录暂不可用，不能分配新的空间");
     if (clean.spaceId && this.directoryAvailable(projectId) && !getProjectSpacePath(state.spaces, clean.spaceId)) throw new Error("空间关联无效，请从空间树重新选择或明确清空");
     const next = { ...copy(state), tasks: state.tasks };
-    const existing = next.platformDrafts?.[screenId];
     next.platformDrafts ??= {};
-    if (JSON.stringify(clean) === JSON.stringify(current)) delete next.platformDrafts[screenId];
-    else next.platformDrafts[screenId] = { screenId, baseRevision: expectedRevision !== undefined ? screen.revision : existing?.baseRevision ?? screen.revision, base: expectedRevision !== undefined ? current : existing?.base ?? current, values: clean, updatedAt: now() };
+    // 与正式仓库一致保留同值草稿及递增版本，不能丢掉显式改回平台值的并发意图。
+    next.platformDrafts[screenId] = { screenId, revision: (existing?.revision ?? 0) + 1, baseRevision: screen.revision, base: current, values: clean, updatedAt: now() };
     this.persist(projectId, next); this.snapshots.set(projectId, next); this.notify(projectId);
   }
 

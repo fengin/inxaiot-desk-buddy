@@ -37,7 +37,7 @@ watch(() => props.preview.id, () => { focusedId.value = props.preview.items[0]?.
 function outcome(item: ScreenRegistrationPreviewItem) {
   if (item.state === "blocked") return "需要核对";
   if (item.state === "skip") return "无需更新";
-  return item.mode === "create" ? "新增注册" : "更新资料";
+  return item.mode === "create" ? "待注册" : "待更新";
 }
 function toggle(item: ScreenRegistrationPreviewItem, checked: boolean) {
   if (props.disabled || item.state !== "ready") return;
@@ -72,14 +72,17 @@ function confirmSpace(checked: boolean) {
 <template>
   <section class="screen-registration-preview" aria-label="平台注册与更新预览">
     <div class="screen-registration-summary">
-      <span>新增注册 <b class="metric-info">{{ summary.create }}</b></span>
-      <span>更新资料 <b class="metric-operation">{{ summary.update }}</b></span>
+      <span>待新增注册 <b class="metric-info">{{ summary.create }}</b></span>
+      <span>待更新资料 <b class="metric-operation">{{ summary.update }}</b></span>
       <span>无需更新 <b>{{ summary.skip }}</b></span>
       <span>需要核对 <b class="screen-warning">{{ summary.blocked }}</b></span>
-      <span class="screen-spacer"></span><span>本次提交 <b class="metric-operation">{{ included.length }}</b> 台</span>
+      <span class="screen-spacer"></span><span>待提交 <b class="metric-operation">{{ included.length }}</b> 台</span>
     </div>
-    <p v-if="preview.mode !== 'real'" class="screen-registration-boundary" data-testid="screen-registration-prototype">当前为交互原型：MAC 采集、平台注册、更新和回读均为模拟，不连接设备或写入真实平台。</p>
-    <p v-else class="screen-registration-boundary">请核对逐台差异，确认后更新平台资料。</p>
+    <p class="screen-registration-boundary" data-testid="screen-registration-not-submitted">
+      检查完成，尚未提交注册或更新。{{ summary.create + summary.update }} 台可提交，{{ summary.blocked }} 台需要核对，{{ summary.skip }} 台无需更新；尚未写入平台。
+      <span v-if="preview.mode !== 'real'" data-testid="screen-registration-prototype">当前为交互原型：MAC 采集、平台注册、更新和回读均为模拟，不连接设备或写入真实平台。</span>
+      <template v-else>请核对逐台差异，确认后提交。</template>
+    </p>
     <div class="screen-registration-preview-layout">
       <aside class="screen-registration-targets" aria-label="逐屏检查结果">
         <compact-operation-table :columns="columns" label="平台注册逐屏检查" :reset-key="preview.id">
@@ -87,14 +90,14 @@ function confirmSpace(checked: boolean) {
             <td @click.stop><n-checkbox :checked="included.includes(item.screenId)" :disabled="disabled || item.state !== 'ready'" :aria-label="`提交 ${item.after.name}`" @update:checked="toggle(item, $event)" /></td>
             <td><button type="button" :aria-pressed="focused?.screenId === item.screenId" :title="item.after.name" @click="focusedId = item.screenId">{{ item.after.name || '未命名屏' }}</button></td>
             <td :title="item.after.ip" class="screen-network">{{ item.after.ip }}</td>
-            <td :title="item.reason" :class="item.state === 'blocked' ? 'screen-warning' : item.state === 'skip' ? 'screen-muted' : 'screen-success'">{{ outcome(item) }}</td>
+            <td :title="item.reason" :class="item.state === 'blocked' ? 'screen-warning' : item.state === 'skip' ? 'screen-muted' : ''">{{ outcome(item) }}</td>
           </tr>
         </compact-operation-table>
       </aside>
       <div v-if="focused" class="screen-registration-detail" :data-screen-id="focused.screenId">
         <div class="screen-registration-detail-heading">
           <strong :title="focused.after.name">{{ focused.after.name || '未命名屏' }}</strong>
-          <n-tag size="small" :bordered="false" :type="focused.state === 'blocked' ? 'warning' : focused.state === 'skip' ? 'default' : focused.mode === 'create' ? 'info' : 'success'">{{ outcome(focused) }}</n-tag>
+          <n-tag size="small" :bordered="false" :type="focused.state === 'blocked' ? 'warning' : focused.state === 'skip' ? 'default' : 'info'">{{ outcome(focused) }}</n-tag>
           <span class="screen-spacer"></span>
           <n-button size="tiny" text :disabled="disabled" @click="emit('edit', focused.screenId)"><template #icon><Pencil :size="13" /></template>编辑资料</n-button>
         </div>

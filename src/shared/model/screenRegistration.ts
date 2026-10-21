@@ -79,7 +79,7 @@ export const screenPlatformFieldLabels: Record<ScreenPlatformField, string> = {
 };
 const fields = Object.keys(screenPlatformFieldLabels) as ScreenPlatformField[];
 export const validRegistrationMac = (value: string) => {
-  const mac = normalizeScreenMac(value);
+  const mac = normalizeScreenMac(value.trim());
   return /^[0-9A-F]{12}$/.test(mac) && !/^(0{12}|F{12})$/.test(mac) && (Number.parseInt(mac.slice(0, 2), 16) & 1) === 0;
 };
 
@@ -88,11 +88,22 @@ export function screenPlatformFields(screen: Pick<SmartScreen, "name" | "ip" | "
   return { name: screen.name.trim(), ip: screen.ip.trim(), mac: screen.mac.trim(), size: screen.size, spaceId: screen.spaceId || null, location: screen.location.trim() };
 }
 
+/** MAC 按身份比较；其余字段沿用资料保存的首尾空白与空空间规则。 */
+export function screenPlatformFieldEqual(field: ScreenPlatformField, left: string | null | undefined, right: string | null | undefined): boolean {
+  const a = (left ?? "").trim(), b = (right ?? "").trim();
+  return field === "mac" ? normalizeScreenMac(a) === normalizeScreenMac(b) : a === b;
+}
+
+export function screenPlatformDraftFieldEdited(draft: ScreenPlatformDraft | undefined, field: ScreenPlatformField): boolean {
+  return Boolean(draft && !screenPlatformFieldEqual(field, draft.values[field], draft.base[field]));
+}
+
 /** 未编辑字段采用最新平台值，避免草稿把其他人员的修改整体覆盖。 */
 export function screenPlatformDraftValues(screen: SmartScreen, draft?: ScreenPlatformDraft): ScreenPlatformFields {
   const current = screenPlatformFields(screen);
   if (!draft) return current;
-  return Object.fromEntries(fields.map((key) => [key, draft.values[key] !== draft.base[key] ? draft.values[key] : current[key]])) as unknown as ScreenPlatformFields;
+  const proposed = screenPlatformFields(draft.values);
+  return Object.fromEntries(fields.map((key) => [key, screenPlatformDraftFieldEdited(draft, key) ? proposed[key] : current[key]])) as unknown as ScreenPlatformFields;
 }
 
 export function screenRegistrationFingerprint(screen: SmartScreen, draft?: ScreenPlatformDraft): string {
@@ -102,7 +113,7 @@ export function screenRegistrationFingerprint(screen: SmartScreen, draft?: Scree
 export function screenRegistrationDiffs(before: ScreenPlatformFields | null, after: ScreenPlatformFields, snapshot: ScreenSnapshot): ScreenRegistrationDiff[] {
   const display = (key: ScreenPlatformField, value: string | null | undefined) => key === "spaceId" ? projectSpacePath(snapshot.spaces, value) || value || "未关联"
     : key === "size" ? value === "unknown" ? "待确认" : value ? `${value} 寸` : "—" : value || "—";
-  return fields.filter((key) => !before || before[key] !== after[key]).map((key) => ({
+  return fields.filter((key) => !before || !screenPlatformFieldEqual(key, before[key], after[key])).map((key) => ({
     field: key, label: screenPlatformFieldLabels[key], before: display(key, before?.[key]), after: display(key, after[key])
   }));
 }
@@ -110,6 +121,7 @@ export function screenRegistrationDiffs(before: ScreenPlatformFields | null, aft
 export interface RegistrationPreviewContext {
   platformAvailable: boolean;
   spacesAvailable: boolean;
+  /** 只返回本次目标 IP 的可信现场采集值；未连通或不能确定唯一 MAC 时返回 null，旧观察另走历史确认。 */
   collectMac(screen: SmartScreen, target: ScreenPlatformFields): string | null;
 }
 
@@ -133,7 +145,7 @@ export function buildScreenRegistrationItems(snapshot: ScreenSnapshot, ids: stri
     if (!context.spacesAvailable) errors.push("空间目录不可用，请恢复后重新检查");
     if (snapshot.tasks.some((task) => screenTaskActive(task) && task.targets.some((target) => [screen.id, ...screen.aliases].includes(target.screenId)))) errors.push("存在活动任务或待核实结果，请先处理");
     if (before && draft) {
-      const conflicts = fields.filter((key) => draft.values[key] !== draft.base[key] && before[key] !== draft.base[key] && before[key] !== draft.values[key]);
+      const conflicts = fields.filter((key) => screenPlatformDraftFieldEdited(draft, key) && !screenPlatformFieldEqual(key, before[key], draft.base[key]) && !screenPlatformFieldEqual(key, before[key], draft.values[key]));
       if (conflicts.length) errors.push(`平台的${conflicts.map((key) => screenPlatformFieldLabels[key]).join("、")}已被其他操作修改，请重新编辑待提交资料`);
     }
     errors.push(...validateLocalScreen(after));
@@ -142,11 +154,11 @@ export function buildScreenRegistrationItems(snapshot: ScreenSnapshot, ids: stri
     if (!after.spaceId || !getProjectSpacePath(snapshot.spaces, after.spaceId)) errors.push("请选择当前项目的有效空间，待定空间不能提交平台");
     if (after.mac && !validRegistrationMac(after.mac)) errors.push("MAC 无效，不能使用全零、广播、组播或不完整地址");
 
-    const changedIdentity = !before || before.ip !== after.ip || normalizeScreenMac(before.mac) !== normalizeScreenMac(after.mac);
+    const changedIdentity = !before || !before.mac || !screenPlatformFieldEqual("ip", before.ip, after.ip) || !screenPlatformFieldEqual("mac", before.mac, after.mac);
     if (changedIdentity && context.platformAvailable) {
       const observed = context.collectMac(screen, after);
       const expected = validRegistrationMac(after.mac) ? after.mac : "";
-      const known = screen.source === "platform" && validRegistrationMac(screen.mac) ? screen.mac : screen.observedMac || screen.mac;
+      const known = screen.source === "platform" && validRegistrationMac(screen.mac) ? screen.mac : screen.ip === after.ip ? screen.observedMac || screen.mac : "";
       if (observed && validRegistrationMac(observed)) {
         if (before && validRegistrationMac(before.mac) && normalizeScreenMac(before.mac) !== normalizeScreenMac(observed)) {
           item.macSource = "conflict"; item.macMessage = `平台已有 MAC ${before.mac} 与采集 MAC ${observed} 不一致`;

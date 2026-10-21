@@ -5,4 +5,4 @@ import { registerTaskPresentation } from "@/shared/model/taskPresentation";
 registerTaskPresentation("aio", aioTaskPresentation);
 registerTaskPresentation("smart_screen", screenTaskPresentation);
 
-export { taskStageLabel, canRetryTaskResult } from "@/shared/model/taskPresentation";
+export { taskStageLabel, taskDisplayLabels, canRetryTaskResult } from "@/shared/model/taskPresentation";

@@ -7,6 +7,7 @@ import { effectiveScreenMac, screenActionLabel, screenActions, screenStateLabel 
 import type { ScreenAction, SmartScreen } from "@/shared/model/screen";
 import { formatDisplayDateTime } from "@/shared/format/dateTime";
 import { screenSpaceLabel } from "@/shared/model/screenSpace";
+import { screenNeedsVersionSync } from "@/shared/model/screenMaintenance";
 
 const props = defineProps<{ screen?: SmartScreen }>();
 const emit = defineEmits<{ close: []; edit: [screen: SmartScreen]; operate: [action: ScreenAction]; versions: [] }>();
@@ -18,6 +19,8 @@ const history = computed(() => store.snapshot.tasks.filter((task) => task.target
 const adbLabel = computed(() => props.screen?.adbStatus === 'unauthorized' ? 'ADB 未授权' : props.screen?.adbAvailable == null ? '未检查' : props.screen.adbAvailable ? 'ADB 可用' : 'ADB 无法连接');
 const switchLabel = (value?: boolean | null) => value == null ? '未检查' : value ? '开启' : '关闭';
 const checkedTime = (value?: string | null) => value ? formatDisplayDateTime(value) : '未检查';
+const versionPending = computed(() => props.screen ? screenNeedsVersionSync(props.screen) : false);
+const versionTitle = computed(() => props.screen ? `平台版本：${props.screen.appVersion || "未记录"}\n本机读取版本：${props.screen.observedAppVersion}\n读取时间：${formatDisplayDateTime(props.screen.versionCheckedAt, "未记录")}\n读取地址：${props.screen.versionCheckedIp}（当前已确认 IP）\n请使用“核对版本并同步平台”重新读取后确认同步。` : "");
 function remove() {
   const screen = props.screen;
   if (!screen) return;
@@ -46,7 +49,7 @@ function remove() {
       <h3 class="device-detail-section-title">设备与小新应用 <small v-if="store.snapshot.mode !== 'real'">模拟观测</small></h3>
       <dl class="device-detail-facts">
         <div><dt>系统 / 架构</dt><dd :title="`${screen.android} · ${screen.abi}`">{{ screen.android }} · {{ screen.abi }}</dd></div><div><dt>{{ screen.source === 'platform' ? '平台小新版本' : '本机小新版本' }}</dt><dd :title="screen.appVersion || '未记录'">{{ screen.appVersion || '未记录' }}</dd></div>
-        <div v-if="screen.observedAppVersion && screen.observedAppVersion !== screen.appVersion"><dt>本机观测版本</dt><dd :title="`${screen.observedAppVersion}（未覆盖平台）`">{{ screen.observedAppVersion }}（未覆盖平台）</dd></div>
+        <div v-if="screen.observedAppVersion && screen.observedAppVersion !== screen.appVersion"><dt>本机观测版本</dt><dd :class="{ 'screen-warning': versionPending }" :title="versionPending ? versionTitle : `读取地址：${screen.versionCheckedIp || '未记录'}\n读取时间：${checkedTime(screen.versionCheckedAt)}\n请重新读取当前屏的应用版本。`">{{ screen.observedAppVersion }}（{{ versionPending ? '版本待同步' : '历史观测，需重新核对' }}）</dd></div>
         <div><dt>管理连接</dt><dd :class="screen.adbAvailable == null ? 'screen-muted' : screen.adbAvailable ? 'screen-success' : 'screen-warning'">{{ adbLabel }}</dd></div><div><dt>可用空间</dt><dd>{{ screen.freeSpaceMb == null ? '未检查' : `${screen.freeSpaceMb} MB` }}</dd></div>
         <div><dt>小新安装状态</dt><dd>{{ screen.appInstalled == null ? '未检查' : screen.appInstalled ? '已安装' : '未安装' }}</dd></div><div><dt>小新运行状态</dt><dd>{{ screen.appInstalled === false ? '未安装' : screen.appRunning == null ? '未检查' : screen.appRunning ? '运行中' : '未运行' }}</dd></div>
         <div><dt>时间偏差</dt><dd>{{ screen.clockOffsetSeconds == null ? '未检查' : `${screen.clockOffsetSeconds} 秒 · 保留设备时区` }}</dd></div><div><dt>5555持久配置</dt><dd>{{ screen.size !== '10' ? '不适用' : screen.persistentAdb == null ? '未检查' : screen.persistentAdb ? '已读到5555配置' : '未读到5555配置' }}</dd></div>
@@ -66,7 +69,7 @@ function remove() {
         <div v-if="screen.inspectionErrors?.length" class="screen-callout"><div v-for="item in screen.inspectionErrors" :key="item">{{ item }}</div></div>
       </details>
       <h3 class="device-detail-section-title">设备运维</h3>
-      <div class="screen-detail-actions"><n-button v-for="action in screenActions" :key="action.value" size="small" :disabled="action.value === 'adb' && screen.size !== '10'" @click="$emit('operate', action.value)">{{ action.label }}</n-button><n-button size="small" title="重新核对设备应用版本，无需重复安装" @click="$emit('versions')">核对版本并同步平台</n-button></div>
+      <div class="screen-detail-actions"><n-button v-for="action in screenActions" :key="action.value" size="small" :disabled="action.value === 'adb' && screen.size !== '10'" @click="$emit('operate', action.value)">{{ action.label }}</n-button><n-button size="small" :type="versionPending ? 'warning' : 'default'" :title="versionPending ? versionTitle : '重新核对设备应用版本，无需重复安装'" @click="$emit('versions')">核对版本并同步平台</n-button></div>
       <p class="screen-muted">“修改小新配置”读取屏端当前设置；修改运行中的环境配置后，会按需重启小新应用。</p>
       <h3 class="device-detail-section-title">最近操作 <small>{{ history.length }} 条</small></h3>
       <div v-if="!history.length" class="screen-callout">暂无操作记录。检查、安装和维护的结果会保留在这里。</div>

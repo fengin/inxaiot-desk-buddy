@@ -1,9 +1,10 @@
 import { computed, reactive, ref } from "vue";
 import { defineStore } from "pinia";
 import { useScreenAdapter } from "@/shared/api/screenAdapter";
-import { effectiveScreenMac, normalizeScreenMac, screenMergeCandidates } from "@/shared/model/screen";
+import { normalizeScreenMac, screenMergeCandidates } from "@/shared/model/screen";
 import type { ScreenAction, ScreenSnapshot } from "@/shared/model/screen";
-import { screenMatchesSpace, screenSpaceLabel } from "@/shared/model/screenSpace";
+import { createScreenSpaceIndex } from "@/shared/model/screenSpace";
+import { createScreenListProjection } from "@/shared/model/screenListProjection";
 
 export const useSmartScreensStore = defineStore("smartScreens", () => {
   const projectId = ref("");
@@ -24,19 +25,31 @@ export const useSmartScreensStore = defineStore("smartScreens", () => {
   const platformAvailable = computed(() => snapshot.value.platformAvailable);
   // 平台暂不可用时仍展示已注册屏缓存，注册关联不会退回本机未注册资产。
   const visibleScreens = computed(() => snapshot.value.screens);
+  const spaceIndex = computed(() => createScreenSpaceIndex(snapshot.value.spaces));
   const candidates = computed(() => platformAvailable.value ? screenMergeCandidates(snapshot.value) : []);
   const candidateIds = computed(() => new Set(candidates.value.flatMap((c) => [c.local.id, c.platform.id])));
-  const draftIds = computed(() => new Set(Object.keys(snapshot.value.platformDrafts ?? {}).filter((id) => snapshot.value.screens.some((screen) => screen.id === id && screen.source === "platform"))));
+  // 与 canonical 屏记录分离，选择变化不重建资料投影或空间计数。
+  const listProjections = computed(() => new Map(visibleScreens.value.map((screen) => [screen.id, createScreenListProjection(
+    screen, snapshot.value.platformDrafts?.[screen.id], spaceIndex.value, snapshot.value.spacesAvailable !== false, platformAvailable.value
+  )])));
+  // 原始草稿及 revision 保留用于并发校验；提示仅表示相对最新平台值仍有差异。
+  const draftIds = computed(() => new Set([...listProjections.value].filter(([, item]) => item.changedFields.size > 0).map(([id]) => id)));
+  const listSpaceCounts = computed(() => spaceIndex.value.counts([...listProjections.value.values()].map((item) => item.spaceAssignment), snapshot.value.spacesAvailable !== false));
+  const listSizeStats = computed(() => {
+    const displayed = [...listProjections.value.values()];
+    return { small: displayed.filter((item) => item.values.size === "4").length, large: displayed.filter((item) => item.values.size === "10").length };
+  });
   const filtered = computed(() => {
     const keyword = filters.keyword.trim().toLocaleLowerCase();
     const macKeyword = normalizeScreenMac(keyword);
     return visibleScreens.value.filter((s) => {
-      const searchMatch = !keyword || [s.name, s.ip, s.location, screenSpaceLabel(s, snapshot.value.spaces, snapshot.value.spacesAvailable !== false), s.mac, s.observedMac].some((value) => value.toLocaleLowerCase().includes(keyword))
-        || (/^[0-9A-F]{4,}$/.test(macKeyword) && normalizeScreenMac(effectiveScreenMac(s)).includes(macKeyword));
+      const displayed = listProjections.value.get(s.id)!;
+      const searchMatch = !keyword || displayed.searchValues.some((value) => value.toLocaleLowerCase().includes(keyword))
+        || (/^[0-9A-F]{4,}$/.test(macKeyword) && displayed.searchMacs.some((mac) => mac.includes(macKeyword)));
       return searchMatch && (filters.registration === "all" || (filters.registration === "duplicates" ? candidateIds.value.has(s.id) : s.source === filters.registration))
         && (filters.status === "all" || (s.source === "platform" && s.platformStatus === filters.status))
-        && (filters.size === "all" || s.size === filters.size)
-        && screenMatchesSpace(s, filters.space, snapshot.value.spaces, snapshot.value.spacesAvailable !== false)
+        && (filters.size === "all" || displayed.values.size === filters.size)
+        && spaceIndex.value.matches(displayed.spaceAssignment, filters.space, snapshot.value.spacesAvailable !== false)
         && (filters.appVersion === "all" || (filters.appVersion === "unknown" ? !s.appVersion : s.appVersion === filters.appVersion));
     });
   });
@@ -54,8 +67,15 @@ export const useSmartScreensStore = defineStore("smartScreens", () => {
 
   function resetFilters() { Object.assign(filters, { keyword: "", registration: "all", status: "all", size: "all", space: "", appVersion: "all" }); page.value = 1; selectedIds.value = []; }
   function filterChanged() { page.value = 1; selectedIds.value = []; }
-  function toggleSelection(id: string, checked: boolean) { selectedIds.value = checked ? [...new Set([...selectedIds.value, id])] : selectedIds.value.filter((item) => item !== id); }
-  function selectPage(checked: boolean) { for (const s of paged.value) toggleSelection(s.id, checked); }
+  function toggleSelections(ids: readonly string[], checked: boolean) {
+    if (!ids.length) return;
+    const selected = new Set(selectedIds.value);
+    for (const id of ids) { if (checked) selected.add(id); else selected.delete(id); }
+    const next = [...selected];
+    if (next.length !== selectedIds.value.length || next.some((id, index) => id !== selectedIds.value[index])) selectedIds.value = next;
+  }
+  function toggleSelection(id: string, checked: boolean) { toggleSelections([id], checked); }
+  function selectPage(checked: boolean) { toggleSelections(paged.value.map(screen => screen.id), checked); }
   function selectAllMatched() { selectedIds.value = filtered.value.map((s) => s.id); }
   async function refresh(options?: { refreshPlatform?: boolean }) {
     if (!projectId.value) return;
@@ -97,6 +117,6 @@ export const useSmartScreensStore = defineStore("smartScreens", () => {
   function stop() { unsubscribe?.(); unsubscribe = undefined; ++request; platformRefreshPending = false; localRefreshQueued = false; }
 
   return { projectId, snapshot, loading, error, selectedIds, selectedScreens, page, pageSize, operation, openedTaskId, filters,
-    platformAvailable, visibleScreens, candidates, candidateIds, draftIds, filtered, paged, stats, statusDifferences,
-    resetFilters, filterChanged, toggleSelection, selectPage, selectAllMatched, refresh, bindProject, stop };
+    platformAvailable, visibleScreens, spaceIndex, candidates, candidateIds, draftIds, listProjections, listSpaceCounts, listSizeStats, filtered, paged, stats, statusDifferences,
+    resetFilters, filterChanged, toggleSelection, toggleSelections, selectPage, selectAllMatched, refresh, bindProject, stop };
 });

@@ -3,7 +3,6 @@ import { computed, reactive } from "vue";
 import { NButton, NCheckbox, NInput, NSelect, NTag } from "naive-ui";
 import { Monitor, Search } from "lucide-vue-next";
 import { useSmartScreensStore } from "@/stores/smartScreens";
-import { screenMatchesSpace, screenSpaceLabel } from "@/shared/model/screenSpace";
 import { effectiveScreenMac, normalizeScreenMac } from "@/shared/model/screen";
 import type { SmartScreen } from "@/shared/model/screen";
 import ScreenSpaceSelect from "./ScreenSpaceSelect.vue";
@@ -15,14 +14,14 @@ const spacesAvailable = computed(() => store.snapshot.spacesAvailable !== false)
 const matched = computed(() => store.visibleScreens.filter((screen) => {
   const key = filter.keyword.trim().toLocaleLowerCase();
   const mac = normalizeScreenMac(key);
-  const textMatch = !key || [screen.name, screen.location, screenSpaceLabel(screen, store.snapshot.spaces, spacesAvailable.value), screen.ip, effectiveScreenMac(screen)].some((value) => value.toLocaleLowerCase().includes(key)) || (/^[0-9A-F]{4,}$/.test(mac) && normalizeScreenMac(effectiveScreenMac(screen)).includes(mac));
-  return textMatch && screenMatchesSpace(screen, filter.space, store.snapshot.spaces, spacesAvailable.value) && (filter.source === "all" || screen.source === filter.source) && (filter.size === "all" || screen.size === filter.size);
+  const textMatch = !key || [screen.name, screen.location, store.spaceIndex.label(screen, spacesAvailable.value), screen.ip, effectiveScreenMac(screen)].some((value) => value.toLocaleLowerCase().includes(key)) || (/^[0-9A-F]{4,}$/.test(mac) && normalizeScreenMac(effectiveScreenMac(screen)).includes(mac));
+  return textMatch && store.spaceIndex.matches(screen, filter.space, spacesAvailable.value) && (filter.source === "all" || screen.source === filter.source) && (filter.size === "all" || screen.size === filter.size);
 }));
 const selectedMatched = computed(() => matched.value.filter((screen) => store.selectedIds.includes(screen.id)).length);
 const allMatched = computed(() => matched.value.length > 0 && selectedMatched.value === matched.value.length);
-function selectMatched(checked: boolean) { for (const screen of matched.value) store.toggleSelection(screen.id, checked); }
+function selectMatched(checked: boolean) { store.toggleSelections(matched.value.map(screen => screen.id), checked); }
 function locationLabel(screen: SmartScreen) {
-  return `${screenSpaceLabel(screen, store.snapshot.spaces, spacesAvailable.value)} · ${screen.location || '位置未填写'}`;
+  return `${store.spaceIndex.label(screen, spacesAvailable.value)} · ${screen.location || '位置未填写'}`;
 }
 </script>
 

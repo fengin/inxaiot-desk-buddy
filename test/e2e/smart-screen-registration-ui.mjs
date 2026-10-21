@@ -35,7 +35,7 @@ async function chooseOperation(label){
 }
 async function registerCurrent(){
   await click('[data-testid="screen-operation-first-action"]');
-  await waitText("请核对逐台差异，确认后更新平台资料");
+  await waitText("检查完成，尚未提交注册或更新");
   assert.ok(!(await browser.$("body").getText()).includes("当前为交互原型"));
   const previous=new Set((await command("screen_load",{localProjectId:projectId,refresh:false})).tasks.map(task=>task.id));
   await click('[data-testid="screen-operation-submit"]');
@@ -56,11 +56,11 @@ try{
   const localId=await command("screen_save_local",{localProjectId:projectId,fields:input,id:null,expectedRevision:null});
   await browser.execute(id=>{localStorage.setItem("inx.workbench.active-project",id);location.hash="/screen/nodes";},projectId);await browser.refresh();await waitText(input.name);
   await click('[aria-label="选择当前页"]');await button("批量操作");await chooseOperation("注册/更新到平台");
-  await registerCurrent();await waitText("平台注册与本机关联已完成");
+  await registerCurrent();await waitText("注册成功，平台写入与本机关联已确认");
   const registered=await command("screen_load",{localProjectId:projectId,refresh:true});assert.equal(registered.screens.length,1);const pid=registered.screens[0].id;assert.ok(registered.screens[0].aliases.includes(localId));
   await browser.saveScreenshot(resolve(evidence,"01-registration.png"));
   await button("返回智能屏列表");await button("详情");await button("编辑资料");await fillName("通过桌面修改名称");await button("保存待提交修改");await waitText("资料有变更");await button("关闭");
-  await click(".screen-draft-link");await registerCurrent();await waitText("平台资料已更新");
+  await click(".screen-draft-link");await registerCurrent();await waitText("资料更新成功");
   await button("返回智能屏列表");await waitText("通过桌面修改名称");
   const another=await command("screen_save_local",{localProjectId:projectId,fields:{...input,name:"合并后的名称",mac:registered.screens[0].mac},id:null,expectedRevision:null});
   await button("刷新平台");await browser.waitUntil(async()=>browser.execute(()=>Boolean(document.querySelector(".screen-duplicate-link"))),{timeout:10000});await click(".screen-duplicate-link");

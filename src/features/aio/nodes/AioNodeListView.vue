@@ -69,6 +69,7 @@ const createOpen = ref(false);
 const editOpen = ref(false);
 const selectedMacs = ref<string[]>([]);
 const importStage = ref<"select" | "preview" | "done">("select");
+const mounted = ref(false);
 let refreshTimer: number | undefined;
 
 const filteredNodes = computed(() => aio.nodes);
@@ -166,7 +167,8 @@ function sourceLabel(value: string) {
 }
 
 async function refresh() {
-  if (!projects.activeProjectId || !projects.allowsAccess("platform")) return;
+  cancelScheduledRefresh();
+  if (!projects.activeProjectId || projects.loading || projects.switching || !projects.allowsAccess("platform")) return;
   await aio.refresh(projects.activeProjectId, search.value, stateFilter.value);
 }
 
@@ -175,9 +177,17 @@ function selectNodeFilter(value: string) {
   aio.page = 1;
 }
 
-function scheduleRefresh() {
+function cancelScheduledRefresh() {
   if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
-  refreshTimer = window.setTimeout(() => void refresh(), 180);
+  refreshTimer = undefined;
+}
+
+function scheduleRefresh() {
+  cancelScheduledRefresh();
+  refreshTimer = window.setTimeout(() => {
+    refreshTimer = undefined;
+    void refresh();
+  }, 180);
 }
 
 async function openNode(node: AioNodeListItem) {
@@ -291,38 +301,43 @@ function closeImport() {
   }, 180);
 }
 
-watch([search, stateFilter], () => {
-  aio.page = 1;
-  scheduleRefresh();
-});
-watch(() => projects.activeProject?.connectionState, () => { void refresh(); });
 watch(
-  () => aio.page,
-  () => {
-    void refresh();
-  }
+  () => ({ projectId: projects.activeProjectId, search: search.value, state: stateFilter.value, pageSize: aio.pageSize }),
+  (next, previous) => {
+    if (next.projectId !== previous?.projectId) {
+      selectedMacs.value = []; createOpen.value = false; editOpen.value = false;
+      selectedNode.value = undefined;
+      versionOpen.value = false;
+      const changed = aio.setProjectContext(next.projectId);
+      if (!previous && !changed) return;
+    }
+    // 在查询监听执行前完成复位，使筛选和翻回第一页形成同一次读取。
+    aio.page = 1;
+  },
+  { immediate: true, flush: "sync" }
 );
 watch(
-  () => projects.activeProjectId,
-  () => {
-    selectedMacs.value = []; createOpen.value = false; editOpen.value = false;
-    selectedNode.value = undefined;
-    versionOpen.value = false;
-    aio.page = 1;
-    void refresh();
-  }
+  [mounted, () => projects.loading, () => projects.switching, () => projects.allowsAccess("platform"),
+    search, stateFilter, () => aio.page, () => aio.pageSize,
+    () => projects.activeProjectId, () => projects.activeProject?.connectionState],
+  (next, previous) => {
+    cancelScheduledRefresh();
+    const [isMounted, loading, switching, available, keyword, state] = next;
+    if (!isMounted || loading || switching || !available) return;
+    if (previous && (keyword !== previous[4] || state !== previous[5])) scheduleRefresh();
+    else void refresh();
+  },
+  { immediate: true }
 );
 watch(() => aio.nodes, (nodes) => {
   const blocked = new Set(nodes.filter(node => !canSelectNode(node)).map(node => node.macNormalized));
   selectedMacs.value = selectedMacs.value.filter(mac => !blocked.has(mac));
 });
-onMounted(async () => {
-  await projects.initialize();
-  await refresh();
+onMounted(() => {
+  void projects.initialize();
+  mounted.value = true;
 });
-onBeforeUnmount(() => {
-  if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
-});
+onBeforeUnmount(cancelScheduledRefresh);
 </script>
 
 <template>

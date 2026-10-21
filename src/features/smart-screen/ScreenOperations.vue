@@ -20,6 +20,7 @@ import ScreenInstallFields from "./ScreenInstallFields.vue";
 import ScreenSharedHistory from "./ScreenSharedHistory.vue";
 import ScreenRegistrationPreview from "./ScreenRegistrationPreview.vue";
 import { isScreenReadOnlyAction, screenCriticalDraftFields, screenMaintenanceFingerprint } from "@/shared/model/screenMaintenance";
+import { screenPlatformDraftValues } from "@/shared/model/screenRegistration";
 import "./registration.css";
 
 const historyOpen = defineModel<boolean>("historyOpen", { default: false });
@@ -31,7 +32,8 @@ const checks = ref<ScreenPreflightItem[]>([]), included = ref<string[]>([]), err
 const preparedInput = ref<ScreenOperationInput>();
 const retrySource = ref<{id:string;action:string;targets:string[]}>();
 const retryOperationId = computed(() => retrySource.value?.action === store.operation && store.selectedIds.every(id => retrySource.value?.targets.includes(id)) ? retrySource.value.id : undefined);
-const criticalDrafts = computed(() => store.selectedScreens.map((screen) => ({ screen, fields: screenCriticalDraftFields(screen, store.snapshot.platformDrafts?.[screen.id]) })).filter((row) => row.fields.length));
+const criticalDrafts = computed(() => store.selectedScreens.map((screen) => ({ screen, values: screenPlatformDraftValues(screen, store.snapshot.platformDrafts?.[screen.id]), fields: screenCriticalDraftFields(screen, store.snapshot.platformDrafts?.[screen.id]) })).filter((row) => row.fields.length));
+const registrationValues = computed(() => new Map(store.operation === "register" ? store.selectedScreens.map(screen => [screen.id, screenPlatformDraftValues(screen, store.snapshot.platformDrafts?.[screen.id])] as const) : []));
 const registrationPreview = shallowRef<RegistrationPreview | null>(null);
 const macConfirmations = ref<Record<string, ScreenRegistrationMacConfirmation>>({});
 const spaceConfirmations = ref<string[]>([]);
@@ -82,11 +84,11 @@ watch(() => store.operation, (nextOperation, previousOperation) => {
   if ([nextOperation,previousOperation].some(value=>['register','app_config','ntp'].includes(value))) { fresh(); submitting.value = false; }
 }, { flush: "sync" });
 // 预览绑定当前资料与目录。普通轮询中的相同快照不会使预览反复失效。
-const registrationFingerprint = computed(() => JSON.stringify({
+const registrationFingerprint = computed(() => store.operation === "register" ? JSON.stringify({
   targets: store.selectedScreens.map((screen) => [screen.id, screen.revision, screen.name, screen.ip, screen.mac, screen.observedMac, screen.size, screen.spaceId, screen.location, store.snapshot.platformDrafts?.[screen.id]]),
   identities: store.snapshot.screens.map((screen) => [screen.id, screen.ip, screen.mac]),
   spaces: store.snapshot.spaces, spacesAvailable: store.snapshot.spacesAvailable, platformAvailable: store.platformAvailable
-}));
+}) : "");
 watch(registrationFingerprint, () => {
   if (store.operation !== "register" || submitting.value || step.value === lastStep.value) return;
   const wasChecking = checking.value || Boolean(registrationPreview.value);
@@ -244,11 +246,16 @@ function restartConfig(ids:string[]){historyOpen.value=false;fresh();store.selec
           <div class="screen-parameter-content" :class="{ 'screen-parameter-form-scroll': store.operation === 'install', 'inx-scroll-area': store.operation === 'install' }">
           <screen-install-fields v-if="store.operation==='install'" :key="store.projectId" v-model:file="selectedApk" v-model:reinstall="form.reinstall" :real="store.snapshot.mode === 'real'" :disabled="checking || submitting" :size-warning="sizeWarning" />
           <template v-else-if="store.operation==='register'">
-            <div class="screen-callout screen-operation-note">新屏注册到平台，已注册的屏只更新信息，MAC信息会自动获取。</div>
-            <p class="screen-registration-note">先补齐名称、IP、尺寸和所属空间。已注册屏的修改保留为本机待提交资料，预览确认前不改变平台。</p>
+            <div class="screen-operation-help">
+              <p>新屏注册到平台，已注册的屏只更新信息，MAC信息会自动获取。</p>
+              <p>先补齐名称、IP、尺寸和所属空间。已注册屏的修改保留为本机待提交资料，预览确认前不改变平台。</p>
+            </div>
           </template>
-          <template v-else-if="store.operation==='time'"><div class="screen-setting-info"><Clock3 :size="17" /><div><strong>当前电脑时间</strong><p>{{ formatDisplayDateTime(new Date().toISOString()) }}</p></div></div><div class="screen-callout">以当前电脑时间同时校准系统时间和硬件时钟，两项回读偏差均不超过 15 秒。保留原时区和自动校时设置；已测4寸固件完全断电后仍可能丢时。</div></template>
-          <div v-else class="screen-callout screen-operation-note">
+          <template v-else-if="store.operation==='time'">
+            <p class="screen-operation-help">以当前电脑时间同时校准系统时间和硬件时钟</p>
+            <div class="screen-setting-info"><Clock3 :size="17" /><div><strong>当前电脑时间</strong><p>{{ formatDisplayDateTime(new Date().toISOString()) }}</p></div></div>
+          </template>
+          <p v-else class="screen-operation-help">
             <template v-if="store.operation==='ping'">从本机检查 IP 可达性。与平台状态有差异时，在检查结果中由你确认是否覆盖；未注册屏仅保留本机结果。</template>
             <template v-else-if="store.operation==='adb'">仅支持已验证的 10 寸屏。先检查当前连接，再确认设置持久 5555 端口并重启，最后验证恢复。</template>
             <template v-else-if="store.operation==='reboot'">所选屏将暂时不可用。确认目标后分批重启，等待系统与管理连接恢复。</template>
@@ -256,10 +263,9 @@ function restartConfig(ids:string[]){historyOpen.value=false;fresh();store.selec
             <template v-else-if="store.operation==='mac'">读取物理网卡 MAC 并核对身份，不改写应用设备标识或平台 MAC。</template>
             <template v-else-if="store.operation==='diagnostics'">读取系统、应用、启动信息及限定范围的近期系统日志。完成后可查看或导出诊断文件；完整文件只保存在本机。</template>
             <template v-else>读取系统、管理连接、应用版本和可用空间。不会自动改变平台注册状态。</template>
-          </div>
-          <div v-if="store.operation !== 'register'" class="screen-target-context">
-            <p v-if="!criticalDrafts.length" class="screen-muted">列表 IP 为本次实际连接地址，使用已确认资料；本机待提交修改尚未生效。</p>
-            <div v-if="criticalDrafts.length" class="screen-callout screen-critical-summary" data-testid="screen-critical-drafts">
+          </p>
+          <div v-if="store.operation !== 'register' && criticalDrafts.length" class="screen-target-context">
+            <div class="screen-callout screen-critical-summary" data-testid="screen-critical-drafts">
               <b class="screen-warning">{{ criticalDrafts.length }} 台有关键资料待提交</b>
               <p>{{ isScreenReadOnlyAction(store.operation) ? '本次只读检查仍连接下列确认地址，不使用草稿地址。' : '这些屏暂不执行设备写操作，请先核对更新平台或放弃对应修改。' }}</p>
               <div class="screen-critical-actions"><n-button size="tiny" text type="primary" :disabled="checking || submitting" @click="criticalOpen = true">查看修改</n-button><n-button size="tiny" type="warning" secondary :disabled="checking || submitting" @click="reviewDrafts">前往注册/更新到平台</n-button></div>
@@ -275,7 +281,7 @@ function restartConfig(ids:string[]){historyOpen.value=false;fresh();store.selec
             <div class="screen-registration-selected-heading"><span>所选设备资料</span><span>{{ store.selectedScreens.length }} 台</span></div>
             <compact-operation-table :columns="selectedColumns" label="所选设备资料">
               <tr v-for="screen in store.selectedScreens" :key="screen.id" class="screen-registration-selected-row" :data-screen-id="screen.id">
-                <td><strong :title="store.snapshot.platformDrafts?.[screen.id]?.values.name || screen.name">{{ store.snapshot.platformDrafts?.[screen.id]?.values.name || screen.name }}</strong><small>{{ store.snapshot.platformDrafts?.[screen.id]?.values.ip || screen.ip }} · {{ screen.source === 'local' ? '未注册' : store.snapshot.platformDrafts?.[screen.id] ? '资料待更新' : '已注册' }}</small></td>
+                <td><strong :title="registrationValues.get(screen.id)?.name || screen.name">{{ registrationValues.get(screen.id)?.name || screen.name }}</strong><small>{{ registrationValues.get(screen.id)?.ip || screen.ip }} · {{ screen.source === 'local' ? '未注册' : store.draftIds.has(screen.id) ? '资料待更新' : '已注册' }}</small></td>
                 <td><n-button size="tiny" text type="primary" :disabled="checking || submitting" :aria-label="`编辑 ${screen.name} 资料`" @click="editTarget(screen.id)">编辑资料</n-button></td>
               </tr>
             </compact-operation-table>
@@ -306,7 +312,7 @@ function restartConfig(ids:string[]){historyOpen.value=false;fresh();store.selec
     <p class="screen-muted">设备检查仍使用当前已确认地址，待提交资料尚未生效。请核对后更新平台，或在编辑中放弃修改。</p>
     <div class="screen-critical-dialog-body screen-parameter-device-list" data-testid="screen-critical-draft-list">
       <compact-operation-table :columns="draftColumns" label="关键资料待提交设备">
-        <tr v-for="row in criticalDrafts" :key="row.screen.id" class="screen-critical-target"><td><span :title="`${row.screen.name} · ${row.fields.join('、')}`">{{ row.screen.name }} · {{ row.fields.join('、') }}</span><small>当前 {{ row.screen.ip }}<template v-if="store.snapshot.platformDrafts?.[row.screen.id]?.values.ip !== row.screen.ip"> → 待提交 {{ store.snapshot.platformDrafts?.[row.screen.id]?.values.ip }}</template></small></td><td><n-button size="tiny" text type="primary" :disabled="checking || submitting" @click="editTarget(row.screen.id)">查看修改</n-button></td></tr>
+        <tr v-for="row in criticalDrafts" :key="row.screen.id" class="screen-critical-target"><td><span :title="`${row.screen.name} · ${row.fields.join('、')}`">{{ row.screen.name }} · {{ row.fields.join('、') }}</span><small>当前 {{ row.screen.ip }}<template v-if="row.fields.includes('IP')"> → 待提交 {{ row.values.ip }}</template></small></td><td><n-button size="tiny" text type="primary" :disabled="checking || submitting" @click="editTarget(row.screen.id)">查看修改</n-button></td></tr>
       </compact-operation-table>
     </div>
   </n-modal>

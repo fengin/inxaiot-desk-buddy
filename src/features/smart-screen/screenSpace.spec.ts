@@ -1,14 +1,17 @@
 import { describe, expect, it } from "vitest";
+import { computed, reactive } from "vue";
 import { screenSpaces } from "@/dev-fixtures/screenData";
 import type { SmartScreen } from "@/shared/model/screen";
 import {
   buildScreenSpaceOptions,
+  createScreenSpaceIndex,
   isScreenLocationUncertain,
   SCREEN_UNLOCATED_SPACE_KEY,
   screenSpaceLabel,
   screenMatchesSpace
 } from "@/shared/model/screenSpace";
 import type { ScreenSpaceAssignment } from "@/shared/model/screenSpace";
+import type { ProjectSpaceNode } from "@/shared/model/projectSpace";
 
 const buildings = screenSpaces.filter((space) => space.kind === "building");
 const firstBuilding = buildings[0]!;
@@ -98,5 +101,44 @@ describe("智能屏空间目录与选择", () => {
   it("全部空间包含有效记录，未知筛选 ID 不命中任何记录", () => {
     expect(screenMatchesSpace(located, "", screenSpaces)).toBe(true);
     expect(screenMatchesSpace(located, "deleted-space", screenSpaces)).toBe(false);
+  });
+
+  it("一次统计完整父链，保留直属、深层及离线待核验的分组语义", () => {
+    const index = createScreenSpaceIndex(screenSpaces);
+    const screens = [
+      { spaceId: firstBuilding.id }, { spaceId: firstFloor.id }, { spaceId: "area-a-1-room" },
+      { spaceId: secondBuildingFloor.id }, {}, { spaceId: "deleted-space" }
+    ];
+    const counts = index.counts(screens);
+    expect(counts.get(firstBuilding.id)).toBe(3);
+    expect(counts.get(firstFloor.id)).toBe(2);
+    expect(counts.get("area-a-1-room")).toBe(1);
+    expect(counts.get(secondBuilding.id)).toBe(1);
+    expect(counts.get(SCREEN_UNLOCATED_SPACE_KEY)).toBe(2);
+    expect(index.counts(screens, false).get(SCREEN_UNLOCATED_SPACE_KEY)).toBe(1);
+    expect(index.label({ spaceId: "deleted-space", spacePath: "原空间" }, false)).toBe("原空间（待核验）");
+  });
+
+  it("目录原位变更及切换项目时重建索引，不保留旧父链或失效判定", () => {
+    const state = reactive<{ spaces: ProjectSpaceNode[] }>({ spaces: [
+      { id: "a", name: "A座", kind: "building" }, { id: "b", name: "B座", kind: "building" },
+      { id: "floor", name: "1层", kind: "floor", parentId: "a" }
+    ] });
+    const index = computed(() => createScreenSpaceIndex(state.spaces));
+    const screen = { spaceId: "floor" };
+    expect(index.value.label(screen)).toBe("A座/1层");
+    state.spaces[2]!.parentId = "b";
+    expect(index.value.label(screen)).toBe("B座/1层");
+    expect(index.value.counts([screen]).has("a")).toBe(false);
+    expect(index.value.options().find(option => option.value === "b")?.children).toHaveLength(1);
+    state.spaces[1]!.name = "";
+    expect(index.value.uncertain(screen)).toBe(true);
+    state.spaces[1]!.name = "B新座";
+    expect(index.value.label(screen)).toBe("B新座/1层");
+    state.spaces.push({ id: "b", name: "重复编号", kind: "building" });
+    expect(index.value.uncertain(screen)).toBe(true);
+    state.spaces = [{ id: "floor", name: "另一项目空间", kind: "area" }];
+    expect(index.value.label(screen)).toBe("另一项目空间");
+    expect(index.value.options()).toEqual([]);
   });
 });

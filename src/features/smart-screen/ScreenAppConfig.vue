@@ -5,7 +5,7 @@ import { useScreenAdapter } from "@/shared/api/screenAdapter";
 import { useSmartScreensStore } from "@/stores/smartScreens";
 import { screenMaintenanceFingerprint } from "@/shared/model/screenMaintenance";
 import type { ScreenOperationInput, ScreenPreflightItem } from "@/shared/model/screen";
-import { appConfigChanges, appConfigDisplay, appConfigRestartRequired, appConfigEffectiveAfter, appConfigReadTime, appConfigSources, appEnvironments, appHomeDisplay } from "@/shared/model/screenAppConfig";
+import { appConfigChanges, appConfigDisplay, appConfigRestartRequired, appConfigEffectiveAfter, appConfigReadTime, appConfigSources, appEnvironments, appHomeDisplay, appConfigVoiceSupported, appConfigVoiceDisplay } from "@/shared/model/screenAppConfig";
 import type { AppEnvironment, ScreenAppConfigPatch, ScreenAppConfigRead, ScreenAppConfigDraft } from "@/shared/model/screenAppConfig";
 import { appConfigDifferences, appConfigTextEdit, summarizeAppConfigs, summarizeAppConfigValues } from "@/shared/model/screenAppConfigEditor";
 import ScreenTargetPicker from "./ScreenTargetPicker.vue";
@@ -20,6 +20,7 @@ const environment = ref<AppEnvironment>("pre"), switchEnvironment = ref(false), 
 const edits = reactive<Record<string, Edit>>({ otaUrl: { mode: "keep", value: "" }, wsUrl: { mode: "keep", value: "" }, h5Url: { mode: "keep", value: "" } });
 const readyMode = ref<"keep" | "on" | "off">("keep");
 const homeMode = ref<"keep" | "on" | "off">("keep");
+const voiceMode = ref<"keep" | "on" | "off">("keep");
 const names = reactive<Record<string, Edit>>({});
 const rows = ref<ScreenAppConfigRead[]>([]), included = ref<string[]>([]), checks = ref<ScreenPreflightItem[]>([]);
 const busy = ref(false), error = ref(""), readingId = ref("");
@@ -37,6 +38,16 @@ const running = computed(() => task.value && ["running", "cancelling"].includes(
 const includedSet = computed(() => new Set(included.value));
 const screensById = computed(() => new Map(store.snapshot.screens.map(screen => [screen.id, screen])));
 const selected = computed(() => rows.value.filter(r => includedSet.value.has(r.screenId) && r.config));
+const includedRows = computed(() => rows.value.filter(row => includedSet.value.has(row.screenId)));
+const voiceSummary = computed(() => summarizeAppConfigValues(includedRows.value.filter(appConfigVoiceSupported).map(row => row.config!.autoStartVoiceEngine)));
+const voiceEditable = computed(() => freshRead.value && included.value.length > 0 && includedRows.value.length === included.value.length && includedRows.value.every(appConfigVoiceSupported));
+const voiceValue = computed(() => voiceMode.value === "keep" ? voiceSummary.value.value === true : voiceMode.value === "on");
+const voiceIndeterminate = computed(() => !voiceEditable.value || (voiceMode.value === "keep" && voiceSummary.value.mixed));
+const voiceHint = computed(() => {
+  if (!freshRead.value) return "重新读取配置后确认语音启动设置；未修改时各屏保留原设置。";
+  if (!voiceEditable.value && included.value.length) return `${includedRows.value.filter(row => !appConfigVoiceSupported(row)).map(row => name(row.screenId)).join("、") || "所选屏"}的应用版本不支持此项，或尚未确认有效开关值。本批次保留语音启动设置，其他配置可继续修改。`;
+  return "这是应用全局设置，不随运行环境变化。勾选后语音引擎随下次应用启动；取消后不随应用启动。保存变更后重启小新一次并回读确认，未修改时各屏保留原设置。";
+});
 const fields = [{ key: "otaUrl", label: "OTA 地址" }, { key: "wsUrl", label: "WebSocket(可选)" }, { key: "h5Url", label: "H5地址(可选)" }] as const;
 type AddressKey = typeof fields[number]['key'];
 const summaries = computed(() => summarizeAppConfigs(selected.value, environment.value));
@@ -62,6 +73,7 @@ const patches = computed(() => Object.fromEntries(selected.value.map(row => {
   }
   if (readyMode.value !== "keep") patch.set[`environments.${environment.value}.h5ReadyCheckEnabled`] = readyMode.value === "on";
   if (homeEditable.value && homeMode.value !== "keep") patch.homeEnabled = homeMode.value === "on";
+  if (voiceEditable.value && voiceMode.value !== "keep") patch.set.autoStartVoiceEngine = voiceMode.value === "on";
   const name = names[row.screenId];
   if (name?.mode === "set") patch.set.customDeviceName = name.value.trim();
   else if (name?.mode === "clear") patch.clear.push("customDeviceName");
@@ -102,6 +114,10 @@ function editHome(value: boolean) {
   if (busy.value || !homeEditable.value) return;
   homeMode.value = !homeSummary.value.mixed && value === homeSummary.value.value && !(value && homeNeedsActivation.value) ? "keep" : value ? "on" : "off";
 }
+function editVoice(value: boolean) {
+  if (busy.value || !voiceEditable.value) return;
+  voiceMode.value = !voiceSummary.value.mixed && value === voiceSummary.value.value ? "keep" : value ? "on" : "off";
+}
 const emptyPatch: ScreenAppConfigPatch = { set: {}, clear: [] };
 const listRows = computed(() => {
   const readById = new Map(rows.value.map(row => [row.screenId, row]));
@@ -110,7 +126,7 @@ const listRows = computed(() => {
     const row = readById.get(id);
     const patch = patches.value[id] ?? emptyPatch;
     return { screenId: id, read: row, check: checksById.get(id),
-      differences: row?.config ? appConfigDifferences(row.config, summaries.value, environment.value) : [],
+      differences: row?.config ? appConfigDifferences(row.config, summaries.value, environment.value, appConfigVoiceSupported(row)) : [],
       changes: row?.config ? appConfigChanges(row.config, patch, row.home) : [] };
   });
 });
@@ -132,7 +148,7 @@ function editName(row: ScreenAppConfigRead, value: string) {
 watch(pageSize, () => { page.value = 1; });
 watch([page, pageSize], () => { if (listBody.value) listBody.value.scrollTop = 0; });
 function invalidate() { checks.value = []; prepared.value = undefined; }
-watch([environment, switchEnvironment, readyMode, homeMode, concurrency, () => JSON.stringify(edits), () => JSON.stringify(names), () => included.value.join("|")], invalidate);
+watch([environment, switchEnvironment, readyMode, homeMode, voiceMode, concurrency, () => JSON.stringify(edits), () => JSON.stringify(names), () => included.value.join("|")], invalidate);
 watch(environment, () => { if(restoring)return;for (const edit of Object.values(edits)) Object.assign(edit, { mode: "keep", value: "" }); readyMode.value = "keep"; switchEnvironment.value = false; },{flush:'sync'});
 watch(busy, value => emit("busy", value), { flush: "sync" });
 watch(() => store.projectId, () => { void flushDraft();reset();savedDraft.value=null;void loadDraft(); });
@@ -147,20 +163,20 @@ function flushDraft(){
   if(next&&adapter.saveAppConfigDraft){draftWrites=draftWrites.then(async()=>{await adapter.saveAppConfigDraft!(next.project,next.value);if(next.project===store.projectId)savedDraft.value=next.value;}).catch(cause=>{if(next.project===store.projectId)error.value=`本机草稿未保存：${(cause as Error).message}`;});}
   return draftWrites;
 }
-watch([busy,()=>JSON.stringify({environment:environment.value,switchEnvironment:switchEnvironment.value,edits,readyMode:readyMode.value,homeMode:homeMode.value,names,rows:rows.value,includedIds:included.value,targetIds:store.selectedIds})],()=>{
+watch([busy,()=>JSON.stringify({environment:environment.value,switchEnvironment:switchEnvironment.value,edits,readyMode:readyMode.value,homeMode:homeMode.value,voiceMode:voiceMode.value,names,rows:rows.value,includedIds:included.value,targetIds:store.selectedIds})],()=>{
   if(busy.value||restoring||step.value!==1||!rows.value.length||!useScreenAdapter().saveAppConfigDraft)return;
-  queuedDraft={project:store.projectId,value:JSON.parse(JSON.stringify({environment:environment.value,switchEnvironment:switchEnvironment.value,edits,readyMode:readyMode.value,homeMode:homeMode.value,names,rows:rows.value,includedIds:included.value,targetIds:store.selectedIds})) as ScreenAppConfigDraft};
+  queuedDraft={project:store.projectId,value:JSON.parse(JSON.stringify({environment:environment.value,switchEnvironment:switchEnvironment.value,edits,readyMode:readyMode.value,homeMode:homeMode.value,voiceMode:voiceMode.value,names,rows:rows.value,includedIds:included.value,targetIds:store.selectedIds})) as ScreenAppConfigDraft};
   if(draftTimer)clearTimeout(draftTimer);draftTimer=setTimeout(()=>void flushDraft(),400);
 });
 function restoreDraft(){
   const draft=savedDraft.value;if(!draft)return;
   const ids=draft.targetIds.filter(id=>store.snapshot.screens.some(screen=>screen.id===id));
   if(!ids.length){error.value='草稿中的屏已不在当前项目，请重新选屏';return;}
-  restoring=true;environment.value=draft.environment;switchEnvironment.value=draft.switchEnvironment;readyMode.value=draft.readyMode;homeMode.value=draft.homeMode??"keep";
+  restoring=true;environment.value=draft.environment;switchEnvironment.value=draft.switchEnvironment;readyMode.value=draft.readyMode;homeMode.value=draft.homeMode??"keep";voiceMode.value=draft.voiceMode??"keep";
   Object.assign(edits,draft.edits);Object.assign(names,draft.names);store.selectedIds=ids;rows.value=draft.rows.filter(row=>ids.includes(row.screenId));included.value=draft.includedIds.filter(id=>ids.includes(id));
   freshRead.value=false;invalidate();step.value=1;restoring=false;
 }
-function reset() { ++generation; rows.value = []; included.value = []; invalidate(); freshRead.value=false;busy.value = false; error.value = ""; step.value = 0; store.openedTaskId = ""; page.value=1;detailId.value="";for(const key of Object.keys(names))delete names[key];for(const field of fields)keepAddress(field.key);readyMode.value="keep";homeMode.value="keep";switchEnvironment.value=false; }
+function reset() { ++generation; rows.value = []; included.value = []; invalidate(); freshRead.value=false;busy.value = false; error.value = ""; step.value = 0; store.openedTaskId = ""; page.value=1;detailId.value="";for(const key of Object.keys(names))delete names[key];for(const field of fields)keepAddress(field.key);readyMode.value="keep";homeMode.value="keep";voiceMode.value="keep";switchEnvironment.value=false; }
 async function read() {
   if(busy.value)return;
   const adapter = useScreenAdapter();
@@ -168,7 +184,7 @@ async function read() {
   const request = ++generation, project = store.projectId, ids = [...store.selectedIds];
   const continuing = step.value === 1, previousIncluded = new Set(included.value), previousRows = new Set(rows.value.map(row => row.screenId));
   page.value = 1; detailId.value = "";
-  if (!continuing) { for (const field of fields) keepAddress(field.key); readyMode.value = "keep"; homeMode.value = "keep"; switchEnvironment.value = false; for (const id of Object.keys(names)) delete names[id]; }
+  if (!continuing) { for (const field of fields) keepAddress(field.key); readyMode.value = "keep"; homeMode.value = "keep"; voiceMode.value = "keep"; switchEnvironment.value = false; for (const id of Object.keys(names)) delete names[id]; }
   rows.value = []; included.value = []; invalidate(); freshRead.value=false;error.value = ""; busy.value = true; step.value = 1;
   try {
     for (const id of ids) {
@@ -228,14 +244,13 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
 </script>
 
 <template>
-  <div class="screen-config-operation">
+  <div class="screen-config-operation" :class="{ 'is-selecting': step === 0 }">
     <n-alert v-if="error" type="warning" :show-icon="true">{{ error }}</n-alert>
-    <div v-if="step === 0" class="screen-config-select">
+    <div v-if="step === 0" class="screen-config-select screen-select-stage">
       <screen-target-picker :disabled="busy" />
-      <aside class="screen-config-guide">
-        <h3>读取小新当前配置</h3><p>先读取实际屏，再选择需要修改的字段。可以同时选择不同尺寸的屏。</p>
-        <p>支持运行环境、服务地址、网页启动检查、固定主屏和逐台自定义名称。需要配套版本的小新应用。</p>
-        <div class="screen-callout">读取不修改配置。保存运行中的环境配置后，会按需重启小新，保留应用数据。</div>
+      <aside class="screen-config-guide screen-operation-guide">
+        <h3>读取小新当前配置</h3>
+        <p class="screen-operation-help">先读取屏端配置，再选择需要修改的内容。保存后按需重启小新，保留应用数据。</p>
         <n-button v-if="savedDraft" :disabled="busy" @click="restoreDraft">继续本机未提交修改（{{savedDraft.targetIds.length}} 台）</n-button>
         <n-button type="primary" :loading="busy" :disabled="!store.selectedIds.length || !useScreenAdapter().readAppConfig" @click="read">读取 {{ store.selectedIds.length }} 台配置</n-button>
       </aside>
@@ -262,9 +277,8 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
             </n-input>
           </div>
         </div>
-        <div class="screen-config-field">
-          <div class="screen-config-label"><label>H5检测</label></div>
-          <div class="screen-config-control screen-config-checks">
+        <div class="screen-config-options-row" aria-label="应用选项与读取进度">
+          <div class="screen-config-checks">
             <div class="screen-config-check-control" :class="{ 'is-edited': readyMode !== 'keep' }">
               <n-checkbox :checked="readyValue" :indeterminate="readyMode === 'keep' && summaries.h5ReadyCheckEnabled.tied" :disabled="busy || !selected.length" size="small" aria-label="H5检测" @update:checked="editReady">检查H5地址</n-checkbox>
               <n-button v-if="readyMode !== 'keep'" text size="tiny" :disabled="busy" aria-label="撤销H5检测修改" @click="readyMode = 'keep'">撤销</n-button>
@@ -276,11 +290,17 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
               <n-button v-else-if="canActivateHome" text size="tiny" type="primary" :disabled="busy" aria-label="激活小新主屏" title="选择激活后，检查并保存以切到小新主屏" @click="editHome(true)">激活</n-button>
               <small v-else-if="homeUnavailable" class="screen-warning">不可改</small>
             </div>
+            <div class="screen-config-check-control" :class="{ 'is-edited': voiceMode !== 'keep' && voiceEditable }" :title="voiceHint" data-testid="screen-config-voice">
+              <n-checkbox :checked="voiceValue" :indeterminate="voiceIndeterminate" :disabled="busy || !voiceEditable" size="small" aria-label="语音引擎随应用启动" @update:checked="editVoice">语音引擎随应用启动</n-checkbox>
+              <n-button v-if="voiceMode !== 'keep' && voiceEditable" text size="tiny" :disabled="busy" aria-label="撤销语音启动修改" @click="voiceMode = 'keep'">撤销</n-button>
+              <small v-else-if="freshRead && !voiceEditable && included.length" class="screen-warning">不可改</small>
+            </div>
           </div>
-        </div>
-        <div class="screen-config-field screen-config-reread">
-          <n-button size="small" :loading="Boolean(readingId)" :disabled="busy" @click="read">重新读取配置</n-button>
-          <span class="screen-muted">{{ readingId ? `正在读取 ${name(readingId)} · ${rows.length}/${store.selectedIds.length} 台` : '未修改项各自保留；有差异时展示多数值。' }}</span>
+          <div class="screen-config-reread">
+            <n-button size="small" :loading="Boolean(readingId)" :disabled="busy" @click="read">重新读取配置</n-button>
+            <span v-if="readingId" class="screen-config-read-progress" :title="`正在读取 ${name(readingId)} · ${rows.length}/${store.selectedIds.length} 台`"><span>正在读取 {{ name(readingId) }}</span><span>{{ rows.length }}/{{ store.selectedIds.length }} 台</span></span>
+            <span v-else class="screen-muted" title="未修改项各自保留；有差异时展示多数值。">未修改项各自保留；有差异时展示多数值。</span>
+          </div>
         </div>
       </fieldset>
       <section class="screen-config-list" aria-label="智能屏配置检查列表" role="table" :aria-rowcount="listRows.length + 1">
@@ -318,7 +338,7 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
         <p class="screen-muted">{{ ip(detail.screenId) }} · {{ detail.read ? appConfigReadTime(detail.read.readAt) : '尚未读取' }}<span v-if="detail.read?.capabilities"> · 小新{{ detail.read.capabilities.appVersionName }}-{{ detail.read.capabilities.appVersionCode }}</span></p>
         <template v-if="detail.read?.config">
           <div class="screen-config-name-field"><label>设备名<small>仅修改本屏的小新名称</small></label><n-input :value="nameValue(detail.read)" size="small" :maxlength="128" :disabled="busy || !included.includes(detail.screenId)" :status="names[detail.screenId]?.mode !== 'keep' ? 'warning' : undefined" :aria-label="`${name(detail.screenId)}设备名`" @update:value="editName(detail.read!, $event)" /><n-button v-if="names[detail.screenId]?.mode !== 'keep'" text size="tiny" :disabled="busy" @click="names[detail.screenId] = { mode: 'keep', value: '' }">撤销</n-button></div>
-          <div class="screen-config-current"><div>当前运行：{{ appConfigDisplay(detail.read.config.environments.current, true) }} · 查看{{ appConfigDisplay(environment, true) }}配置</div><div v-for="field in fields" :key="field.key">{{ field.label }}：{{ detail.read.config.environments[environment][field.key] || '未设置' }}</div><div>H5检测：{{ appConfigDisplay(detail.read.config.environments[environment].h5ReadyCheckEnabled) }}</div><div>固定小新为主屏：{{ appHomeDisplay(detail.read.home) }}</div><div>语音使用值（{{ appConfigSources[detail.read.config.environments[environment].wsSource] }}）：{{ detail.read.config.environments[environment].effectiveWsUrl || '未设置' }}</div><div>网页使用值（{{ appConfigSources[detail.read.config.environments[environment].h5Source] }}）：{{ detail.read.config.environments[environment].effectiveH5Url }}</div><div>服务端语音地址：{{ detail.read.config.environments[environment].otaWsUrl || '未下发' }}</div><div>服务端网页地址：{{ detail.read.config.environments[environment].otaH5Url || '未下发' }}</div></div>
+          <div class="screen-config-current"><div>当前运行：{{ appConfigDisplay(detail.read.config.environments.current, true) }} · 查看{{ appConfigDisplay(environment, true) }}配置</div><div v-for="field in fields" :key="field.key">{{ field.label }}：{{ detail.read.config.environments[environment][field.key] || '未设置' }}</div><div>H5检测：{{ appConfigDisplay(detail.read.config.environments[environment].h5ReadyCheckEnabled) }}</div><div>固定小新为主屏：{{ appHomeDisplay(detail.read.home) }}</div><div>语音引擎随应用启动：{{ appConfigVoiceDisplay(detail.read) }}</div><div>语音使用值（{{ appConfigSources[detail.read.config.environments[environment].wsSource] }}）：{{ detail.read.config.environments[environment].effectiveWsUrl || '未设置' }}</div><div>网页使用值（{{ appConfigSources[detail.read.config.environments[environment].h5Source] }}）：{{ detail.read.config.environments[environment].effectiveH5Url }}</div><div>服务端语音地址：{{ detail.read.config.environments[environment].otaWsUrl || '未下发' }}</div><div>服务端网页地址：{{ detail.read.config.environments[environment].otaH5Url || '未下发' }}</div></div>
           <table v-if="detail.changes.length" class="screen-table screen-small-table"><thead><tr><th>修改内容</th><th>当前值</th><th>修改为</th></tr></thead><tbody><tr v-for="change in detail.changes" :key="change.key"><td>{{ change.label }}</td><td>{{ change.before }}</td><td>{{ change.after }}</td></tr></tbody></table>
           <p class="screen-muted">{{ detail.changes.length ? (appConfigRestartRequired(detail.read.config, patches[detail.screenId]) ? '保存成功后重启小新一次，再读取配置确认。' : '本次无需重启，保存后读取配置确认。') : '当前未修改，或所选值已经相同。' }}</p>
           <div v-if="detail.changes.some(change => change.key.endsWith('Url'))" class="screen-config-current"><div>保存后语音使用（{{ appConfigSources[appConfigEffectiveAfter(detail.read.config, patches[detail.screenId], environment).ws.source] }}）：{{ appConfigEffectiveAfter(detail.read.config, patches[detail.screenId], environment).ws.value }}</div><div>保存后网页使用（{{ appConfigSources[appConfigEffectiveAfter(detail.read.config, patches[detail.screenId], environment).h5.source] }}）：{{ appConfigEffectiveAfter(detail.read.config, patches[detail.screenId], environment).h5.value }}</div></div>
@@ -332,9 +352,7 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
 
 <style scoped>
 .screen-config-operation{display:flex;flex-direction:column;gap:12px;min-height:0;flex:1;overflow:hidden;padding:12px}
-.screen-config-select{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:14px;min-height:0;flex:1}
-.screen-config-guide{display:flex;flex-direction:column;gap:14px;padding:16px;border:1px solid var(--inx-color-border);border-radius:8px}
-.screen-config-guide p{margin:0;color:var(--inx-color-text-secondary);line-height:1.7}
+.screen-config-operation.is-selecting{padding:0}
 .screen-config-editor{display:flex;flex-direction:column;flex:1;overflow:hidden;min-height:0;gap:8px}
 .screen-config-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:24px;row-gap:10px;border:0;padding:0 0 4px;margin:0;min-width:0;flex:none}
 .screen-config-field{display:grid;grid-template-columns:116px minmax(0,1fr);gap:8px;align-items:center;min-width:0;min-height:28px}
@@ -342,13 +360,18 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
 .screen-config-label label{font-size:var(--inx-font-size-base);font-weight:400;white-space:nowrap}
 .screen-config-control{min-width:0}
 .screen-config-control :deep(.n-input__suffix .n-button){font-size:var(--inx-font-size-table)}
-.screen-config-check-control{display:flex;align-items:center;gap:10px;min-height:28px;padding:0 6px;border:1px solid transparent;border-radius:5px}
-.screen-config-check-control>.n-button{margin-left:auto;font-size:var(--inx-font-size-table)}
-.screen-config-check-control.is-edited{border-color:var(--inx-color-warning)}
-.screen-config-checks{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:28px}
-.screen-config-checks .screen-config-check-control{flex:none;gap:4px;padding-inline:2px;white-space:nowrap}
-.screen-config-home-control{margin-left:auto}.screen-config-home-control small{font-size:10px}
-.screen-config-reread{display:flex;align-items:center;gap:10px}.screen-config-reread>span{min-width:0;font-size:var(--inx-font-size-table);line-height:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.screen-config-options-row{grid-column:1/-1;display:flex;align-items:center;flex-wrap:wrap;gap:6px 16px;min-width:0}
+.screen-config-checks{display:flex;align-items:center;flex-wrap:wrap;gap:6px 16px;min-height:28px;min-width:0}
+.screen-config-check-control{display:flex;align-items:center;flex:none;gap:4px;min-height:28px;white-space:nowrap}
+.screen-config-check-control>.n-button{font-size:var(--inx-font-size-table)}
+.screen-config-check-control.is-edited :deep(.n-checkbox__label){color:var(--inx-color-warning)}
+.screen-config-check-control small{font-size:10px}
+.screen-config-reread{display:flex;align-items:center;gap:10px;margin-left:auto;flex:1 1 260px;max-width:430px;min-width:0}
+.screen-config-reread>.n-button{flex:none}
+.screen-config-reread>span{min-width:0;font-size:var(--inx-font-size-table);line-height:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.screen-config-read-progress{display:flex;align-items:center;gap:6px;flex:1}
+.screen-config-read-progress>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.screen-config-read-progress>span:last-child{flex:none}
 .screen-config-notice{margin:0;padding:5px 8px;color:var(--inx-color-text-secondary);background:var(--inx-color-surface-subtle);font-size:var(--inx-font-size-table);flex:none}
 .screen-config-list{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden;border:1px solid var(--inx-color-border);border-radius:6px;--config-columns:26px minmax(100px,1.1fr) 118px 144px minmax(100px,1fr) 96px 42px}
 .screen-config-list-header{flex:none;padding-right:4px;background:var(--inx-color-table-header);color:var(--inx-color-text-secondary);border-bottom:1px solid var(--inx-color-border)}
@@ -371,5 +394,4 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
 .screen-config-results{display:flex;flex:1;flex-direction:column;gap:8px;min-height:0;overflow:hidden}
 .screen-config-result-footer{display:flex;flex:none;justify-content:flex-end;padding-top:8px;border-top:1px solid var(--inx-color-border)}
 @media(max-width:1100px){.screen-config-form{column-gap:16px}.screen-config-field{grid-template-columns:110px minmax(0,1fr);gap:6px}.screen-config-list{--config-columns:24px minmax(90px,1fr) 104px 132px minmax(80px,1fr) 80px 36px}.screen-config-list-row{column-gap:6px;padding-inline:8px}}
-@media(max-width:1000px){.screen-config-select{grid-template-columns:minmax(0,1fr) 250px}}
 </style>

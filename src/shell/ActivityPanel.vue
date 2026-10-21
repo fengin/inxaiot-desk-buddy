@@ -3,8 +3,8 @@ import { NButton, NEmpty, NInput, NPopconfirm, NProgress, NSelect, NTag, useMess
 import { ChevronDown, ListRestart, RotateCw, Trash2, X } from "lucide-vue-next";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
-import { taskStageLabel, canRetryTaskResult } from "@/app/taskPresentation";
-import type { ActivityTask, ActivityTaskState } from "@/shared/model/activity";
+import { taskDisplayLabels, canRetryTaskResult } from "@/app/taskPresentation";
+import type { ActivityTaskState } from "@/shared/model/activity";
 import { formatDisplayDateTime } from "@/shared/format/dateTime";
 import { useActivityStore } from "@/stores/activity";
 import { useProjectStore } from "@/stores/projects";
@@ -24,6 +24,8 @@ const orderedTasks = computed(() => [...activity.tasks].sort((a, b) => {
   };
   return (rank[a.state] ?? 5) - (rank[b.state] ?? 5);
 }));
+const taskRows = computed(() => orderedTasks.value.map(task => ({ task, display: taskDisplayLabels(task) })));
+const selectedTaskName = computed(() => activity.selectedTask ? taskDisplayLabels(activity.selectedTask).name : "未选择任务");
 const levelOptions = [
   { label: "INFO", value: "INFO" },
   { label: "WARN", value: "WARN" },
@@ -40,32 +42,6 @@ const clearConfirmation = computed(() =>
     ? "清空已结束的任务和检查记录？未提交的操作需重新检查；排队、执行中和结果待核实的任务会保留。"
     : "清空当前任务的全部日志内容？此操作不可恢复。"
 );
-
-function tagType(task: ActivityTask) {
-  if (task.state === "succeeded") return "success";
-  if (task.state === "partially_succeeded" || task.state === "finalizing_failed") return "warning";
-  if (task.state === "failed" || task.state === "interrupted") return "error";
-  return "info";
-}
-
-function stateLabel(task: ActivityTask) {
-  const labels: Record<ActivityTaskState, string> = {
-    draft: "草稿",
-    checking: "检查中",
-    check_failed: "检查失败",
-    ready: "等待入队",
-    queued: "等待执行",
-    running: "执行中",
-    cancelling: "取消中",
-    cancelled: "已取消",
-    succeeded: "已成功",
-    partially_succeeded: "部分成功",
-    failed: "已失败",
-    interrupted: "已中断",
-    finalizing_failed: "结果待补写"
-  };
-  return labels[task.state];
-}
 
 function handleLogScroll() {
   const element = logLines.value;
@@ -141,16 +117,16 @@ watch(
         <div v-if="orderedTasks.length" class="task-table">
           <div class="task-table__head"><span>状态</span><span>任务</span><span>当前阶段</span><span>进度</span><span>更新时间</span></div>
           <button
-            v-for="task in orderedTasks"
+            v-for="{ task, display } in taskRows"
             :key="task.id"
             type="button"
             class="task-row"
             :class="{ selected: activity.selectedTaskId === task.id }"
             @click="activity.selectTask(task.id); activity.panelTab = 'logs'"
           >
-            <n-tag size="small" :bordered="false" :type="tagType(task)">{{ stateLabel(task) }}</n-tag>
-            <span class="task-name"><strong>{{ task.name }}</strong><small class="task-target-count">{{ task.targetCount }} 个目标</small></span>
-            <span>{{ taskStageLabel(task) }}</span>
+            <n-tag size="small" :bordered="false" :type="display.tone">{{ display.state }}</n-tag>
+            <span class="task-name"><strong>{{ display.name }}</strong><small class="task-target-count">{{ task.targetCount }} 个目标</small></span>
+            <span>{{ display.stage }}</span>
             <span v-if="task.progress !== null" class="task-progress"><small class="task-progress-value">{{ task.progress }}%</small><n-progress type="line" :percentage="task.progress" :show-indicator="false" :height="4" /></span>
             <span v-else class="task-progress task-progress--unknown"><small>进度未知</small></span>
             <time class="task-time">{{ formatDisplayDateTime(task.updatedAt) }}</time>
@@ -159,7 +135,7 @@ watch(
         <n-empty v-else :description="activity.error || '暂无任务'" />
       </template>
       <div v-else ref="logLines" class="log-view" @scroll="handleLogScroll">
-          <div class="log-scope"><strong>{{ activity.selectedTask?.name ?? '未选择任务' }}</strong><span>完整过程仅保存在当前电脑</span><n-button v-if="!followLatest" size="tiny" quaternary @click="returnToLatest">回到最新</n-button><n-select v-model:value="activity.logLevels" class="log-filter-level" size="tiny" multiple clearable :options="levelOptions" placeholder="级别" @update:value="activity.refreshLogs" /><n-input v-model:value="activity.logKeyword" class="log-filter-keyword" size="tiny" clearable placeholder="筛选日志" @update:value="activity.refreshLogs" /><n-button v-if="canRetryTaskResult(activity.selectedTask)" size="tiny" type="warning" secondary :loading="activity.finalizationRetrying" @click="retryFinalization">补写结果</n-button><n-button v-if="activity.selectedTask?.cancellable" size="tiny" type="warning" secondary @click="activity.cancelSelectedTask">取消任务</n-button></div>
+          <div class="log-scope"><strong>{{ selectedTaskName }}</strong><span>完整过程仅保存在当前电脑</span><n-button v-if="!followLatest" size="tiny" quaternary @click="returnToLatest">回到最新</n-button><n-select v-model:value="activity.logLevels" class="log-filter-level" size="tiny" multiple clearable :options="levelOptions" placeholder="级别" @update:value="activity.refreshLogs" /><n-input v-model:value="activity.logKeyword" class="log-filter-keyword" size="tiny" clearable placeholder="筛选日志" @update:value="activity.refreshLogs" /><n-button v-if="canRetryTaskResult(activity.selectedTask)" size="tiny" type="warning" secondary :loading="activity.finalizationRetrying" @click="retryFinalization">补写结果</n-button><n-button v-if="activity.selectedTask?.cancellable" size="tiny" type="warning" secondary @click="activity.cancelSelectedTask">取消任务</n-button></div>
           <div v-if="activity.logs.length" class="log-lines" role="log">
             <n-button v-if="activity.logHasMore" class="log-load-older" size="tiny" quaternary @click="activity.loadOlderLogs">加载更早日志</n-button>
             <div v-for="entry in activity.logs" :key="entry.id" class="log-line" :class="entry.level.toLowerCase()">

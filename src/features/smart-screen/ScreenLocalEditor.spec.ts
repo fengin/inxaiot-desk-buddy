@@ -46,7 +46,7 @@ describe("智能屏编辑使用已采集MAC", () => {
   it("本机未填写MAC时带入采集值，打开不写资料，确认保存才提交", async () => {
     const {wrapper,screen,save,submit}=await render(true,'deep',{mac:'',observedMac:captured});
     expect(wrapper.get<HTMLInputElement>('input[placeholder="可留空"]').element.value).toBe(captured);
-    expect(wrapper.get('[data-testid="screen-collected-mac-note"]').text()).toContain('保存后记入本机资料');
+    expect(wrapper.get('[data-testid="screen-collected-mac-note"]').text()).toContain('本机采集，待保存到本机');
     expect(screen.mac).toBe('');expect(save).not.toHaveBeenCalled();
     await submit();expect(save.mock.calls[0]![1].mac).toBe(captured);
   });

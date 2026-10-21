@@ -1,4 +1,5 @@
-use super::model::{ScreenAsset, ScreenFields};
+use super::model::{ScreenAsset, ScreenDraft, ScreenFields};
+use super::rules::normalize_mac;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -75,6 +76,51 @@ pub fn field_values(fields: &ScreenFields) -> BTreeMap<&'static str, String> {
         ("location", fields.location.clone()),
     ])
 }
+
+/// 仅用于资料意图和差异判断；平台写入的原值条件仍保留原始值。
+pub fn field_semantically_equal(field: &str, left: &str, right: &str) -> bool {
+    if field == "mac" {
+        normalize_mac(left.trim()) == normalize_mac(right.trim())
+    } else {
+        left.trim() == right.trim()
+    }
+}
+
+pub fn fields_semantically_equal(left: &ScreenFields, right: &ScreenFields) -> bool {
+    let right = field_values(right);
+    field_values(left)
+        .iter()
+        .all(|(field, value)| field_semantically_equal(field, value, &right[field]))
+}
+
+/// 未编辑字段跟随当前平台资料，不把旧草稿整份覆盖到新平台基准。
+pub fn effective_draft_fields(current: &ScreenFields, draft: &ScreenDraft) -> ScreenFields {
+    let mut values = current.clone();
+    let base = field_values(&draft.base);
+    for (field, value) in field_values(&draft.values) {
+        if !field_semantically_equal(field, &value, &base[field]) {
+            set_field(&mut values, field, value);
+        }
+    }
+    values
+}
+
+pub fn draft_conflicting_fields(
+    current: &ScreenFields,
+    draft: &ScreenDraft,
+) -> Vec<&'static str> {
+    let base = field_values(&draft.base);
+    let current = field_values(current);
+    field_values(&draft.values)
+        .into_iter()
+        .filter_map(|(field, wanted)| {
+            (!field_semantically_equal(field, &wanted, &base[field])
+                && !field_semantically_equal(field, &current[field], &base[field])
+                && !field_semantically_equal(field, &current[field], &wanted))
+            .then_some(field)
+        })
+        .collect()
+}
 pub fn label(field: &str) -> &str {
     match field {
         "name" => "名称",
@@ -95,5 +141,78 @@ pub fn set_field(fields: &mut ScreenFields, key: &str, value: String) {
         "spaceId" => fields.space_id = (!value.is_empty()).then_some(value),
         "location" => fields.location = value,
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fields() -> ScreenFields {
+        ScreenFields {
+            name: "测试屏".into(),
+            ip: "192.0.2.10".into(),
+            mac: "02:AB:22:33:44:55".into(),
+            size: "4".into(),
+            space_id: None,
+            location: "原位置".into(),
+        }
+    }
+
+    fn draft(base: &ScreenFields, values: ScreenFields) -> ScreenDraft {
+        ScreenDraft {
+            screen_id: "screen".into(),
+            base_revision: 1,
+            revision: 2,
+            base: base.clone(),
+            values,
+            updated_at: "time".into(),
+        }
+    }
+
+    #[test]
+    fn field_semantics_ignore_only_mac_format_and_outer_whitespace() {
+        assert!(field_semantically_equal("mac", " 02-ab-22-33-44-55 ", "02:AB:22:33:44:55"));
+        assert!(field_semantically_equal("mac", " ", ""));
+        assert!(!field_semantically_equal("mac", "02:AB:22:33:44:55", "02:AB:22:33:44:56"));
+        assert!(field_semantically_equal("name", " 测试屏 ", "测试屏"));
+        assert!(!field_semantically_equal("name", "屏 A", "屏A"));
+        let base = fields();
+        let mut empty_space = base.clone();
+        empty_space.space_id = Some(String::new());
+        assert!(fields_semantically_equal(&base, &empty_space));
+    }
+
+    #[test]
+    fn effective_draft_preserves_current_untouched_fields_and_raw_revision() {
+        let base = fields();
+        let mut wanted = base.clone();
+        wanted.name = "待更新名称".into();
+        wanted.mac = "02-ab-22-33-44-55".into();
+        let pending = draft(&base, wanted);
+        let mut current = base.clone();
+        current.location = "平台新位置".into();
+        current.mac = "02AB22334455".into();
+        let effective = effective_draft_fields(&current, &pending);
+        assert_eq!(effective.name, "待更新名称");
+        assert_eq!(effective.location, "平台新位置");
+        assert_eq!(effective.mac, current.mac);
+        assert_eq!(pending.revision, 2);
+        assert_eq!(pending.base.location, "原位置");
+        assert!(draft_conflicting_fields(&current, &pending).is_empty());
+    }
+
+    #[test]
+    fn three_way_conflict_preserves_a_real_third_value_but_not_an_applied_intent() {
+        let base = fields();
+        let mut wanted = base.clone();
+        wanted.name = "待更新名称".into();
+        let pending = draft(&base, wanted.clone());
+        let mut current = base.clone();
+        current.name = "平台另一名称".into();
+        assert_eq!(draft_conflicting_fields(&current, &pending), vec!["name"]);
+        current.name = " 待更新名称 ".into();
+        assert!(draft_conflicting_fields(&current, &pending).is_empty());
+        assert!(fields_semantically_equal(&current, &effective_draft_fields(&current, &pending)));
     }
 }

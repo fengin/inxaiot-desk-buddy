@@ -36,9 +36,9 @@ use tokio_util::sync::CancellationToken;
 pub const PREVIEW: &str = "screen_registration_preview";
 fn success_message(mode: &str) -> &str {
     match mode {
-        "create" => "平台注册与本机关联已完成",
+        "create" => "注册成功，平台写入与本机关联已确认",
         "merge" => "资料与本机关联已合并，未安装应用或改变屏端配置",
-        _ => "平台资料已更新，未修改状态或应用版本",
+        _ => "资料更新成功，未修改状态或应用版本",
     }
 }
 fn local(state: &FormalAppState) -> ScreenRepository {
@@ -48,15 +48,135 @@ fn detail(plan: &ScreenPlan) -> AppResult<RegistrationPlan> {
     serde_json::from_value(plan.detail.clone())
         .map_err(|_| AppError::Conflict("注册检查记录格式无效".into()))
 }
-fn effective_draft(current: &ScreenFields, draft: &ScreenDraft) -> ScreenFields {
-    let mut values = current.clone();
-    let base = field_values(&draft.base);
-    for (key, value) in field_values(&draft.values) {
-        if value != base[key] {
-            set_field(&mut values, key, value);
+fn needs_mac_collection(before: Option<&ScreenFields>, after: &ScreenFields) -> bool {
+    before.is_none_or(|before| {
+        before.mac.trim().is_empty()
+            || !field_semantically_equal("ip", &before.ip, &after.ip)
+            || !field_semantically_equal("mac", &before.mac, &after.mac)
+    })
+}
+
+fn historical_mac(
+    snapshot: &ScreenSnapshot,
+    screen: &ScreenAsset,
+    target_ip: &str,
+) -> Option<String> {
+    std::iter::once(&screen.id)
+        .chain(screen.aliases.iter())
+        .filter_map(|id| snapshot.observations.get(id))
+        .flatten()
+        .filter(|observation| {
+            observation.observed_ip == target_ip
+                && observation.adb_available
+                && observation.mac_candidates.len() <= 1
+                && observation.observed_mac.as_deref().is_some_and(valid_mac)
+        })
+        .filter_map(|observation| {
+            time::OffsetDateTime::parse(
+                &observation.observed_at,
+                &time::format_description::well_known::Rfc3339,
+            )
+            .ok()
+            .map(|time| (time, observation))
+        })
+        .max_by_key(|(time, observation)| (*time, observation.id.as_str()))
+        .and_then(|(_, observation)| observation.observed_mac.clone())
+}
+
+#[derive(Debug)]
+struct MacDecision {
+    source: &'static str,
+    message: String,
+    confirmation: Option<&'static str>,
+    errors: Vec<String>,
+}
+
+fn apply_mac_observation(
+    current: &ScreenFields,
+    before: Option<&ScreenFields>,
+    after: &mut ScreenFields,
+    previous: Option<String>,
+    observed: Result<&ScreenObservation, String>,
+) -> MacDecision {
+    let mut decision = MacDecision {
+        source: "unchanged",
+        message: String::new(),
+        confirmation: None,
+        errors: Vec::new(),
+    };
+    match observed {
+        Ok(observation) => {
+            if observation.observed_ip != after.ip {
+                decision.source = "conflict";
+                decision.message = "采集地址不符合本次目标，请重新检查".into();
+                decision.errors.push(decision.message.clone());
+                return decision;
+            }
+            if observation.adb_available && observation.mac_candidates.len() > 1 {
+                decision.source = "conflict";
+                decision.message = observation.mac_candidates.join("；");
+                decision.errors.push("设备存在多个有线网卡，请核实身份，不能按空 MAC 绕过".into());
+                return decision;
+            }
+            if let Some(mac) = observation
+                .observed_mac
+                .as_ref()
+                .filter(|mac| observation.adb_available && valid_mac(mac))
+            {
+                if before.is_some_and(|before| {
+                    valid_mac(&before.mac)
+                        && !field_semantically_equal("mac", &before.mac, mac)
+                }) || (valid_mac(&after.mac)
+                    && !field_semantically_equal("mac", &after.mac, mac))
+                {
+                    decision.source = "conflict";
+                    decision.message = format!("本次有线 MAC：{mac}");
+                    decision.errors.push("采集 MAC 与已有身份资料冲突，请先核实".into());
+                } else {
+                    after.mac = mac.clone();
+                    decision.source = "collected";
+                    decision.message = format!("已读取有线网卡 MAC：{mac}");
+                }
+                return decision;
+            }
+            decision.message = if !observation.adb_available && observation.errors.is_empty() {
+                "设备 ADB 连接未确认，不能采用返回的 MAC".into()
+            } else {
+                observation.errors.join("；")
+            };
         }
+        Err(message) => decision.message = message,
     }
-    values
+    let known = before
+        .map(|before| before.mac.clone())
+        .filter(|mac| valid_mac(mac))
+        .or(previous.filter(|mac| valid_mac(mac)))
+        .or_else(|| valid_mac(&current.mac).then(|| current.mac.clone()));
+    if valid_mac(&after.mac)
+        && known.as_ref().is_some_and(|mac| !field_semantically_equal("mac", mac, &after.mac))
+    {
+        decision.source = "conflict";
+        decision.errors.push("待提交 MAC 与可信历史冲突，采集失败不能跳过".into());
+    } else if before.is_some_and(|before| {
+        known.is_none()
+            && valid_mac(&after.mac)
+            && !field_semantically_equal("mac", &before.mac, &after.mac)
+    }) {
+        decision.source = "conflict";
+        decision.message = "新增 MAC 尚未通过现场采集核实，不能作为历史地址提交".into();
+        decision.errors.push(decision.message.clone());
+    } else {
+        after.mac = known.unwrap_or_default();
+        let empty = after.mac.is_empty();
+        decision.source = if empty { "empty" } else { "history" };
+        decision.confirmation = Some(if empty { "empty" } else { "existing" });
+        decision.message = format!(
+            "本次未取得可靠 MAC（{}）；{}",
+            decision.message,
+            if empty { "需确认暂空登记" } else { "需确认沿用历史地址" },
+        );
+    }
+    decision
 }
 fn diffs(
     before: Option<&ScreenFields>,
@@ -66,7 +186,9 @@ fn diffs(
     let old = before.map(field_values).unwrap_or_default();
     field_values(after)
         .into_iter()
-        .filter(|(key, value)| old.get(key) != Some(value))
+        .filter(|(key, value)| {
+            old.get(key).is_none_or(|before| !field_semantically_equal(key, before, value))
+        })
         .map(|(key, value)| {
             let display = |value: String| {
                 if key == "spaceId" {
@@ -150,20 +272,15 @@ where
         let before = (screen.source == "platform").then_some(screen.fields.clone());
         let draft = snapshot.platform_drafts.get(&screen_id);
         let mut after = draft
-            .map(|d| effective_draft(&screen.fields, d))
+            .map(|d| effective_draft_fields(&screen.fields, d))
             .unwrap_or_else(|| screen.fields.clone());
         let mut errors = Vec::new();
         if let Err(error) = local(state).require_idle(project, &screen_id).await {
             errors.push(error.to_string());
         }
         if let Some(draft) = draft {
-            let base = field_values(&draft.base);
-            let wanted = field_values(&draft.values);
-            let current = field_values(&screen.fields);
-            for (key, value) in &wanted {
-                if value != &base[key] && current[key] != base[key] && current[key] != *value {
-                    errors.push(format!("平台{}已变化，请重新编辑草稿确认", label(key)));
-                }
+            for key in draft_conflicting_fields(&screen.fields, draft) {
+                errors.push(format!("平台{}已变化，请重新编辑草稿确认", label(key)));
             }
             revisions.insert(screen_id.clone(), draft.revision);
         }
@@ -176,92 +293,27 @@ where
         let mut source = "unchanged".to_string();
         let mut mac_message = "设备地址与身份未改变，无需连接设备".to_string();
         let mut confirmation = None;
-        let changed_identity = before
-            .as_ref()
-            .is_none_or(|b| b.ip != after.ip || normalize_mac(&b.mac) != normalize_mac(&after.mac));
-        if changed_identity && after.ip.parse::<std::net::Ipv4Addr>().is_ok() {
+        if needs_mac_collection(before.as_ref(), &after)
+            && after.ip.parse::<std::net::Ipv4Addr>().is_ok()
+        {
             let mut target = screen.clone();
             target.fields = after.clone();
             let observed = collect_mac(target).await;
-            let previous = snapshot
-                .observations
-                .get(&screen.id)
-                .and_then(|items| {
-                    items.iter().find(|o| {
-                        o.observed_ip == after.ip
-                            && o.observed_mac.as_deref().is_some_and(valid_mac)
-                    })
-                })
-                .and_then(|o| o.observed_mac.clone());
-            match observed {
-                Ok(observation) => {
-                    local(state)
-                        .append_observation(project, &observation)
-                        .await?;
-                    if observation.mac_candidates.len() > 1 {
-                        errors.push("设备存在多个有线网卡，请核实身份，不能按空 MAC 绕过".into());
-                        source = "conflict".into();
-                        mac_message = observation.mac_candidates.join("；");
-                    } else if let Some(mac) = observation.observed_mac.filter(|m| valid_mac(m)) {
-                        if before.as_ref().is_some_and(|b| {
-                            valid_mac(&b.mac) && normalize_mac(&b.mac) != normalize_mac(&mac)
-                        }) || (valid_mac(&after.mac)
-                            && normalize_mac(&after.mac) != normalize_mac(&mac))
-                        {
-                            errors.push("采集 MAC 与已有身份资料冲突，请先核实".into());
-                            source = "conflict".into();
-                            mac_message = format!("本次有线 MAC：{mac}");
-                        } else {
-                            after.mac = mac.clone();
-                            source = "collected".into();
-                            mac_message = format!("已读取有线网卡 MAC：{mac}");
-                        }
-                    } else {
-                        mac_message = observation.errors.join("；");
-                    }
-                }
-                Err(error) => mac_message = error.to_string(),
+            let previous = historical_mac(&snapshot, screen, &after.ip);
+            if let Ok(observation) = &observed {
+                local(state).append_observation(project, observation).await?;
             }
-            if source == "unchanged" {
-                let known = before
-                    .as_ref()
-                    .map(|b| b.mac.clone())
-                    .filter(|m| valid_mac(m))
-                    .or(previous)
-                    .or_else(|| valid_mac(&screen.fields.mac).then(|| screen.fields.mac.clone()));
-                if valid_mac(&after.mac)
-                    && known
-                        .as_ref()
-                        .is_some_and(|m| normalize_mac(m) != normalize_mac(&after.mac))
-                {
-                    source = "conflict".into();
-                    errors.push("待提交 MAC 与可信历史冲突，采集失败不能跳过".into());
-                } else {
-                    after.mac = known.unwrap_or_default();
-                    source = if after.mac.is_empty() {
-                        "empty"
-                    } else {
-                        "history"
-                    }
-                    .into();
-                    confirmation = Some(
-                        if after.mac.is_empty() {
-                            "empty"
-                        } else {
-                            "existing"
-                        }
-                        .into(),
-                    );
-                    mac_message = format!(
-                        "本次未取得可靠 MAC（{mac_message}）；{}",
-                        if after.mac.is_empty() {
-                            "需确认暂空登记"
-                        } else {
-                            "需确认沿用历史地址"
-                        }
-                    );
-                }
-            }
+            let decision = apply_mac_observation(
+                &screen.fields,
+                before.as_ref(),
+                &mut after,
+                previous,
+                observed.as_ref().map_err(ToString::to_string),
+            );
+            source = decision.source.into();
+            mac_message = decision.message;
+            confirmation = decision.confirmation.map(String::from);
+            errors.extend(decision.errors);
         }
         let needs_space = before
             .as_ref()
@@ -1103,4 +1155,168 @@ pub fn recover<'a>(
         }
         Ok(TaskRecoveryOutcome::Completed)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fields(mac: &str) -> ScreenFields {
+        ScreenFields {
+            name: "测试屏".into(),
+            ip: "192.0.2.10".into(),
+            mac: mac.into(),
+            size: "4".into(),
+            space_id: Some("1001".into()),
+            location: String::new(),
+        }
+    }
+
+    fn observation(ip: &str, mac: &str) -> ScreenObservation {
+        ScreenObservation {
+            id: "observation".into(),
+            screen_id: "screen".into(),
+            operation_type: "mac".into(),
+            observed_ip: ip.into(),
+            observed_at: "2026-10-21T01:00:00Z".into(),
+            adb_available: true,
+            observed_mac: Some(mac.into()),
+            mac_candidates: vec![format!("eth0={mac}")],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn empty_registered_mac_collects_and_creates_a_real_update_diff() {
+        let before = fields("");
+        let mut after = before.clone();
+        assert!(needs_mac_collection(Some(&before), &after));
+        let observed = observation(&after.ip, "02:11:22:33:44:55");
+        let decision = apply_mac_observation(&before, Some(&before), &mut after, None, Ok(&observed));
+        assert_eq!(decision.source, "collected");
+        assert!(decision.errors.is_empty());
+        assert!(decision.confirmation.is_none());
+        let changes = diffs(Some(&before), &after, &[]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].field, "mac");
+        assert_eq!(changes[0].before, "");
+        assert_eq!(changes[0].after, "02:11:22:33:44:55");
+    }
+
+    #[test]
+    fn valid_identity_does_not_reconnect_for_name_or_equivalent_mac_format() {
+        let before = fields("02:AB:22:33:44:55");
+        let mut after = before.clone();
+        after.mac = "02-ab-22-33-44-55".into();
+        assert!(!needs_mac_collection(Some(&before), &after));
+        assert!(diffs(Some(&before), &after, &[]).is_empty());
+        after.name = "另一个名称".into();
+        assert!(!needs_mac_collection(Some(&before), &after));
+        assert_eq!(diffs(Some(&before), &after, &[])[0].field, "name");
+        after.ip = "192.0.2.11".into();
+        assert!(needs_mac_collection(Some(&before), &after));
+        assert!(needs_mac_collection(None, &before));
+    }
+
+    #[test]
+    fn failed_collection_uses_only_trusted_same_ip_history_with_confirmation() {
+        let before = fields("");
+        let screen = ScreenAsset {
+            id: "screen".into(),
+            aliases: vec!["old-local-id".into()],
+            fields: before.clone(),
+            ..Default::default()
+        };
+        let trusted = observation(&before.ip, "02:11:22:33:44:55");
+        let mut wrong_ip = observation("192.0.2.11", "02:11:22:33:44:66");
+        wrong_ip.observed_at = "2026-10-21T02:00:00Z".into();
+        let mut ambiguous = trusted.clone();
+        ambiguous.observed_at = "2026-10-21T03:00:00Z".into();
+        ambiguous.mac_candidates.push("eth1=02:11:22:33:44:77".into());
+        let mut unconnected = trusted.clone();
+        unconnected.observed_at = "2026-10-21T04:00:00Z".into();
+        unconnected.adb_available = false;
+        let mut snapshot = ScreenSnapshot::default();
+        snapshot.observations.insert("screen".into(), vec![wrong_ip, ambiguous, unconnected]);
+        snapshot.observations.insert("old-local-id".into(), vec![trusted]);
+        let previous = historical_mac(&snapshot, &screen, &before.ip);
+        assert_eq!(previous.as_deref(), Some("02:11:22:33:44:55"));
+        let mut after = before.clone();
+        let decision = apply_mac_observation(&before, Some(&before), &mut after, previous, Err("本次离线".into()));
+        assert_eq!(decision.source, "history");
+        assert_eq!(decision.confirmation, Some("existing"));
+        assert_eq!(after.mac, "02:11:22:33:44:55");
+        assert!(decision.errors.is_empty());
+        assert!(historical_mac(&snapshot, &screen, "192.0.2.12").is_none());
+    }
+
+    #[test]
+    fn failed_collection_without_history_requires_empty_confirmation() {
+        let before = fields("");
+        let mut after = before.clone();
+        let decision = apply_mac_observation(&before, Some(&before), &mut after, None, Err("本次离线".into()));
+        assert_eq!(decision.source, "empty");
+        assert_eq!(decision.confirmation, Some("empty"));
+        assert!(after.mac.is_empty());
+    }
+
+    #[test]
+    fn collected_identity_conflict_and_multiple_interfaces_never_fall_back() {
+        let before = fields("02:11:22:33:44:55");
+        let mut after = before.clone();
+        let mut observed = observation(&after.ip, "02:11:22:33:44:66");
+        let decision = apply_mac_observation(&before, Some(&before), &mut after, Some(before.mac.clone()), Ok(&observed));
+        assert_eq!(decision.source, "conflict");
+        assert!(!decision.errors.is_empty());
+        assert!(decision.confirmation.is_none());
+        assert_eq!(after.mac, before.mac);
+        observed.mac_candidates.push("eth1=02:11:22:33:44:77".into());
+        let decision = apply_mac_observation(&before, Some(&before), &mut after, Some(before.mac.clone()), Ok(&observed));
+        assert_eq!(decision.source, "conflict");
+        assert!(decision.errors[0].contains("多个有线网卡"));
+        assert!(decision.confirmation.is_none());
+    }
+
+    #[test]
+    fn historical_conflict_or_wrong_live_ip_cannot_supply_a_new_identity() {
+        let before = fields("");
+        let mut after = fields("02:11:22:33:44:66");
+        let decision = apply_mac_observation(&before, Some(&before), &mut after, Some("02:11:22:33:44:55".into()), Err("本次离线".into()));
+        assert_eq!(decision.source, "conflict");
+        assert!(decision.confirmation.is_none());
+        let observed = observation("192.0.2.11", "02:11:22:33:44:66");
+        let decision = apply_mac_observation(&before, Some(&before), &mut after, None, Ok(&observed));
+        assert_eq!(decision.source, "conflict");
+        assert!(decision.errors[0].contains("采集地址"));
+    }
+
+    #[test]
+    fn unverified_manual_mac_blocks_registered_update_but_preserves_create_empty_rule() {
+        let before = fields("");
+        let mut after = fields("02:11:22:33:44:66");
+        let wanted = after.mac.clone();
+        let decision = apply_mac_observation(&before, Some(&before), &mut after, None, Err("本次离线".into()));
+        assert_eq!(decision.source, "conflict");
+        assert!(decision.errors[0].contains("尚未通过现场采集"));
+        assert!(decision.confirmation.is_none());
+        assert_eq!(after.mac, wanted);
+
+        let decision = apply_mac_observation(&before, None, &mut after, None, Err("本次离线".into()));
+        assert_eq!(decision.source, "empty");
+        assert_eq!(decision.confirmation, Some("empty"));
+        assert!(after.mac.is_empty());
+    }
+
+    #[test]
+    fn mac_without_confirmed_adb_connection_is_not_a_successful_live_collection() {
+        let before = fields("");
+        let mut after = before.clone();
+        let mut observed = observation(&after.ip, "02:11:22:33:44:55");
+        observed.adb_available = false;
+        let decision = apply_mac_observation(&before, Some(&before), &mut after, None, Ok(&observed));
+        assert_eq!(decision.source, "empty");
+        assert_eq!(decision.confirmation, Some("empty"));
+        assert!(after.mac.is_empty());
+        assert!(decision.message.contains("ADB 连接未确认"));
+    }
 }

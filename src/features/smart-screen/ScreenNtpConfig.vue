@@ -120,9 +120,16 @@ function retry(ids: string[]) { if (task.value) emit("retry", task.value, ids); 
 <template>
   <div class="screen-ntp-operation">
     <n-alert v-if="error" type="warning" :show-icon="true">{{ error }}</n-alert>
-    <div v-if="step === 0" class="screen-ntp-select">
+    <div v-if="step === 0" class="screen-ntp-select screen-select-stage">
       <screen-target-picker :disabled="busy" />
-      <aside class="screen-ntp-guide"><h3>读取现有 NTP 设置</h3><p>先读取屏的当前服务器地址和自动校时状态。未设置自定义服务器时，地址显示为空。</p><p>支持 IP 地址或主机名，服务器应提供标准 UDP 123 授时服务。可以同时选择 4 寸屏和 10 寸屏。</p><div class="screen-callout">保存时启用自动校时，保留原时区和自动时区设置；按固件需要重启屏，再验证授时结果。</div><n-button type="primary" :loading="busy" :disabled="!store.selectedIds.length || !useScreenAdapter().readNtp" @click="read">读取 {{ store.selectedIds.length }} 台 NTP 设置</n-button></aside>
+      <aside class="screen-ntp-guide screen-operation-guide">
+        <h3>读取现有 NTP 设置</h3>
+        <div class="screen-operation-help">
+          <p>读取屏的当前服务器地址和自动校时状态，设置自定义NTP服务器，支持 IP 地址或主机名，服务器应提供标准 UDP 123 授时服务</p>
+          <p>保存时启用自动校时，保留原时区和自动时区设置；按固件需要重启屏，再验证授时结果。</p>
+        </div>
+        <n-button type="primary" :loading="busy" :disabled="!store.selectedIds.length || !useScreenAdapter().readNtp" @click="read">读取 {{ store.selectedIds.length }} 台 NTP 设置</n-button>
+      </aside>
     </div>
     <div v-else-if="step === 1" class="screen-ntp-editor">
       <div class="screen-ntp-form">
@@ -146,9 +153,8 @@ function retry(ids: string[]) { if (task.value) emit("retry", task.value, ids); 
 
 <style scoped>
 .screen-ntp-operation{display:flex;flex:1;flex-direction:column;gap:8px;min-height:0;min-width:0;overflow:hidden}
-.screen-ntp-operation>.n-alert{flex:none}.screen-ntp-select{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(300px,.9fr);gap:16px;flex:1;min-height:0}
-.screen-ntp-guide{display:flex;flex-direction:column;align-items:flex-start;gap:12px;padding:14px;border:1px solid var(--inx-color-border);border-radius:6px;background:var(--inx-color-surface)}
-.screen-ntp-guide h3{margin:0;font-size:14px}.screen-ntp-guide p{margin:0;line-height:1.7}.screen-ntp-guide .screen-callout{font-size:var(--inx-font-size-table);padding:8px 10px}
+.screen-ntp-operation>.n-alert{flex:none}
+.screen-ntp-guide{align-items:flex-start}
 .screen-ntp-editor{display:flex;flex:1;flex-direction:column;gap:8px;min-height:0;overflow:hidden}.screen-ntp-form{display:grid;flex:none;grid-template-columns:max-content minmax(200px,1fr) max-content minmax(140px,.7fr) max-content 76px max-content;align-items:center;gap:8px}
 .screen-ntp-form label{font-size:var(--inx-font-size-base);font-weight:400;white-space:nowrap}.screen-ntp-notice{flex:none;margin:0;font-size:var(--inx-font-size-table);line-height:1.5;color:var(--inx-color-text-secondary)}
 .screen-ntp-summary,.screen-ntp-footer{display:flex;flex:none;align-items:center;gap:8px;min-height:28px;font-size:var(--inx-font-size-table)}.screen-ntp-summary{justify-content:space-between}.screen-ntp-footer{flex-wrap:wrap}

@@ -500,3 +500,59 @@ async fn new_draft_can_explicitly_undo_value_while_previous_submission_finishes(
     assert_eq!(draft.values.name, original.fields.name);
     store.close().await;
 }
+
+#[tokio::test]
+async fn no_op_draft_preserves_raw_revision_and_follows_refreshed_platform_fields() {
+    use inxaiot_desk_buddy_lib::domain::smart_screen::registration::{
+        effective_draft_fields, fields_semantically_equal,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("db");
+    let store = LocalStore::open(&database).await.unwrap();
+    project(&store, "a").await;
+    let repo = ScreenRepository::new(store.pool().clone());
+    repo.set_scope("a", "business", "source").await.unwrap();
+    let original = asset();
+    repo.replace_platform_cache("a", "business", &[original.clone()], &[])
+        .await
+        .unwrap();
+    let mut filled = original.fields.clone();
+    filled.mac = "02:11:22:33:44:55".into();
+    repo.save_draft_checked("a", &original.id, &filled, 1, 0)
+        .await
+        .unwrap();
+    repo.save_draft_checked("a", &original.id, &original.fields, 1, 1)
+        .await
+        .unwrap();
+    let snapshot = repo.snapshot("a").await.unwrap();
+    let raw = &snapshot.platform_drafts[&original.id];
+    assert_eq!(raw.revision, 2);
+    assert!(raw.values.mac.is_empty());
+    assert!(fields_semantically_equal(
+        &original.fields,
+        &effective_draft_fields(&original.fields, raw)
+    ));
+    assert!(repo.save_draft_checked("a", &original.id, &filled, 1, 0).await.is_err());
+    let mut refreshed = original.clone();
+    refreshed.fields.location = "平台新位置".into();
+    repo.replace_platform_cache("a", "business", &[refreshed], &[])
+        .await
+        .unwrap();
+    let snapshot = repo.snapshot("a").await.unwrap();
+    let current = &snapshot.screens[0];
+    let raw = &snapshot.platform_drafts[&original.id];
+    assert_eq!(raw.revision, 2);
+    assert_eq!(raw.base.location, "桌面");
+    assert_eq!(raw.values.location, "桌面");
+    assert!(fields_semantically_equal(
+        &current.fields,
+        &effective_draft_fields(&current.fields, raw)
+    ));
+    store.close().await;
+
+    let reopened = LocalStore::open(&database).await.unwrap();
+    let snapshot = ScreenRepository::new(reopened.pool().clone()).snapshot("a").await.unwrap();
+    assert_eq!(snapshot.platform_drafts[&original.id].revision, 2);
+    assert_eq!(snapshot.platform_drafts.len(), 1);
+    reopened.close().await;
+}

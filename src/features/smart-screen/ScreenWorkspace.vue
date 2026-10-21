@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { NAlert, NButton, NSelect, NTag, useMessage } from "naive-ui";
 import { useScreenAdapter } from "@/shared/api/screenAdapter";
@@ -75,7 +75,13 @@ function operate(ids: string[], action: ScreenAction = "install") {
   void router.push("/screen/operations");
 }
 function recheckStatus(ids: string[]) { statusOpen.value = false; historyOpen.value = false; operate(ids, "ping"); }
-function checkVersions(ids: string[]) { detailId.value = ""; historyOpen.value = false; versionIds.value = [...ids]; versionOpen.value = true; }
+async function checkVersions(ids: string[]) {
+  const projectId = store.projectId;
+  detailId.value = ""; historyOpen.value = false; versionIds.value = [...ids];
+  // 先把目标传入抽屉，再打开；避免同步watch先读取上一批（初次为空）的目标。
+  await nextTick();
+  if (store.projectId === projectId) versionOpen.value = true;
+}
 async function refresh() { await store.refresh({ refreshPlatform: true }); message.info(store.platformAvailable ? `已读取${prototype ? '模拟' : ''}平台数据，${store.candidates.length} 组疑似重复待核对` : "平台不可用，可以继续维护本机未注册屏"); }
 </script>
 
@@ -101,7 +107,7 @@ async function refresh() { await store.refresh({ refreshPlatform: true }); messa
       <n-alert v-if="store.snapshot.availableProjects?.length && !store.snapshot.businessProjectId" type="info">请选择本机项目对应的业务项目，确认后该项目的资料和历史将固定在此范围。<n-select aria-label="平台业务项目" :options="store.snapshot.availableProjects.map(item => ({ label: item.name, value: item.id }))" @update:value="selectBusinessProject" /></n-alert>
       <n-alert v-if="store.snapshot.localOnly" type="info" :show-icon="true">当前为本机项目，可以新增、导入和维护未注册屏；配置平台连接后可读取平台资料和登记设备。</n-alert>
       <screen-operations v-if="operations" :key="`${store.projectId}-${operationSession}`" v-model:history-open="historyOpen" @status="statusOpen = true" @edit="edit" @merge="mergeOpen = true" @versions="checkVersions" @detail="openScreenDetail" />
-      <screen-list v-else @detail="openScreenDetail" @operate="operate(store.selectedIds)" @register="operate([$event], 'register')" @merge="mergeOpen = true" @status="statusOpen = true" />
+      <screen-list v-else @detail="openScreenDetail" @operate="operate(store.selectedIds)" @register="operate([$event], 'register')" @versions="checkVersions" @merge="mergeOpen = true" @status="statusOpen = true" />
     </template>
     <screen-local-editor :key="`${store.projectId}-${editing?.id ?? 'new'}`" v-model:show="editorOpen" :screen="editing" />
     <screen-import-dialog v-model:show="importOpen" />

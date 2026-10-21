@@ -32,6 +32,78 @@ function render(value: ScreenTask | Ref<ScreenTask>) {
   });
 }
 
+function registrationTask(state: ScreenTask["state"], modes: ("create" | "update")[]): ScreenTask {
+  const value = task(state, modes.map(() => "succeeded"));
+  value.action = "register"; value.mode = "real"; value.input!.action = "register";
+  value.targets.forEach((target, index) => {
+    target.result = { device: "not_required", business: "succeeded", shared: "succeeded", evidence: { before: modes[index] === "create" ? null : { id: `platform-${index}` }, after: { id: `platform-${index}` } } };
+  });
+  return value;
+}
+
+describe("注册结果仅依据已确认的平台写入", () => {
+  it.each([ ["create", "注册成功"], ["update", "更新成功"] ] as const)("%s确认写入后准确显示%s", (mode, label) => {
+    const wrapper = render(registrationTask("succeeded", [mode]));
+    try {
+      expect(wrapper.get(".screen-result-header .n-tag").text()).toBe(label);
+      expect(wrapper.get("tbody .n-tag").text()).toBe(label);
+    } finally { wrapper.unmount(); }
+  });
+
+  it("正式任务已提交但平台结果尚未确认，不显示注册成功", () => {
+    const value = registrationTask("running", ["create"]);
+    value.targets[0]!.state = "running"; value.targets[0]!.result!.business = "unknown";
+    const wrapper = render(value);
+    try {
+      expect(wrapper.get('[data-testid="screen-registration-awaiting-write"]').text()).toBe("已提交注册/更新任务，尚未确认平台写入成功。");
+      expect(wrapper.get(".screen-result-header .n-tag").text()).toBe("执行中");
+      expect(wrapper.get("tbody .n-tag").text()).toBe("执行中");
+      expect(wrapper.text()).not.toContain("注册成功");
+    } finally { wrapper.unmount(); }
+  });
+
+  it("部分成功逐屏区分成功与失败，不将整个批次显示为注册成功", () => {
+    const value = registrationTask("partially_succeeded", ["create", "update"]);
+    value.targets[1]!.state = "failed"; value.targets[1]!.result!.business = "failed";
+    const wrapper = render(value);
+    try {
+      expect(wrapper.get(".screen-result-header .n-tag").text()).toBe("部分注册/更新成功");
+      expect(wrapper.findAll("tbody .n-tag").map(tag => tag.text())).toEqual(["注册成功", "注册/更新未完成"]);
+    } finally { wrapper.unmount(); }
+  });
+
+  it("写入已确认但记录待补存，保留逐屏注册成功和任务待核实的区别", () => {
+    const value = registrationTask("needs_review", ["create"]);
+    value.targets[0]!.state = "needs_review"; value.targets[0]!.result!.shared = "unknown";
+    const wrapper = render(value);
+    try {
+      expect(wrapper.get(".screen-result-header .n-tag").text()).toBe("结果待核实");
+      expect(wrapper.get("tbody .n-tag").text()).toBe("注册成功");
+      expect(wrapper.text()).toContain("操作记录：待核实");
+    } finally { wrapper.unmount(); }
+  });
+
+  it("缺少平台业务结果时，即使旧任务状态为成功也不宣称注册成功", () => {
+    const value = registrationTask("succeeded", ["create"]); delete value.targets[0]!.result;
+    const wrapper = render(value);
+    try {
+      expect(wrapper.get(".screen-result-header .n-tag").text()).toBe("结果待核实");
+      expect(wrapper.get("tbody .n-tag").text()).toBe("结果待核实");
+      expect(wrapper.findAllComponents(NTag).every(tag => tag.props("type") !== "success")).toBe(true);
+    } finally { wrapper.unmount(); }
+  });
+
+  it("原型模拟完成不表示真实平台注册成功", () => {
+    const value = registrationTask("succeeded", ["create"]); value.mode = "prototype";
+    const wrapper = render(value);
+    try {
+      expect(wrapper.get(".screen-result-header .n-tag").text()).toBe("演示完成");
+      expect(wrapper.get("tbody .n-tag").text()).toBe("演示完成");
+      expect(wrapper.text()).not.toContain("注册成功");
+    } finally { wrapper.unmount(); }
+  });
+});
+
 describe("未解析 APK 的安装结果展示", () => {
   it("正在执行的安装不把内部待确认结果显示成故障",()=>{
     const value=task('running',['running']);value.mode='real';value.targets[0]!.progress=40;value.targets[0]!.message='正在安装小新2.0.9-5019';

@@ -1,11 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { appConfigChanges, appConfigRestartRequired, appConfigEffectiveAfter, appConfigReadTime } from "@/shared/model/screenAppConfig";
-import type { ScreenAppConfiguration } from "@/shared/model/screenAppConfig";
+import { appConfigChanges, appConfigRestartRequired, appConfigEffectiveAfter, appConfigReadTime, appConfigVoiceSupported, appConfigVoiceDisplay } from "@/shared/model/screenAppConfig";
+import type { ScreenAppConfiguration, ScreenAppConfigRead } from "@/shared/model/screenAppConfig";
 function configuration(): ScreenAppConfiguration {
   const env={otaUrl:'https://config.example.org',wsUrl:null,h5Url:null,h5ReadyCheckEnabled:true,otaWsUrl:null,otaH5Url:null,effectiveWsUrl:null,effectiveH5Url:'assets/web/demo.html',wsSource:'none' as const,h5Source:'default' as const};
   return {customDeviceName:'原名称',environments:{current:'pre',test:{...env},pre:{...env},prod:{...env}}};
 }
 describe('配置修改字段与重启范围',()=>{
+  it('语音启动是全局布尔字段，实际变化需重启一次，同值及省略不重启',()=>{
+    const config=configuration();config.autoStartVoiceEngine=false;
+    const patch={set:{autoStartVoiceEngine:true},clear:[]};
+    expect(appConfigChanges(config,patch)).toEqual([{key:'autoStartVoiceEngine',label:'语音引擎随应用启动',before:'关闭',after:'开启'}]);
+    expect(appConfigRestartRequired(config,patch)).toBe(true);
+    expect(appConfigRestartRequired(config,{set:{autoStartVoiceEngine:false},clear:[]})).toBe(false);
+    expect(appConfigRestartRequired(config,{set:{},clear:[]})).toBe(false);
+    expect(config.autoStartVoiceEngine).toBe(false);
+  });
+  it('语音能力与严格布尔回读缺一不可，未知不展示为关闭',()=>{
+    const config=configuration();config.autoStartVoiceEngine=false;
+    const row:ScreenAppConfigRead={screenId:'test',readAt:'2026-10-21T00:00:00Z',config,capabilities:{appVersionName:'1.6',appVersionCode:30,protocolVersion:1,supportedFields:['autoStartVoiceEngine'],ready:true},message:'已读取'};
+    expect(appConfigVoiceSupported(row)).toBe(true);expect(appConfigVoiceDisplay(row)).toBe('关闭');
+    for(const value of [undefined,null,'false',0]){
+      const unknown={...row,config:{...config,autoStartVoiceEngine:value}} as unknown as ScreenAppConfigRead;
+      expect(appConfigVoiceSupported(unknown)).toBe(false);expect(appConfigVoiceDisplay(unknown)).toContain('未确认');
+    }
+    expect(appConfigVoiceSupported({...row,capabilities:null})).toBe(false);
+    expect(appConfigVoiceSupported({...row,capabilities:{...row.capabilities!,supportedFields:[]}})).toBe(false);
+  });
   it('已固定但未激活时显式开启仍产生差异，单独激活不重启',()=>{
     const config=configuration(),patch={set:{},clear:[],homeEnabled:true};
     expect(appConfigChanges(config,patch,{supported:true,enabled:true,active:false})).toEqual([{key:'homeEnabled',label:'固定小新为主屏',before:'已固定，激活未确认',after:'固定并激活'}]);
@@ -31,6 +51,11 @@ describe('配置修改字段与重启范围',()=>{
   });
   it('不同偏移表示的同一读取时间显示一致',()=>{
     expect(appConfigReadTime('2026-10-03T15:00:00Z')).toBe(appConfigReadTime('2026-10-03T23:00:00+08:00'));
+    expect(appConfigReadTime('2026-10-03 15:00:00.0 +00:00:00')).toBe(appConfigReadTime('2026-10-03T15:00:00Z'));
+  });
+  it('读取时间不猜测无时区值，也不自动修正非法日历日期',()=>{
+    expect(appConfigReadTime('2026-03-08T02:30:00')).toBe('2026-03-08 02:30:00');
+    expect(appConfigReadTime('2026-02-30T10:00:00Z')).toBe('2026-02-30T10:00:00Z');
   });
   it('只列出指定字段，保持读取快照不变',()=>{
     const config=configuration();

@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { NMessageProvider } from "naive-ui";
+import { NMessageProvider, NTag } from "naive-ui";
 import { h } from "vue";
 
 import ActivityPanel from "@/shell/ActivityPanel.vue";
@@ -42,6 +42,24 @@ describe("activity panel", () => {
   beforeEach(() => {
     configureActivityAdapter(new FixtureActivityAdapter());
     configureWorkbenchAdapter(new FixtureWorkbenchAdapter());
+  });
+
+  it("未提交的历史注册检查不再显示注册已成功，明确提示尚未提交", async () => {
+    const { activity, wrapper } = await mountClearPanel();
+    try {
+      activity.panelTab = "tasks";
+      activity.tasks = [{ id: "historical-registration-check", projectId: "project-shenzhen-bay", domainType: "smart_screen", operationType: "screen_registration_preview", name: "注册/更新到平台", state: "succeeded", stage: "检查完成", progress: 100, targetCount: 5, completedCount: 5, updatedAt: "2026-10-17T08:47:33Z", cancellable: false }];
+      await flushPromises();
+      const row = wrapper.get(".task-row");
+      expect(row.get(".task-name strong").text()).toBe("注册/更新检查");
+      expect(row.getComponent(NTag).text()).toBe("检查完成");
+      expect(row.getComponent(NTag).props("type")).toBe("info");
+      expect(row.text()).toContain("检查完成，尚未提交注册");
+      expect(row.text()).not.toContain("已成功");
+      expect(row.text()).not.toContain("注册成功");
+      await row.trigger("click"); await flushPromises();
+      expect(wrapper.get(".log-scope strong").text()).toBe("注册/更新检查");
+    } finally { wrapper.unmount(); }
   });
 
   it("从日志切回任务后，确认清空只删除任务记录，不调用清日志接口", async () => {

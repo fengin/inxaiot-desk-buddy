@@ -22,7 +22,8 @@ function configuration(): ScreenAppConfiguration {
 }
 
 function row(config: ScreenAppConfiguration | null, screenId = "screen-1"): ScreenAppConfigRead {
-  return { screenId, readAt: "2026-10-04T04:00:00Z", config, capabilities: null, message: config ? "读取完成" : "读取超时" };
+  const capabilities = typeof config?.autoStartVoiceEngine === "boolean" ? { appVersionName: "1.6.0", appVersionCode: 30, protocolVersion: 1, supportedFields: ["autoStartVoiceEngine"], ready: true } : null;
+  return { screenId, readAt: "2026-10-04T04:00:00Z", config, capabilities, message: config ? "读取完成" : "读取超时" };
 }
 
 describe("批量配置代表值", () => {
@@ -68,6 +69,26 @@ describe("批量配置代表值", () => {
 });
 
 describe("屏配置差异", () => {
+  it("旧草稿的未支持语音值不参与参考，也不显示成已确认值", () => {
+    const disabled = configuration(); disabled.autoStartVoiceEngine = false;
+    const stale = configuration(); stale.autoStartVoiceEngine = true;
+    const unknown = { ...row(stale, "old-apk"), capabilities: null };
+    const summaries = summarizeAppConfigs([row(disabled), row(disabled, "screen-2"), unknown], "test");
+    expect(summaries.autoStartVoiceEngine).toMatchObject({ value: false, mixed: true, count: 2, total: 3 });
+    expect(appConfigDifferences(stale, summaries, "test", false)).toContainEqual({ key: "autoStartVoiceEngine", label: "语音引擎随应用启动", value: "未确认", reference: "关闭" });
+  });
+  it("语音启动差异跨环境保持全局值，旧APK未知值不冒充关闭", () => {
+    const enabled = configuration(); enabled.autoStartVoiceEngine = true;
+    const disabled = configuration(); disabled.autoStartVoiceEngine = false;
+    const unknown = configuration();
+    const rows = [row(enabled), row(enabled, "screen-2"), row(disabled, "screen-3"), row(unknown, "screen-4")];
+    for (const environment of ["test", "pre", "prod"] as const) {
+      const summaries = summarizeAppConfigs(rows, environment);
+      expect(summaries.autoStartVoiceEngine).toMatchObject({ value: true, mixed: true, total: 4 });
+      expect(appConfigDifferences(disabled, summaries, environment)).toContainEqual({ key: "autoStartVoiceEngine", label: "语音引擎随应用启动", value: "关闭", reference: "开启" });
+      expect(appConfigDifferences(unknown, summaries, environment)).toContainEqual({ key: "autoStartVoiceEngine", label: "语音引擎随应用启动", value: "未确认", reference: "开启" });
+    }
+  });
   it("仅列不同的字段，不把每台不同的名称当成配置异常", () => {
     const usual = configuration();
     const other = configuration();

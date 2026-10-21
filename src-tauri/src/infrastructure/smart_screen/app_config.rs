@@ -54,6 +54,7 @@ pub async fn save_draft(
             "edits",
             "readyMode",
             "homeMode",
+            "voiceMode",
             "names",
             "targetIds",
             "includedIds",
@@ -77,6 +78,14 @@ pub async fn save_draft(
     {
         return Err(AppError::InvalidConfig(
             "主屏设置草稿无效，请重新选择".into(),
+        ));
+    }
+    if draft
+        .get("voiceMode")
+        .is_some_and(|mode| !matches!(mode.as_str(), Some("keep" | "on" | "off")))
+    {
+        return Err(AppError::InvalidConfig(
+            "语音引擎随应用启动草稿无效，请重新选择".into(),
         ));
     }
     draft["savedAt"] = json!(now());
@@ -169,6 +178,48 @@ fn accepted(response: Value) -> AppResult<Value> {
     };
     Err(AppError::Conflict(message.into()))
 }
+fn validated_save_status<'a>(saved: &'a Value, patch: &AppConfigPatch) -> AppResult<&'a str> {
+    if matches!(
+        saved["code"].as_str(),
+        Some("TIMEOUT" | "STORAGE_ERROR" | "INVALID_RESPONSE" | "RESPONSE_TOO_LARGE")
+    ) {
+        return Err(AppError::Conflict(
+            "小新尚未确认配置保存结果，请重新读取核实；未重复保存或重启".into(),
+        ));
+    }
+    let status = saved["status"].as_str().unwrap_or("failed");
+    if status == "ok"
+        || (status == "failed" && saved.get("code").is_none() && !saved["failedFields"].is_array())
+    {
+        return Err(AppError::Conflict(
+            "小新未返回完整的保存结果，请重新读取核实".into(),
+        ));
+    }
+    if matches!(status, "saved" | "partial" | "unchanged")
+        && (!saved["savedFields"].is_array()
+            || !saved["failedFields"].is_array()
+            || !saved["restartRequired"].is_boolean())
+    {
+        return Err(AppError::Conflict(
+            "小新保存结果不完整，请重新读取核实".into(),
+        ));
+    }
+    let fields = patch.fields();
+    for key in ["savedFields", "failedFields"] {
+        if let Some(items) = saved[key].as_array() {
+            if items.iter().any(|field| {
+                !field
+                    .as_str()
+                    .is_some_and(|name| fields.iter().any(|value| value == name) || name == "h5ReadyRecord")
+            }) {
+                return Err(AppError::Conflict(
+                    "小新保存结果字段不完整，请重新读取核实".into(),
+                ));
+            }
+        }
+    }
+    Ok(status)
+}
 pub async fn read_device<P: DeviceCommandPort>(
     device: &AdbDevice<P>,
     ip: &str,
@@ -209,6 +260,14 @@ pub async fn read_device<P: DeviceCommandPort>(
         return Err(AppError::Conflict("小新配置返回不完整".into()));
     }
     let mut safe = json!({"customDeviceName":config["customDeviceName"],"environments":{"current":config["environments"]["current"]}});
+    let voice_supported = cap["supportedFields"].as_array().is_some_and(|fields| fields.contains(&json!("autoStartVoiceEngine")));
+    if let Some(value) = config.get("autoStartVoiceEngine").filter(|value| voice_supported && value.is_boolean()) {
+        safe["autoStartVoiceEngine"] = value.clone();
+    } else if patch.is_some_and(|patch| patch.set.contains_key("autoStartVoiceEngine") || patch.clear.iter().any(|field| field == "autoStartVoiceEngine")) {
+        return Err(AppError::Conflict(
+            "小新未返回有效的语音引擎随应用启动开关，不能修改此项；请升级应用或重新读取".into(),
+        ));
+    }
     for env in ["test", "pre", "prod"] {
         let source = &config["environments"][env];
         if !source.is_object() {
@@ -685,44 +744,7 @@ pub async fn execute(
             call(&device, &screen.fields.ip, "saveConfig", Some(&request)),
         )
         .await?;
-    if matches!(
-        saved["code"].as_str(),
-        Some("TIMEOUT" | "STORAGE_ERROR" | "INVALID_RESPONSE" | "RESPONSE_TOO_LARGE")
-    ) {
-        return Err(AppError::Conflict(
-            "小新尚未确认配置保存结果，请重新读取核实；未重复保存或重启".into(),
-        ));
-    }
-    let status = saved["status"].as_str().unwrap_or("failed");
-    if status == "ok"
-        || (status == "failed" && saved.get("code").is_none() && !saved["failedFields"].is_array())
-    {
-        return Err(AppError::Conflict(
-            "小新未返回完整的保存结果，请重新读取核实".into(),
-        ));
-    }
-    if matches!(status, "saved" | "partial" | "unchanged")
-        && (!saved["savedFields"].is_array()
-            || !saved["failedFields"].is_array()
-            || !saved["restartRequired"].is_boolean())
-    {
-        return Err(AppError::Conflict(
-            "小新保存结果不完整，请重新读取核实".into(),
-        ));
-    }
-    let fields = patch.fields();
-    for key in ["savedFields", "failedFields"] {
-        if let Some(items) = saved[key].as_array() {
-            if items.iter().any(|f| {
-                !f.as_str()
-                    .is_some_and(|s| fields.iter().any(|v| v == s) || s == "h5ReadyRecord")
-            }) {
-                return Err(AppError::Conflict(
-                    "小新保存结果字段不完整，请重新读取核实".into(),
-                ));
-            }
-        }
-    }
+    let status = validated_save_status(&saved, patch)?;
     result.evidence["config"]["save"] = json!(status);
     result.evidence["config"]["savedFields"] = saved["savedFields"].clone();
     result.evidence["config"]["failedFields"] = saved["failedFields"].clone();
@@ -938,6 +960,38 @@ fn restart_was_requested(evidence: &Value) -> bool {
         )
 }
 
+fn record_configuration_readback(
+    patch: &AppConfigPatch,
+    after: &Value,
+    result: &mut ScreenTargetResult,
+) -> bool {
+    if matches!(
+        result.evidence["config"]["save"].as_str(),
+        Some("partial" | "failed")
+    ) {
+        result.device = ResultState::Failed;
+        result.evidence["config"]["readback"] = json!(if patch.matches(after) {
+            "succeeded"
+        } else {
+            "different"
+        });
+        result.message =
+            "已重新读取当前配置；原保存未全部成功，未自动重启，请检查未保存字段".into();
+        return false;
+    }
+    if !patch.matches(after) {
+        result.device = ResultState::Failed;
+        result.evidence["config"]["readback"] = json!("different");
+        result.message = "回读值与本次设置不同，请检查屏端当前配置；未重复保存或重启".into();
+        return false;
+    }
+    result.evidence["config"]["readback"] = json!("succeeded");
+    if result.evidence["config"]["save"] == "unknown" {
+        result.evidence["config"]["save"] = json!("verified");
+    }
+    true
+}
+
 /// 结果核实只读取；任何不确定的保存、主屏策略或重启都不自动重放。
 pub async fn verify(
     state: &FormalAppState,
@@ -1038,67 +1092,187 @@ pub async fn verify(
     result.evidence["config"]["after"] = after.clone();
     result.evidence["config"]["readAt"] = json!(now());
     result.observation = Some(observed);
-    if matches!(
-        result.evidence["config"]["save"].as_str(),
-        Some("partial" | "failed")
-    ) {
-        result.device = ResultState::Failed;
-        result.evidence["config"]["readback"] = json!(if patch.matches(&after) {
-            "succeeded"
-        } else {
-            "different"
-        });
-        result.message =
-            "已重新读取当前配置；原保存未全部成功，未自动重启，请检查未保存字段".into();
+    if !record_configuration_readback(patch, &after, result) {
         return finish_verification(state, id, plan, result, home_error).await;
     }
-    if !patch.matches(&after) {
-        result.device = ResultState::Failed;
-        result.evidence["config"]["readback"] = json!("different");
-        result.message = "回读值与本次设置不同，请检查屏端当前配置；未重复保存或重启".into();
-    } else {
-        result.evidence["config"]["readback"] = json!("succeeded");
-        if result.evidence["config"]["save"] == "unknown" {
-            result.evidence["config"]["save"] = json!("verified");
+    let needs_restart = result.evidence["config"]["restartRequired"] == true;
+    if needs_restart {
+        let pid = device
+            .shell(
+                &screen.fields.ip,
+                &["pidof", super::device::XIAOXIN_PACKAGE],
+                CancellationToken::new(),
+            )
+            .await?;
+        let before = result.evidence["config"]["beforePid"]
+            .as_str()
+            .unwrap_or("");
+        let sent = restart_was_requested(&result.evidence);
+        if !sent || pid.is_empty() || pid == before {
+            result.device = ResultState::Failed;
+            result.evidence["config"]["restart"] = json!("not_confirmed");
+            result.message =
+                "配置已保存并回读一致，但未确认小新完成重启；只需单独重启小新，无需重新保存"
+                    .into();
+            return finish_verification(state, id, plan, result, home_error).await;
         }
-        let needs_restart = result.evidence["config"]["restartRequired"] == true;
-        if needs_restart {
-            let pid = device
-                .shell(
-                    &screen.fields.ip,
-                    &["pidof", super::device::XIAOXIN_PACKAGE],
-                    CancellationToken::new(),
-                )
-                .await?;
-            let before = result.evidence["config"]["beforePid"]
-                .as_str()
-                .unwrap_or("");
-            let sent = restart_was_requested(&result.evidence);
-            if !sent || pid.is_empty() || pid == before {
-                result.device = ResultState::Failed;
-                result.evidence["config"]["restart"] = json!("not_confirmed");
-                result.message =
-                    "配置已保存并回读一致，但未确认小新完成重启；只需单独重启小新，无需重新保存"
-                        .into();
-                return finish_verification(state, id, plan, result, home_error).await;
-            }
-            result.evidence["config"]["restart"] = json!("succeeded");
-        }
-        result.device = ResultState::Succeeded;
-        result.evidence["phase"] = json!("config_verified");
-        result.message = if needs_restart {
-            "配置已保存，小新已重启，回读一致"
-        } else {
-            "配置已保存并回读一致，本次无需重启"
-        }
-        .into();
+        result.evidence["config"]["restart"] = json!("succeeded");
     }
+    result.device = ResultState::Succeeded;
+    result.evidence["phase"] = json!("config_verified");
+    result.message = if needs_restart {
+        "配置已保存，小新已重启，回读一致"
+    } else {
+        "配置已保存并回读一致，本次无需重启"
+    }
+    .into();
     finish_verification(state, id, plan, result, home_error).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn configuration_fixture() -> Value {
+        let environment = json!({
+            "otaUrl":"https://example.test", "wsUrl":null, "h5Url":null,
+            "h5ReadyCheckEnabled":true, "otaWsUrl":null, "otaH5Url":null,
+            "effectiveWsUrl":null, "effectiveH5Url":null, "wsSource":"none", "h5Source":"none"
+        });
+        json!({"customDeviceName":"测试小新","privateValue":"must-not-project","environments":{
+            "current":"prod", "test":environment, "pre":environment, "prod":environment
+        }})
+    }
+
+    struct ConfigurationApplication {
+        capabilities: Value,
+        config: Value,
+        requests: Arc<Mutex<Vec<Value>>>,
+    }
+    impl DeviceCommandPort for ConfigurationApplication {
+        async fn execute(
+            &self,
+            _: &std::path::Path,
+            args: Vec<String>,
+            _: Duration,
+            _: CancellationToken,
+        ) -> AppResult<super::super::device::ProcessOutput> {
+            let stdout = if args.first().is_some_and(|value| value == "connect") {
+                "connected".into()
+            } else if args.last().is_some_and(|value| value == "get-state") {
+                "device".into()
+            } else {
+                let method = args.windows(2).find(|pair| pair[0] == "--method").expect("only configuration calls")[1].as_str();
+                let response = match method {
+                    "getCapabilities" => json!({"status":"ok","data":self.capabilities}),
+                    "readConfig" => json!({"status":"ok","data":self.config}),
+                    "saveConfig" => {
+                        let encoded = args.iter().find_map(|value| value.strip_prefix("payload:s:")).unwrap();
+                        let request: Value = serde_json::from_slice(&STANDARD.decode(encoded).unwrap()).unwrap();
+                        self.requests.lock().unwrap().push(request);
+                        json!({"status":"saved","savedFields":["autoStartVoiceEngine"],"failedFields":[],"restartRequired":true})
+                    }
+                    _ => panic!("unexpected method: {method}"),
+                };
+                format!("Result: Bundle[{{result={}}}]", STANDARD.encode(serde_json::to_vec(&response).unwrap()))
+            };
+            Ok(super::super::device::ProcessOutput { success: true, stdout, stderr: String::new() })
+        }
+    }
+
+    fn configuration_device(advertised: bool, config: Value) -> AdbDevice<ConfigurationApplication> {
+        let mut supported = vec![json!("customDeviceName")];
+        if advertised { supported.push(json!("autoStartVoiceEngine")); }
+        AdbDevice::with_commands(AndroidTools { adb: "mock-adb-never-executed".into() }, ConfigurationApplication {
+            capabilities: json!({"protocolVersion":1,"packageName":"chat.xiaoxin.app","ready":true,"supportedFields":supported}),
+            config, requests: Arc::new(Mutex::new(Vec::new()))
+        })
+    }
+
+    #[tokio::test]
+    async fn optional_voice_flag_requires_advertised_capability_and_boolean_without_breaking_old_fields() {
+        let voice: AppConfigPatch = serde_json::from_value(json!({"set":{"autoStartVoiceEngine":false}})).unwrap();
+        let name: AppConfigPatch = serde_json::from_value(json!({"set":{"customDeviceName":"新名称"}})).unwrap();
+        for advertised in [false, true] {
+            for value in [None, Some(Value::Null), Some(json!("false")), Some(json!(0)), Some(json!([])), Some(json!({})), Some(json!(true)), Some(json!(false))] {
+                let mut config = configuration_fixture();
+                if let Some(value) = &value { config["autoStartVoiceEngine"] = value.clone(); }
+                let device = configuration_device(advertised, config);
+                let valid = advertised && value.as_ref().is_some_and(Value::is_boolean);
+                let (_, safe) = read_device(&device, "192.0.2.1", None).await.unwrap();
+                assert_eq!(safe.get("autoStartVoiceEngine"), value.as_ref().filter(|_| valid));
+                assert!(safe.get("privateValue").is_none());
+                assert_eq!(safe["customDeviceName"], "测试小新");
+                assert!(read_device(&device, "192.0.2.1", Some(&name)).await.is_ok());
+                assert_eq!(read_device(&device, "192.0.2.1", Some(&voice)).await.is_ok(), valid);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_false_uses_existing_protocol_set_payload_and_validated_save_receipt() {
+        let patch: AppConfigPatch = serde_json::from_value(json!({"set":{"autoStartVoiceEngine":false}})).unwrap();
+        patch.validate().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let device = AdbDevice::with_commands(AndroidTools { adb: "mock-adb-never-executed".into() }, ConfigurationApplication {
+            capabilities: json!({}), config: configuration_fixture(), requests: requests.clone()
+        });
+        let request = json!({"protocolVersion":1,"requestId":"isolated-voice-request","set":patch.set,"clear":patch.clear});
+        let receipt = call(&device, "192.0.2.1", "saveConfig", Some(&request)).await.unwrap();
+        assert_eq!(validated_save_status(&receipt, &patch).unwrap(), "saved");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["protocolVersion"], 1);
+        assert_eq!(requests[0]["set"]["autoStartVoiceEngine"], false);
+        assert_eq!(requests[0]["clear"], json!([]));
+    }
+
+    #[test]
+    fn voice_save_receipts_keep_strict_existing_validation() {
+        let patch: AppConfigPatch = serde_json::from_value(json!({"set":{"autoStartVoiceEngine":false}})).unwrap();
+        let valid = json!({"status":"saved","savedFields":["autoStartVoiceEngine"],"failedFields":[],"restartRequired":true});
+        assert_eq!(validated_save_status(&valid, &patch).unwrap(), "saved");
+        for receipt in [
+            json!({"status":"ok"}),
+            json!({"status":"saved","savedFields":["autoStartVoiceEngine"],"restartRequired":true}),
+            json!({"status":"saved","savedFields":["autoStartVoiceEngine"],"failedFields":[],"restartRequired":"false"}),
+            json!({"status":"saved","savedFields":["customDeviceName"],"failedFields":[],"restartRequired":true}),
+            json!({"status":"partial","savedFields":[],"failedFields":[1],"restartRequired":false}),
+            json!({"status":"failed","code":"TIMEOUT"}),
+        ] { assert!(validated_save_status(&receipt, &patch).is_err()); }
+        assert_eq!(validated_save_status(&json!({"status":"partial","savedFields":[],"failedFields":["autoStartVoiceEngine"],"restartRequired":false}), &patch).unwrap(), "partial");
+        assert_eq!(validated_save_status(&json!({"status":"unchanged","savedFields":[],"failedFields":[],"restartRequired":false}), &patch).unwrap(), "unchanged");
+        let old: AppConfigPatch = serde_json::from_value(json!({"set":{"environments.prod.h5ReadyCheckEnabled":false}})).unwrap();
+        assert!(validated_save_status(&json!({"status":"saved","savedFields":["environments.prod.h5ReadyCheckEnabled","h5ReadyRecord"],"failedFields":[],"restartRequired":true}), &old).is_ok());
+    }
+
+    #[test]
+    fn voice_unknown_readback_requires_real_false_and_preserves_partial_failure_without_replaying_actions() {
+        let patch: AppConfigPatch = serde_json::from_value(json!({"set":{"autoStartVoiceEngine":false}})).unwrap();
+        for after in [json!({}), json!({"autoStartVoiceEngine":null}), json!({"autoStartVoiceEngine":"false"}), json!({"autoStartVoiceEngine":true})] {
+            let mut result = ScreenTargetResult { device: ResultState::Unknown, evidence: json!({"phase":"config_save_requested","config":{"save":"unknown","restartRequired":true}}), ..Default::default() };
+            assert!(!record_configuration_readback(&patch, &after, &mut result));
+            assert_eq!(result.device, ResultState::Failed);
+            assert_eq!(result.evidence["config"]["save"], "unknown");
+            assert_eq!(result.evidence["config"]["readback"], "different");
+        }
+        let mut result = ScreenTargetResult { device: ResultState::Unknown, evidence: json!({"phase":"config_save_requested","config":{"save":"unknown","restartRequired":true}}), ..Default::default() };
+        assert!(record_configuration_readback(&patch, &json!({"autoStartVoiceEngine":false}), &mut result));
+        assert_eq!(result.evidence["config"]["save"], "verified");
+        assert_eq!(result.evidence["config"]["readback"], "succeeded");
+        assert_eq!(result.device, ResultState::Unknown);
+        assert!(!restart_was_requested(&result.evidence));
+        for saved in ["partial", "failed"] {
+            result.evidence["config"]["save"] = json!(saved);
+            result.evidence["config"]["restart"] = json!("not_started");
+            assert!(!record_configuration_readback(&patch, &json!({"autoStartVoiceEngine":false}), &mut result));
+            assert_eq!(result.device, ResultState::Failed);
+            assert_eq!(result.evidence["config"]["save"], saved);
+            assert_eq!(result.evidence["config"]["restart"], "not_started");
+        }
+    }
+
     #[test]
     fn enabled_policy_without_active_home_task_is_not_skipped() {
         let mut policy = super::super::home::HomeStatus {

@@ -238,6 +238,9 @@ fn valid_http_value(value: &Value) -> bool {
 
 fn writable_projection(config: &Value) -> Value {
     let mut output = json!({"customDeviceName":config["customDeviceName"],"environments":{"current":config["environments"]["current"]}});
+    if let Some(value) = config.get("autoStartVoiceEngine") {
+        output["autoStartVoiceEngine"] = value.clone();
+    }
     for env in ["test", "pre", "prod"] {
         output["environments"][env] = json!({});
         for field in ["otaUrl", "wsUrl", "h5Url", "h5ReadyCheckEnabled"] {
@@ -460,6 +463,9 @@ async fn configuration_batch_save_restart_readback_and_restore()
                 format!("environments.{current}.h5ReadyCheckEnabled"),
             ],
         );
+        if config["autoStartVoiceEngine"].is_boolean() {
+            restoration.get_mut(id).unwrap().push("autoStartVoiceEngine".into());
+        }
     }
     let mut checks = Vec::new();
     let outcome: Result<(), Box<dyn std::error::Error>> = async {

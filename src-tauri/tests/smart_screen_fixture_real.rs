@@ -47,6 +47,7 @@ async fn desktop_fixture() -> Result<(), Box<dyn std::error::Error>> {
         }
         sqlx::query(&format!("CREATE TABLE `{business}`.smart_terminal_screen LIKE inxvision_iot_dev_demo.smart_terminal_screen")).execute(&admin).await?;
         sqlx::query(&format!("CREATE TABLE `{business}`.t_project_building LIKE inxvision_iot_dev_demo.t_project_building")).execute(&admin).await?;
+        sqlx::query(&format!("CREATE TABLE `{business}`.op_device_service_area LIKE inxvision_iot_dev_demo.op_device_service_area")).execute(&admin).await?;
         sqlx::query(&format!("INSERT INTO `{business}`.t_project_building(id,project_info_id,parent_id,area_name,area_level) VALUES(1000,777001,0,'验收楼幢',3),(1001,777001,1000,'验收楼层',4),(1002,777001,1000,'备用楼层',4)")).execute(&admin).await?;
         let pool = sqlx::mysql::MySqlPoolOptions::new()
             .max_connections(2)

@@ -5,7 +5,7 @@ import { useScreenAdapter } from "@/shared/api/screenAdapter";
 import { useSmartScreensStore } from "@/stores/smartScreens";
 import { normalizeScreenMac, validateLocalScreen } from "@/shared/model/screen";
 import type { LocalScreenInput, SmartScreen } from "@/shared/model/screen";
-import { screenPlatformDraftValues, screenPlatformFields } from "@/shared/model/screenRegistration";
+import { screenPlatformDraftFieldEdited, screenPlatformDraftValues, screenPlatformFieldEqual, screenPlatformFields, validRegistrationMac } from "@/shared/model/screenRegistration";
 import { screenSpaceLabel } from "@/shared/model/screenSpace";
 import { buildProjectSpaceTree, getProjectSpacePath, projectSpacePath } from "@/shared/model/projectSpace";
 import ProjectSpaceSelect from "@/shared/components/ProjectSpaceSelect.vue";
@@ -23,8 +23,7 @@ const form = reactive<LocalScreenInput>({ name: "", ip: "", size: "10", mac: "",
 const automaticMac = ref("");
 function validCollectedMac(screen?: SmartScreen) {
   const value = screen?.observedMac?.trim() ?? "";
-  const normalized = normalizeScreenMac(value);
-  return /^[0-9A-F]{12}$/.test(normalized) && !/^(0{12}|F{12})$/.test(normalized) ? value : "";
+  return validRegistrationMac(value) ? value : "";
 }
 const collectedMac = computed(() => form.ip.trim() === props.screen?.ip ? validCollectedMac(props.screen) : "");
 const canUseCollectedMac = computed(() => Boolean(collectedMac.value && normalizeScreenMac(form.mac.trim()) !== normalizeScreenMac(collectedMac.value)));
@@ -46,7 +45,8 @@ watch([show, () => props.screen?.id], ([open]) => {
   if (!open) return;
   const screen = props.screen;
   const values = screen?.source === "platform" ? screenPlatformDraftValues(screen, draft.value) : screen;
-  automaticMac.value = screen?.source === "local" && !screen.mac.trim() ? validCollectedMac(screen) : "";
+  automaticMac.value = screen && !values?.mac.trim() && values?.ip.trim() === screen.ip
+    && (screen.source === "local" || (!screen.mac.trim() && !screenPlatformDraftFieldEdited(draft.value, "mac"))) ? validCollectedMac(screen) : "";
   openedRevision.value = screen?.revision;
   openedDraftRevision.value = draft.value?.revision ?? 0;
   draftConflicts.value = [];
@@ -54,7 +54,7 @@ watch([show, () => props.screen?.id], ([open]) => {
     const current = screenPlatformFields(screen);
     const labels = { name: "名称", ip: "IP", mac: "MAC", size: "尺寸", spaceId: "空间", location: "安装位置" };
     for (const key of Object.keys(labels) as (keyof typeof labels)[]) {
-      if (draft.value.values[key] !== draft.value.base[key] && current[key] !== draft.value.base[key] && current[key] !== draft.value.values[key]) {
+      if (screenPlatformDraftFieldEdited(draft.value, key) && !screenPlatformFieldEqual(key, current[key], draft.value.base[key]) && !screenPlatformFieldEqual(key, current[key], draft.value.values[key])) {
         const value = key === "spaceId" ? projectSpacePath(store.snapshot.spaces, current.spaceId) || "待定空间" : current[key] || "未填写";
         draftConflicts.value.push(`${labels[key]}的当前平台值：${value}`);
       }
@@ -115,7 +115,7 @@ async function save() {
     if (generation !== request || store.projectId !== projectId || !show.value) return;
     await store.refresh();
     if (generation !== request || store.projectId !== projectId || !show.value) return;
-    message.success(platformEdit.value ? "修改已保存到本机，请通过“注册/更新到平台”核对提交" : id ? "智能屏信息已更新" : "已加入本机管理，可开始运维");
+    message.success(platformEdit.value ? id && store.draftIds.has(id) ? "修改已保存到本机，请通过“注册/更新到平台”核对提交" : "与平台资料一致，没有待提交修改" : id ? "智能屏信息已更新" : "已加入本机管理，可开始运维");
     show.value = false;
   } catch (cause) { if (generation === request && store.projectId === projectId) error.value = (cause as Error).message; }
   finally { if (generation === request && store.projectId === projectId) saving.value = false; }
@@ -138,7 +138,7 @@ async function discard() {
 
 <template>
   <n-modal v-model:show="show" preset="card" :title="screen ? '编辑智能屏' : '新增智能屏'" class="screen-dialog screen-editor" :bordered="false" :mask-closable="!saving" :close-on-esc="!saving" :closable="!saving">
-    <div class="screen-callout">{{ platformEdit ? '修改先保存到本机，通过“注册/更新到平台”核对后提交。列表仍保留一条平台记录。修改 IP 只更新登记地址，不修改屏的网络配置。' : '保存为“平台未注册”记录，可先安装与维护，再通过“注册/更新到平台”登记。' }}</div>
+    <div class="screen-callout">{{ platformEdit ? '修改记录保存在本机，须通过“注册/更新到平台”操作后才更新到平台' : '保存为“平台未注册”记录，可先安装与维护，再通过“注册/更新到平台”登记。' }}</div>
     <n-alert v-if="draftConflicts.length" type="warning" class="screen-dialog-alert" data-testid="screen-draft-conflict">平台资料已有变化：{{ draftConflicts.join('；') }}。下面保留本机拟修改值，请核对后保存；本次保存将以当前平台资料重新建立比较依据。</n-alert>
     <n-alert v-if="error" type="error" class="screen-dialog-alert">{{ error }}</n-alert>
     <n-form label-placement="top" :disabled="saving" @submit.prevent="save">
@@ -147,7 +147,7 @@ async function discard() {
         <n-form-item label="设备 IP" required><n-input v-model:value="form.ip" placeholder="例如：192.0.2.120" /></n-form-item>
         <n-form-item label="屏尺寸"><n-select v-model:value="form.size" :options="[{ label: '10 寸屏', value: '10' }, { label: '4 寸屏', value: '4' }, { label: '待确认', value: 'unknown' }]" /></n-form-item>
         <n-form-item label="MAC 地址（可稍后采集）"><div class="screen-mac-field"><n-input v-model:value="form.mac" placeholder="可留空" @update:value="automaticMac = ''" />
-          <div v-if="automaticMac && collectedMac && !canUseCollectedMac" class="screen-muted screen-mac-note" data-testid="screen-collected-mac-note">已带入本机采集的 MAC，保存后记入本机资料。</div>
+          <div v-if="automaticMac && collectedMac && !canUseCollectedMac" class="screen-muted screen-mac-note" data-testid="screen-collected-mac-note">{{ platformEdit ? '本机采集，待更新到平台' : '本机采集，待保存到本机' }}</div>
           <div v-else-if="canUseCollectedMac" class="screen-muted screen-mac-note" data-testid="screen-collected-mac-note">本机采集：{{ collectedMac }}<n-button text size="tiny" type="primary" :disabled="saving" data-testid="screen-use-collected-mac" @click="useCollectedMac">填入采集值</n-button></div>
         </div></n-form-item>
         <n-form-item label="空间选择"><project-space-select :model-value="form.spaceId" :spaces="spacesAvailable ? store.snapshot.spaces : []" :disabled="saving || !spacesAvailable || !hasSpaceDirectory" :fallback-label="selectedSpaceLabel" placeholder="可选择任意层级，或暂不选择" aria-label="智能屏空间选择" @update:model-value="selectSpace" /></n-form-item>
@@ -161,7 +161,7 @@ async function discard() {
           <n-button v-if="!spacesAvailable && originalSpace.id && form.spaceId !== originalSpace.id" size="tiny" text type="primary" :disabled="saving" data-testid="screen-restore-space" @click="restoreSpace">恢复原空间关联</n-button>
         </div>
       </div>
-      <div class="screen-dialog-footer"><n-popconfirm v-if="platformEdit && draft" @positive-click="discard" positive-text="放弃修改" negative-text="保留"><template #trigger><n-button :disabled="saving" quaternary type="warning" data-testid="screen-discard-draft">放弃本机修改</n-button></template>放弃尚未提交的资料修改，恢复显示平台已保存的值？</n-popconfirm><span class="screen-spacer"></span><n-button :disabled="saving" @click="show = false">取消</n-button><n-button type="primary" attr-type="submit" :disabled="saving" :loading="saving" data-action-owner="local-screen-form">{{ platformEdit ? '保存待提交修改' : screen ? '保存修改' : '加入本机管理' }}</n-button></div>
+      <div class="screen-dialog-footer"><n-popconfirm v-if="platformEdit && screen && store.draftIds.has(screen.id)" @positive-click="discard" positive-text="放弃修改" negative-text="保留"><template #trigger><n-button :disabled="saving" quaternary type="warning" data-testid="screen-discard-draft">放弃本机修改</n-button></template>放弃尚未提交的资料修改，恢复显示平台已保存的值？</n-popconfirm><span class="screen-spacer"></span><n-button :disabled="saving" @click="show = false">取消</n-button><n-button type="primary" attr-type="submit" :disabled="saving" :loading="saving" data-action-owner="local-screen-form">{{ platformEdit ? '保存待提交修改' : screen ? '保存修改' : '加入本机管理' }}</n-button></div>
     </n-form>
   </n-modal>
 </template>

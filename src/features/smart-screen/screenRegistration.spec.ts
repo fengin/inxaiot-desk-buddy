@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FixtureScreenAdapter, SCREEN_STORAGE_PREFIX } from "@/dev-fixtures/screenFixtureAdapter";
 import { createScreenSnapshot } from "@/dev-fixtures/screenData";
-import { buildScreenRegistrationItems, screenPlatformDraftValues, screenPlatformFields, validRegistrationMac } from "@/shared/model/screenRegistration";
+import { buildScreenRegistrationItems, screenPlatformDraftValues, screenPlatformFieldEqual, screenPlatformFields, validRegistrationMac } from "@/shared/model/screenRegistration";
 import type { ScreenRegistrationPreview, ScreenRegistrationSubmission } from "@/shared/model/screenRegistration";
 import type { ScreenSnapshot, SmartScreen } from "@/shared/model/screen";
 
@@ -46,7 +46,7 @@ describe("智能屏注册与平台资料草稿", () => {
   });
 
   it("平台普通资料草稿独立保存；ADB不可用不阻断名称更新，状态版本不变", async () => {
-    seed((state) => { row(state, "platform-screen-2").adbAvailable = false; });
+    seed((state) => { row(state, "platform-screen-2").adbAvailable = false; row(state, "platform-screen-2").mac = "02:11:22:33:44:55"; });
     const before = await adapter.load(project), screen = row(before, "platform-screen-2");
     await adapter.savePlatformDraft(project, screen.id, { ...screenPlatformFields(screen), name: "新名称" }, screen.revision);
     const draftState = await adapter.load(project);
@@ -60,13 +60,16 @@ describe("智能屏注册与平台资料草稿", () => {
     expect(after.platformDrafts?.[screen.id]).toBeUndefined(); expect(after.screens).toHaveLength(before.screens.length);
   });
 
-  it("保存白名单字段且无变化会清除草稿，过期编辑版本被拒绝", async () => {
+  it("保存同值仍保留草稿版本供CAS使用，但无实际差异；过期编辑版本被拒绝", async () => {
+    seed(state => { state.screens = [{ ...row(state, "platform-screen-2"), mac: "02:11:22:33:44:55" }]; });
     const screen = row(await adapter.load(project), "platform-screen-2"), fields = screenPlatformFields(screen);
     await expect(adapter.savePlatformDraft(project, screen.id, { ...fields, name: "旧弹窗" }, screen.revision - 1)).rejects.toThrow("已变化");
     await adapter.savePlatformDraft(project, screen.id, { ...fields, name: "待改", appVersion: "伪造版本", platformStatus: "offline" } as typeof fields);
     expect((await adapter.load(project)).platformDrafts?.[screen.id]?.values).not.toHaveProperty("appVersion");
     await adapter.savePlatformDraft(project, screen.id, fields, screen.revision);
-    expect((await adapter.load(project)).platformDrafts?.[screen.id]).toBeUndefined();
+    const saved = (await adapter.load(project)).platformDrafts?.[screen.id];
+    expect(saved).toMatchObject({ revision: 2, base: fields, values: fields });
+    await expect(adapter.savePlatformDraft(project, screen.id, fields, screen.revision, 1)).rejects.toThrow("待提交资料已变化");
     expect((await adapter.previewPlatformRegistration(project, [screen.id])).items[0]!.state).toBe("skip");
   });
 
@@ -289,6 +292,41 @@ describe("注册身份、重复目标与提交恢复", () => {
 });
 
 describe("纯领域预检", () => {
+  it("平台MAC空且无草稿时显式预检仍采集，预览本身不改平台和草稿", () => {
+    const state = createScreenSnapshot(), screen = row(state, "platform-screen-2");
+    state.screens = [screen]; screen.mac = ""; screen.observedMac = "02:11:22:33:44:55";
+    const before = JSON.stringify(state), collectMac = vi.fn(() => screen.observedMac);
+    const item = buildScreenRegistrationItems(state, [screen.id], { platformAvailable: true, spacesAvailable: true, collectMac })[0]!;
+    expect(collectMac).toHaveBeenCalledOnce();
+    expect(item).toMatchObject({ mode: "update", state: "ready", macSource: "collected", after: { mac: screen.observedMac } });
+    expect(item.diffs.map(diff => diff.field)).toEqual(["mac"]);
+    expect(JSON.stringify(state)).toBe(before);
+  });
+
+  it("平台空MAC采集失败仍须确认历史或空值，换IP不把旧地址采集当新地址历史", () => {
+    const state = createScreenSnapshot(), screen = row(state, "platform-screen-2");
+    state.screens = [screen]; screen.mac = ""; screen.observedMac = "02:11:22:33:44:55";
+    const base = screenPlatformFields(screen);
+    state.platformDrafts = { [screen.id]: { screenId: screen.id, baseRevision: screen.revision, base, values: { ...base, name: "拟更新名称" }, updatedAt: "now" } };
+    const context = { platformAvailable: true, spacesAvailable: true, collectMac: () => null };
+    expect(buildScreenRegistrationItems(state, [screen.id], context)[0]).toMatchObject({ state: "ready", macSource: "history", requiredMacConfirmation: "existing", after: { mac: screen.observedMac } });
+    state.platformDrafts[screen.id]!.values.ip = "192.0.2.220";
+    expect(buildScreenRegistrationItems(state, [screen.id], context)[0]).toMatchObject({ state: "ready", macSource: "empty", requiredMacConfirmation: "empty", after: { mac: "" } });
+  });
+
+  it("MAC格式与首尾空白等价不构成编辑或冲突，平台刷新仍采用最新未编辑值", () => {
+    const state = createScreenSnapshot(), screen = row(state, "platform-screen-2");
+    state.screens = [screen]; screen.mac = "02:11:22:33:44:55";
+    const base = screenPlatformFields(screen), values = { ...base, name: ` ${base.name} `, mac: "02-11-22-33-44-55" };
+    state.platformDrafts = { [screen.id]: { screenId: screen.id, baseRevision: screen.revision, base, values, updatedAt: "now" } };
+    screen.name = "平台最新名称"; screen.mac = "02:AA:BB:CC:DD:EE";
+    expect(screenPlatformFieldEqual("spaceId", null, "")).toBe(true);
+    expect(screenPlatformDraftValues(screen, state.platformDrafts[screen.id])).toEqual(screenPlatformFields(screen));
+    const collectMac = vi.fn(() => null);
+    expect(buildScreenRegistrationItems(state, [screen.id], { platformAvailable: true, spacesAvailable: true, collectMac })[0]).toMatchObject({ state: "skip", diffs: [] });
+    expect(collectMac).not.toHaveBeenCalled();
+  });
+
   it("注册MAC排除广播、组播、全零以及不完整地址", () => {
     for (const mac of ["FF:FF:FF:FF:FF:FF", "00:00:00:00:00:00", "01:00:5E:01:02:03", "03:11:22:33:44:55", "02:11"]) expect(validRegistrationMac(mac)).toBe(false);
     expect(validRegistrationMac("02:11:22:33:44:55")).toBe(true);

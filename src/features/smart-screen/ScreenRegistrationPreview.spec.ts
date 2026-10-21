@@ -30,6 +30,20 @@ function render(data = preview()) {
 }
 
 describe("平台注册逐屏预览", () => {
+  it("18台中13台受阻也只表示检查完成，待提交目标不显示注册成功", () => {
+    const data = preview(); data.mode = "real";
+    data.items = Array.from({ length: 18 }, (_, index) => ({ ...data.items[0]!, screenId: `registration-${index}`, mode: "create" as const, before: null, state: index < 5 ? "ready" as const : "blocked" as const, reason: index < 5 ? "资料检查通过" : "存在未核实任务", after: { ...data.items[0]!.after, name: `屏${index}`, ip: `192.0.2.${index + 1}` } }));
+    const { wrapper } = render(data);
+    try {
+      const notice = wrapper.get('[data-testid="screen-registration-not-submitted"]').text();
+      expect(notice).toContain("检查完成，尚未提交注册");
+      expect(notice).toContain("5 台可提交，13 台需要核对");
+      expect(notice).toContain("尚未写入平台");
+      expect(wrapper.get('.screen-registration-target[data-screen-id="registration-0"]').text()).toContain("待注册");
+      expect(wrapper.text()).not.toContain("注册成功");
+      expect(wrapper.findAll(".screen-registration-target .screen-success")).toHaveLength(0);
+    } finally { wrapper.unmount(); }
+  });
   it("区分新增、更新、无需更新与需核对，展示差异及逐屏确认", async () => {
     const { wrapper, macConfirmations, spaceConfirmations } = render();
     try {

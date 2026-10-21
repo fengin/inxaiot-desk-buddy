@@ -3,23 +3,26 @@ import { computed, ref } from "vue";
 import { NButton, NCheckbox, NInput, NPagination, NSelect, NTag } from "naive-ui";
 import { Building2, FilePenLine, GitCompareArrows, MapPinOff, Monitor, Search, Wifi, WifiOff, Laptop, ArrowUpRight } from "lucide-vue-next";
 import { useSmartScreensStore } from "@/stores/smartScreens";
-import { effectiveScreenMac } from "@/shared/model/screen";
 import { formatDisplayDateTime } from "@/shared/format/dateTime";
-import { buildScreenSpaceOptions, screenSpaceLabel, screenMatchesSpace, SCREEN_UNLOCATED_SPACE_KEY } from "@/shared/model/screenSpace";
+import { SCREEN_UNLOCATED_SPACE_KEY } from "@/shared/model/screenSpace";
 import type { SmartScreen } from "@/shared/model/screen";
+import { screenNeedsVersionSync } from "@/shared/model/screenMaintenance";
 import AssetListFooter from "@/shared/components/AssetListFooter.vue";
 
 const store = useSmartScreensStore();
 const tableHeader = ref<HTMLDivElement>();
-const columnWidths = ["34px", undefined, "122px", "60px", "150px", "92px", "110px", "58px"];
+const columnWidths = ["34px", undefined, "122px", "60px", "178px", "92px", "110px", "58px"];
 function syncTableScroll(event: Event) {
   if (tableHeader.value) tableHeader.value.scrollLeft = (event.currentTarget as HTMLElement).scrollLeft;
 }
-defineEmits<{ detail: [id: string]; operate: []; register: [id: string]; merge: []; status: [] }>();
+defineEmits<{ detail: [id: string]; operate: []; register: [id: string]; versions: [ids: string[]]; merge: []; status: [] }>();
 const spacesAvailable = computed(() => store.snapshot.spacesAvailable !== false);
-const buildings = computed(() => spacesAvailable.value ? buildScreenSpaceOptions(store.snapshot.spaces) : []);
-const locationCount = (key: string) => store.visibleScreens.filter((screen) => screenMatchesSpace(screen, key, store.snapshot.spaces, spacesAvailable.value)).length;
-const locationLabel = (screen: SmartScreen) => `${screenSpaceLabel(screen, store.snapshot.spaces, spacesAvailable.value)} · ${screen.location || '位置未填写'}`;
+const buildings = computed(() => spacesAvailable.value ? store.spaceIndex.options() : []);
+const locationCount = (key: string) => store.listSpaceCounts.get(key) ?? 0;
+const display = (screen: SmartScreen) => store.listProjections.get(screen.id)!;
+function versionSyncTitle(screen: SmartScreen) {
+  return `平台版本：${screen.appVersion || "未记录"}\n本机读取版本：${screen.observedAppVersion}\n读取时间：${formatDisplayDateTime(screen.versionCheckedAt, "未记录")}\n读取地址：${screen.versionCheckedIp}（当前已确认 IP）\n架构：${screen.abi}\n重新核对设备版本后可确认同步，不重新安装应用。`;
+}
 const allPage = computed(() => store.paged.length > 0 && store.paged.every((s) => store.selectedIds.includes(s.id)));
 const somePage = computed(() => store.paged.some((s) => store.selectedIds.includes(s.id)) && !allPage.value);
 const activeFilters = computed(() => Boolean(store.filters.keyword || store.filters.space || store.filters.size !== "all" || store.filters.registration !== "all" || store.filters.status !== "all" || store.filters.appVersion !== "all"));
@@ -39,7 +42,7 @@ function summary(key: "all" | "platform" | "local" | "online" | "offline" | "dup
   <div class="summary-strip screen-summary-strip">
     <button class="summary-item" :class="{ active: store.filters.registration === 'all' && store.filters.status === 'all' }" type="button" @click="summary('all')">
       <span class="summary-label summary-label--all"><Monitor :size="14" />管理记录</span>
-      <span class="summary-value"><strong>{{ store.stats.total }}</strong><small :title="`${store.stats.large} 台 10 寸 · ${store.stats.small} 台 4 寸`">{{ store.stats.large }} 台 10 寸 · {{ store.stats.small }} 台 4 寸</small></span>
+      <span class="summary-value"><strong>{{ store.stats.total }}</strong><small :title="`${store.listSizeStats.large} 台 10 寸 · ${store.listSizeStats.small} 台 4 寸`">{{ store.listSizeStats.large }} 台 10 寸 · {{ store.listSizeStats.small }} 台 4 寸</small></span>
     </button>
     <button class="summary-item" :class="{ active: store.filters.registration === 'platform' }" type="button" :disabled="!store.platformAvailable" @click="summary('platform')">
       <span class="summary-label summary-label--all"><Building2 :size="14" />平台已注册</span>
@@ -99,13 +102,13 @@ function summary(key: "all" | "platform" | "local" | "online" | "offline" | "dup
           <colgroup><col v-for="(width, index) in columnWidths" :key="index" :style="{ width }" /></colgroup>
           <tbody>
             <tr v-for="screen in store.paged" :key="screen.id" :class="{ selected: store.selectedIds.includes(screen.id) }">
-              <td><n-checkbox :aria-label="`选择 ${screen.name}`" :checked="store.selectedIds.includes(screen.id)" @update:checked="store.toggleSelection(screen.id, $event)" /></td>
-      <td><div class="screen-name-line"><button class="screen-name" type="button" :title="screen.name" @click="$emit('detail', screen.id)">{{ screen.name }}</button><button v-if="store.candidateIds.has(screen.id)" class="screen-duplicate-link" type="button" @click="$emit('merge')"><GitCompareArrows :size="11" />疑似重复</button><button v-if="store.draftIds.has(screen.id)" class="screen-draft-link" type="button" :data-testid="`screen-draft-${screen.id}`" title="核对本机待提交修改并更新平台" @click="$emit('register', screen.id)"><FilePenLine :size="11" />资料有变更</button></div><div class="screen-secondary" :title="locationLabel(screen)">{{ locationLabel(screen) }}</div></td>
-              <td><n-tag size="small" :bordered="false" :type="screen.source === 'local' || !store.platformAvailable || screen.platformStatus === 'unknown' ? 'default' : screen.platformStatus === 'online' ? 'success' : 'error'">{{ screen.source === 'local' ? '平台未注册' : screen.platformStatus === 'online' ? '平台在线' : screen.platformStatus === 'offline' ? '平台离线' : '平台未知' }}</n-tag><div class="screen-secondary">{{ screen.source === 'local' ? '本机记录' : store.platformAvailable ? '平台已注册' : '已注册 · 缓存' }}</div></td>
-              <td><span class="screen-size">{{ screen.size === 'unknown' ? '待确认' : `${screen.size} 寸` }}</span></td>
-              <td class="screen-network"><span>{{ screen.ip }}</span><div class="screen-secondary">{{ effectiveScreenMac(screen) || 'MAC 待采集' }}</div></td>
-              <td>{{ screen.appVersion || '未记录' }}<div class="screen-secondary">{{ screen.abi === '尚未检查' ? '架构待检查' : screen.abi }}</div></td>
-              <td><span :class="screen.ping === 'online' ? 'screen-success' : screen.ping === 'offline' ? 'screen-warning' : 'screen-muted'">{{ screen.ping === null ? '未检查' : screen.ping === 'online' ? 'IP 可达' : screen.ping === 'offline' ? 'IP 不可达' : '检查结果未知' }}</span><div class="screen-secondary" :title="screen.checkedAt ? formatDisplayDateTime(screen.checkedAt) : ''">{{ screen.checkedAt ? '有检查记录' : '等待采集' }}</div></td>
+              <td><n-checkbox :aria-label="`选择 ${display(screen).values.name}`" :checked="store.selectedIds.includes(screen.id)" @update:checked="store.toggleSelection(screen.id, $event)" /></td>
+              <td><div class="screen-name-line"><button class="screen-name" :class="{ 'screen-draft-value': display(screen).changedFields.has('name') }" type="button" :title="display(screen).titles.name" @click="$emit('detail', screen.id)">{{ display(screen).values.name }}</button><button v-if="store.candidateIds.has(screen.id)" class="screen-duplicate-link" type="button" @click="$emit('merge')"><GitCompareArrows :size="11" />疑似重复</button><button v-if="store.draftIds.has(screen.id)" class="screen-draft-link" type="button" :data-testid="`screen-draft-${screen.id}`" title="核对本机待提交修改并更新平台" @click="$emit('register', screen.id)"><FilePenLine :size="11" />资料有变更</button></div><div class="screen-secondary"><span :class="{ 'screen-draft-value': display(screen).changedFields.has('spaceId') }" :title="display(screen).titles.spaceId">{{ display(screen).spaceLabel }}</span> · <span :class="{ 'screen-draft-value': display(screen).changedFields.has('location') }" :title="display(screen).titles.location">{{ display(screen).values.location || '位置未填写' }}</span></div></td>
+              <td :title="display(screen).confirmedIpNote"><n-tag size="small" :bordered="false" :type="screen.source === 'local' || !store.platformAvailable || screen.platformStatus === 'unknown' ? 'default' : screen.platformStatus === 'online' ? 'success' : 'error'">{{ screen.source === 'local' ? '平台未注册' : screen.platformStatus === 'online' ? '平台在线' : screen.platformStatus === 'offline' ? '平台离线' : '平台未知' }}</n-tag><div class="screen-secondary">{{ screen.source === 'local' ? '本机记录' : store.platformAvailable ? '平台已注册' : '已注册 · 缓存' }}</div></td>
+              <td><span class="screen-size" :class="{ 'screen-draft-value': display(screen).changedFields.has('size') }" :title="display(screen).titles.size">{{ display(screen).values.size === 'unknown' ? '待确认' : `${display(screen).values.size} 寸` }}</span></td>
+              <td class="screen-network"><span :class="{ 'screen-draft-value': display(screen).changedFields.has('ip') }" :title="display(screen).titles.ip">{{ display(screen).values.ip }}</span><div v-if="display(screen).confirmedIpNote" class="screen-secondary screen-confirmed-ip" :title="display(screen).confirmedIpNote">已确认：{{ screen.ip }}</div><div class="screen-secondary" :class="{ 'screen-draft-value': display(screen).changedFields.has('mac') }" :title="[display(screen).titles.mac, display(screen).confirmedIpNote].filter(Boolean).join('\n')">{{ display(screen).mac || (display(screen).macExplicitlyEmpty ? 'MAC 未填写' : 'MAC 待采集') }}</div></td>
+              <td :title="display(screen).confirmedIpNote">{{ screen.appVersion || '未记录' }}<div v-if="screenNeedsVersionSync(screen)" class="screen-secondary"><n-button text size="tiny" type="warning" class="screen-version-pending" :title="versionSyncTitle(screen)" :data-testid="`screen-version-sync-${screen.id}`" :aria-label="`核对 ${screen.name} 版本并同步平台`" @click="$emit('versions', [screen.id])">版本待同步</n-button></div><div v-else class="screen-secondary">{{ screen.abi === '尚未检查' ? '架构待检查' : screen.abi }}</div></td>
+              <td :title="display(screen).confirmedIpNote"><span :class="screen.ping === 'online' ? 'screen-success' : screen.ping === 'offline' ? 'screen-warning' : 'screen-muted'">{{ screen.ping === null ? '未检查' : screen.ping === 'online' ? 'IP 可达' : screen.ping === 'offline' ? 'IP 不可达' : '检查结果未知' }}</span><div class="screen-secondary" :title="[screen.checkedAt ? formatDisplayDateTime(screen.checkedAt) : '', display(screen).confirmedIpNote].filter(Boolean).join('\n')">{{ display(screen).confirmedIpNote ? '已确认 IP 的记录' : screen.checkedAt ? '有检查记录' : '等待采集' }}</div></td>
               <td><n-button text size="tiny" class="screen-detail-link" type="primary" @click="$emit('detail', screen.id)">详情</n-button></td>
             </tr>
           </tbody>

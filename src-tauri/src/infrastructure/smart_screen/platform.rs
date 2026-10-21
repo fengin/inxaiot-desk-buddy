@@ -1,6 +1,72 @@
 use crate::core::error::{AppError, AppResult};
 use crate::domain::smart_screen::model::{BusinessProject, ScreenAsset, ScreenFields, SpaceNode};
-use sqlx::{MySqlPool, Row};
+use sqlx::{Database, Encode, MySql, MySqlPool, QueryBuilder, Row, Transaction, Type};
+use std::{collections::HashSet, future::Future};
+
+const ALIVE_ID_BATCH_SIZE: usize = 500;
+
+trait AliveScreenLookup {
+    fn fetch_alive(
+        &mut self,
+        ids: &[String],
+    ) -> impl Future<Output = AppResult<Vec<String>>> + Send;
+}
+
+struct MySqlAliveScreenLookup<'tx, 'connection>(&'tx mut Transaction<'connection, MySql>);
+
+impl AliveScreenLookup for MySqlAliveScreenLookup<'_, '_> {
+    async fn fetch_alive(&mut self, ids: &[String]) -> AppResult<Vec<String>> {
+        alive_id_query::<MySql>(ids)
+            .build_query_scalar()
+            .fetch_all(&mut **self.0)
+            .await
+            .map_err(db)
+    }
+}
+
+fn alive_id_query<'ids, DB>(ids: &'ids [String]) -> QueryBuilder<'ids, DB>
+where
+    DB: Database,
+    &'ids str: Encode<'ids, DB> + Type<DB>,
+    <DB as Database>::Arguments<'ids>: Default,
+{
+    // 这里只核对设备主表，不能按当前项目或有效空间过滤仍存活的记录。
+    let mut query = QueryBuilder::new(
+        "SELECT CAST(id AS CHAR) FROM smart_terminal_screen WHERE delete_flag=0 AND id IN (",
+    );
+    let mut bindings = query.separated(",");
+    for id in ids {
+        bindings.push_bind(id.as_str());
+    }
+    bindings.push_unseparated(")");
+    query
+}
+
+async fn deleted_known_ids<L: AliveScreenLookup>(
+    known_ids: &[String],
+    returned: &[ScreenAsset],
+    lookup: &mut L,
+) -> AppResult<Vec<String>> {
+    let returned = returned
+        .iter()
+        .map(|asset| asset.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    let remaining = known_ids
+        .iter()
+        .filter(|id| !returned.contains(id.as_str()) && seen.insert(id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut alive = HashSet::new();
+    for chunk in remaining.chunks(ALIVE_ID_BATCH_SIZE) {
+        alive.extend(lookup.fetch_alive(chunk).await?);
+    }
+    // 所有分块均成功后才形成删除结论；失败直接返回，调用方不会替换完整缓存。
+    Ok(remaining
+        .into_iter()
+        .filter(|id| !alive.contains(id))
+        .collect())
+}
 
 fn db(error: sqlx::Error) -> AppError {
     AppError::database("读取平台智能屏和空间", &error)
@@ -45,7 +111,10 @@ pub async fn read_with_known_ids(
     let assets = rows
         .into_iter()
         .map(|r| {
-            let status: String = r.try_get::<Option<String>, _>("platform_status").map_err(db)?.unwrap_or_default();
+            let status: String = r
+                .try_get::<Option<String>, _>("platform_status")
+                .map_err(db)?
+                .unwrap_or_default();
             let size: String = r.try_get("size").map_err(db)?;
             Ok(ScreenAsset {
                 id: r.try_get("id").map_err(db)?,
@@ -74,13 +143,12 @@ pub async fn read_with_known_ids(
             })
         })
         .collect::<AppResult<Vec<_>>>()?;
-    let mut deleted = Vec::new();
     // 不在当前空间范围内可能只是移动了空间；只有记录本身删除才清理本机资料。
-    for id in known_ids {
-        let alive: Option<String> = sqlx::query_scalar("SELECT CAST(id AS CHAR) FROM smart_terminal_screen WHERE id=? AND delete_flag=0")
-            .bind(id).fetch_optional(&mut *tx).await.map_err(db)?;
-        if alive.is_none() { deleted.push(id.clone()); }
-    }
+    let deleted =
+        deleted_known_ids(known_ids, &assets, &mut MySqlAliveScreenLookup(&mut tx)).await?;
     tx.commit().await.map_err(db)?;
     Ok((assets, spaces, deleted))
 }
+
+#[cfg(test)]
+mod tests;

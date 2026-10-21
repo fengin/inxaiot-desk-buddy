@@ -22,6 +22,9 @@ const page = ref(1), pageSize = ref(50), resultBody = ref<HTMLElement>();
 const isConfig = computed(() => props.task.action === "app_config");
 const isNtp = computed(() => props.task.action === "ntp");
 const isPing = computed(() => props.task.action === "ping");
+const isRegistration = computed(() => props.task.action === "register");
+const registrationConfirmed = computed(() => props.task.targets.length > 0 && props.task.targets.every(target => target.result?.business === "succeeded"));
+const headerConfirmed = computed(() => props.task.state === "succeeded" && (!isRegistration.value || (props.task.mode === "real" && registrationConfirmed.value)));
 const showScreenDetail = computed(() => ["ping", "inspect", "mac"].includes(props.task.action));
 const visibleTargets = computed(() => props.task.targets.slice((page.value - 1) * pageSize.value, page.value * pageSize.value));
 const columns = computed(() => [
@@ -88,6 +91,12 @@ function pingResult(target: ScreenTaskTarget) {
   return observation.ping === "online" || observation.ping === "offline" ? observation.ping : null;
 }
 function targetStateLabel(target: ScreenTaskTarget) {
+  if (isRegistration.value) {
+    if (props.task.mode !== "real") return target.state === "succeeded" ? "演示完成" : displayState(target.state);
+    if (target.result?.business === "succeeded") return registrationSuccessLabel(target);
+    if (["queued", "running", "cancelled", "skipped"].includes(target.state)) return screenStateLabel[target.state];
+    return target.result?.business === "failed" ? "注册/更新未完成" : "结果待核实";
+  }
   if (!isPing.value) return displayState(target.state);
   const ping = pingResult(target);
   if (ping) return ping === "online" ? "在线" : "离线";
@@ -96,6 +105,12 @@ function targetStateLabel(target: ScreenTaskTarget) {
   return "未知";
 }
 function targetStateType(target: ScreenTaskTarget): "success" | "error" | "info" | "warning" | "default" {
+  if (isRegistration.value) {
+    if (props.task.mode !== "real") return "info";
+    if (target.result?.business === "succeeded") return "success";
+    if (target.result?.business === "failed") return "error";
+    return ["queued", "running", "cancelled", "skipped"].includes(target.state) ? "info" : "warning";
+  }
   if (!isPing.value) return target.state === "succeeded" ? "success" : target.state === "failed" ? "error" : "default";
   const ping = pingResult(target);
   if (ping) return ping === "online" ? "success" : "error";
@@ -124,7 +139,25 @@ const completed = computed(() => props.task.targets.filter((t) => !["queued", "r
 const progress = computed(() => Math.round(props.task.targets.reduce((sum, t) => sum + (t.state === "cancelled" ? 100 : t.progress), 0) / Math.max(1, props.task.targets.length)));
 const running = computed(() => ["running", "cancelling"].includes(props.task.state));
 const unverifiedInstall = computed(() => props.task.mode !== "real" && props.task.action === "install" && Boolean(props.task.input?.apk) && !props.task.input?.appVersion);
+function registrationSuccessLabel(target: ScreenTaskTarget) {
+  const receipt = target.result?.evidence;
+  const after = receipt?.after as { id?: unknown } | undefined;
+  if (typeof after?.id === "string" && receipt?.before === null) return "注册成功";
+  if (typeof after?.id === "string" && receipt?.before && typeof receipt.before === "object") return "更新成功";
+  return "平台写入已确认";
+}
 function displayState(state: keyof typeof screenStateLabel) {
+  if (isRegistration.value) {
+    if (props.task.mode !== "real") return state === "succeeded" ? "演示完成" : screenStateLabel[state];
+    if (state === "succeeded") {
+      if (!registrationConfirmed.value) return "结果待核实";
+      const labels = new Set(props.task.targets.map(registrationSuccessLabel));
+      return labels.size === 1 ? [...labels][0]! : "注册/更新成功";
+    }
+    if (state === "partially_succeeded") return props.task.targets.some(target => target.result?.business === "succeeded") ? "部分注册/更新成功" : "结果待核实";
+    if (state === "needs_review") return "结果待核实";
+    if (state === "failed") return "注册/更新未完成";
+  }
   if (isPing.value && state === "succeeded") return "检查完成";
   return unverifiedInstall.value && state === "succeeded" ? "演示完成" : screenStateLabel[state];
 }
@@ -145,9 +178,10 @@ async function openGlobalLogs() {
 <template>
   <section class="screen-task-results" :class="{ 'screen-task-results-config': isConfig || isNtp }">
     <div v-if="task.input?.retryOfOperationId" class="screen-muted">重试来源：{{task.input.retryOfOperationId}}</div>
-    <div class="screen-result-header"><div class="screen-result-title"><h3>{{ screenActionLabel(task.action) }}</h3><span class="screen-muted">{{ formatDisplayDateTime(task.createdAt) }} · {{ task.targets.length }} 台<template v-if="task.mode !== 'real'"> · 原型模拟</template></span></div><n-tag :bordered="false" :type="task.state === 'succeeded' ? 'success' : running ? 'info' : 'warning'">{{ displayState(task.state) }}</n-tag></div>
+    <div class="screen-result-header"><div class="screen-result-title"><h3>{{ screenActionLabel(task.action) }}</h3><span class="screen-muted">{{ formatDisplayDateTime(task.createdAt) }} · {{ task.targets.length }} 台<template v-if="task.mode !== 'real'"> · 原型模拟</template></span></div><n-tag :bordered="false" :type="headerConfirmed ? 'success' : running || (isRegistration && task.mode !== 'real') ? 'info' : 'warning'">{{ displayState(task.state) }}</n-tag></div>
+    <div v-if="isRegistration && running" class="screen-callout" data-testid="screen-registration-awaiting-write">已提交注册/更新任务，尚未确认平台写入成功。</div>
     <div v-if="unverifiedInstall" class="screen-callout" data-testid="screen-install-preview-notice"><strong v-if="task.state === 'succeeded'">安装流程演示完成。</strong>APK 元数据未解析；未执行真实安装，未更新版本记录。</div>
-    <div class="screen-task-progress"><n-progress type="line" :percentage="progress" :show-indicator="false" :status="task.state === 'failed' ? 'error' : task.state === 'succeeded' ? 'success' : 'default'" /><b>{{ progress }}%</b><span>{{ completed }} / {{ task.targets.length }} 台已处理</span></div>
+    <div class="screen-task-progress"><n-progress type="line" :percentage="progress" :show-indicator="false" :status="task.state === 'failed' ? 'error' : headerConfirmed ? 'success' : 'default'" /><b>{{ progress }}%</b><span>{{ completed }} / {{ task.targets.length }} 台已处理</span></div>
     <div class="screen-inline-actions screen-result-actions">
       <n-button v-if="running" size="small" :disabled="task.state === 'cancelling'" @click="cancel">{{ task.state === 'cancelling' ? '正在停止后续操作' : '取消后续执行' }}</n-button>
       <n-button v-if="task.state === 'needs_review'" size="small" type="warning" @click="verify">继续核实结果</n-button>

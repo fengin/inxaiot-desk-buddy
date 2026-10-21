@@ -25,6 +25,8 @@ pub struct LiveScreen {
     pub name: String,
     pub size: String,
     pub ip: String,
+    /// 测试说明明确提供的设备身份；旧格式未提供时为空。
+    pub mac: String,
 }
 
 #[allow(dead_code)]
@@ -33,38 +35,83 @@ pub fn live_screens() -> Result<Vec<LiveScreen>, Box<dyn std::error::Error>> {
         .parent()
         .unwrap();
     let description = std::fs::read_to_string(root.join("test/测试数据说明.txt"))?;
+    parse_live_screens(&description)
+}
+
+/// 仅解析明确列出的屏行，不读取凭据、不扫描网络，也不回退历史地址。
+#[allow(dead_code)]
+pub fn parse_live_screens(description: &str) -> Result<Vec<LiveScreen>, Box<dyn std::error::Error>> {
     let mut result = Vec::new();
     for line in description.lines() {
-        let Some((name, address)) = line.trim().split_once('：') else {
-            continue;
-        };
-        let size = if name.starts_with("4寸屏") {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        let size = if line.starts_with("4寸屏") {
             "4"
-        } else if name.starts_with("10寸屏") {
+        } else if line.starts_with("10寸屏") {
             "10"
         } else {
             continue;
         };
-        let address: std::net::SocketAddr = address.trim().parse()?;
-        if address.port() != 5555 || !address.is_ipv4() {
-            return Err(format!("{name} 必须明确使用 IPv4:5555").into());
-        }
+        let (name, address) = line.split_once('：').ok_or("屏地址行必须使用中文冒号分隔名称与目标")?;
+        let parts: Vec<_> = address.split_whitespace().collect();
+        let (mac, address, requires_port) = match parts.as_slice() {
+            [address] => (String::new(), *address, true),
+            [mac, address] => (parse_live_mac(mac)?, *address, false),
+            _ => return Err("屏目标只接受 IPv4:5555 或 MAC 加 IPv4[:5555] 两种格式".into()),
+        };
+        let ip = parse_live_ipv4(address, requires_port)?;
         if result
             .iter()
-            .any(|item: &LiveScreen| item.ip == address.ip().to_string())
+            .any(|item: &LiveScreen| item.ip == ip)
         {
             return Err("测试说明包含重复屏地址".into());
         }
+        if !mac.is_empty() && result.iter().any(|item| item.mac == mac) {
+            return Err("测试说明包含重复屏 MAC".into());
+        }
         result.push(LiveScreen {
-            name: name.into(),
+            name: name.trim().into(),
             size: size.into(),
-            ip: address.ip().to_string(),
+            ip,
+            mac,
         });
     }
     if result.is_empty() {
         return Err("测试说明中没有智能屏地址".into());
     }
     Ok(result)
+}
+
+fn parse_live_ipv4(address: &str, requires_port: bool) -> Result<String, Box<dyn std::error::Error>> {
+    if address.contains(':') {
+        let address: std::net::SocketAddr = address.parse().map_err(|_| "屏目标必须是 IPv4:5555")?;
+        if address.port() != 5555 || !address.is_ipv4() {
+            return Err("屏目标只允许 IPv4 和 5555 端口".into());
+        }
+        return Ok(address.ip().to_string());
+    }
+    if requires_port {
+        return Err("未提供 MAC 的旧格式必须明确使用 IPv4:5555".into());
+    }
+    Ok(address.parse::<std::net::Ipv4Addr>().map_err(|_| "屏目标必须是有效 IPv4")?.to_string())
+}
+
+fn parse_live_mac(value: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let valid_octets = |separator| {
+        let octets: Vec<_> = value.split(separator).collect();
+        octets.len() == 6 && octets.iter().all(|octet| octet.len() == 2 && octet.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    };
+    let valid_format = if value.contains(':') {
+        valid_octets(':')
+    } else if value.contains('-') {
+        valid_octets('-')
+    } else {
+        value.len() == 12 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    };
+    let normalized = inxaiot_desk_buddy_lib::domain::smart_screen::rules::normalize_mac(value);
+    if !valid_format || !inxaiot_desk_buddy_lib::domain::smart_screen::rules::valid_mac(&normalized) {
+        return Err("屏 MAC 必须为有效单播网卡地址，支持六组冒号、六组短横线或连续12位十六进制".into());
+    }
+    Ok(normalized)
 }
 
 #[allow(dead_code)]

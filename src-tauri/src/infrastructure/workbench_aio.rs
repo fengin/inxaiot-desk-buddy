@@ -77,7 +77,7 @@ impl WorkbenchAioRepository {
         let rows = sqlx::query(concat!(
             "SELECT mac_normalized, service_name, expected_image_name, expected_version, ",
             "observed_image_name, observed_version, ",
-            "DATE_FORMAT(observed_at, '%Y-%m-%dT%H:%i:%s') AS observed_at_text ",
+            "DATE_FORMAT(observed_at, '%Y-%m-%dT%H:%i:%sZ') AS observed_at_text ",
             "FROM aio_node_service_version ORDER BY mac_normalized, service_name"
         ))
         .fetch_all(&self.pool)
@@ -117,7 +117,7 @@ impl WorkbenchAioRepository {
     ) -> AppResult<std::collections::HashMap<String, OperationRecordSummary>> {
         let rows = sqlx::query(concat!(
             "SELECT links.mac_normalized, o.id, o.operation_type, o.operation_name, o.state, ",
-            "o.operator_name, DATE_FORMAT(o.ended_at, '%Y-%m-%dT%H:%i:%s') AS ended_at_text, ",
+            "o.operator_name, DATE_FORMAT(o.ended_at, '%Y-%m-%dT%H:%i:%sZ') AS ended_at_text, ",
             "o.result_summary FROM (SELECT resource_key AS mac_normalized, operation_id ",
             "FROM operation_target_result WHERE resource_type='aio' UNION ",
             "SELECT mac_normalized, last_operation_id AS operation_id FROM aio_node WHERE last_operation_id IS NOT NULL) links ",

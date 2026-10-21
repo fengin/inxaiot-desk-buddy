@@ -55,7 +55,7 @@ impl AppConfigPatch {
                         .ok_or_else(invalid)?;
                     environments.insert(env.into());
                 }
-                Some(v) if field.ends_with(".h5ReadyCheckEnabled") => {
+                Some(v) if field == "autoStartVoiceEngine" || field.ends_with(".h5ReadyCheckEnabled") => {
                     if !v.is_boolean() {
                         return Err(invalid());
                     }
@@ -109,12 +109,13 @@ impl AppConfigPatch {
             let value = self.set.get(field).unwrap_or(&Value::Null);
             field_value(before, field) != Some(value)
                 && (field == "environments.current"
+                    || field == "autoStartVoiceEngine"
                     || field.starts_with(&format!("environments.{current}.")))
         })
     }
 }
 pub fn supported_field(field: &str) -> bool {
-    if ["customDeviceName", "environments.current"].contains(&field) {
+    if ["customDeviceName", "environments.current", "autoStartVoiceEngine"].contains(&field) {
         return true;
     }
     let p: Vec<_> = field.split('.').collect();
@@ -126,6 +127,7 @@ pub fn supported_field(field: &str) -> bool {
 fn field_label(field: &str) -> &str {
     match field.rsplit('.').next().unwrap_or(field) {
         "customDeviceName" => "小新自定义名称",
+        "autoStartVoiceEngine" => "语音引擎随应用启动",
         "current" => "运行环境",
         "otaUrl" => "授权／配置服务地址",
         "wsUrl" => "手动语音地址",
@@ -149,12 +151,16 @@ pub fn shared_changes(evidence: &Value) -> Vec<Value> {
             let field = item.as_str()?;
             if field != "customDeviceName"
                 && field != "environments.current"
+                && field != "autoStartVoiceEngine"
                 && !field.ends_with(".h5ReadyCheckEnabled")
             {
                 return None;
             }
             let before = field_value(&evidence["before"], field)?;
             let after = field_value(&evidence["after"], field)?;
+            if field == "autoStartVoiceEngine" && (!before.is_boolean() || !after.is_boolean()) {
+                return None;
+            }
             if before == after
                 || !(before.is_null() || before.is_string() || before.is_boolean())
                 || !(after.is_null() || after.is_string() || after.is_boolean())
@@ -268,5 +274,45 @@ mod tests {
             changes,
             vec![json!({"field":"customDeviceName","before":"旧名称","after":"新名称"})]
         );
+    }
+
+    #[test]
+    fn voice_auto_start_is_a_strict_boolean_set_and_cannot_be_cleared() {
+        assert!(supported_field("autoStartVoiceEngine"));
+        for value in [json!(true), json!(false)] {
+            let patch: AppConfigPatch = serde_json::from_value(json!({"set":{"autoStartVoiceEngine":value}})).unwrap();
+            patch.validate().unwrap();
+            assert_eq!(patch.fields(), vec!["autoStartVoiceEngine"]);
+            assert!(patch.clear.is_empty());
+            assert!(patch.matches(&json!({"autoStartVoiceEngine":value})));
+            assert!(!patch.matches(&json!({})));
+            assert!(!patch.matches(&json!({"autoStartVoiceEngine":null})));
+            assert!(!patch.restart_required(&json!({"autoStartVoiceEngine":value})));
+            assert!(patch.restart_required(&json!({"autoStartVoiceEngine":!value.as_bool().unwrap()})));
+        }
+        for value in [Value::Null, json!("false"), json!("true"), json!(0), json!(1), json!([]), json!({})] {
+            let patch: AppConfigPatch = serde_json::from_value(json!({"set":{"autoStartVoiceEngine":value}})).unwrap();
+            assert!(patch.validate().is_err());
+        }
+        let clear: AppConfigPatch = serde_json::from_value(json!({"clear":["autoStartVoiceEngine"]})).unwrap();
+        assert!(clear.validate().is_err());
+        assert!(!supported_field("environments.prod.autoStartVoiceEngine"));
+    }
+
+    #[test]
+    fn voice_auto_start_combines_with_environment_changes_in_one_restart_decision() {
+        let before = json!({"autoStartVoiceEngine":true,"environments":{"current":"prod","prod":{"h5ReadyCheckEnabled":true}}});
+        let changed: AppConfigPatch = serde_json::from_value(json!({"set":{"autoStartVoiceEngine":false,"environments.prod.h5ReadyCheckEnabled":false}})).unwrap();
+        changed.validate().unwrap();
+        assert!(changed.restart_required(&before));
+        let same: AppConfigPatch = serde_json::from_value(json!({"set":{"autoStartVoiceEngine":true,"environments.prod.h5ReadyCheckEnabled":true}})).unwrap();
+        same.validate().unwrap();
+        assert!(same.matches(&before));
+        assert!(!same.restart_required(&before));
+        let evidence = json!({"fields":["autoStartVoiceEngine","environments.prod.otaUrl"],"before":{"autoStartVoiceEngine":true,"environments":{"prod":{"otaUrl":"https://private.example"}}},"after":{"autoStartVoiceEngine":false,"environments":{"prod":{"otaUrl":"https://another.example"}}}});
+        assert_eq!(shared_changes(&evidence), vec![json!({"field":"autoStartVoiceEngine","before":true,"after":false})]);
+        for (before, after) in [(Value::Null, json!(false)), (json!("true"), json!(false)), (json!(false), json!(false))] {
+            assert!(shared_changes(&json!({"fields":["autoStartVoiceEngine"],"before":{"autoStartVoiceEngine":before},"after":{"autoStartVoiceEngine":after}})).is_empty());
+        }
     }
 }

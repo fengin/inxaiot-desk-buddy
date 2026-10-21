@@ -15,6 +15,7 @@ import { useProjectStore } from "@/stores/projects";
 import { NCheckbox, NPagination, NSelect } from "naive-ui";
 import type { ScreenTask } from "@/shared/model/screen";
 import ScreenDetail from "./ScreenDetail.vue";
+import ScreenVersionSyncDialog from "./ScreenVersionSyncDialog.vue";
 import ScreenLocalEditor from "./ScreenLocalEditor.vue";
 import ScreenStatusDialog from "./ScreenStatusDialog.vue";
 import ScreenTargetPicker from "./ScreenTargetPicker.vue";
@@ -43,6 +44,29 @@ async function render() {
 }
 
 describe("智能屏交互原型页面", () => {
+  it("列表版本待同步点击后重新核对，确认前不提交，版本写回刷新后提示消失", async () => {
+    const { wrapper, adapter, store } = await render();
+    try {
+      const state = (adapter as unknown as { snapshots: Map<string, typeof store.snapshot> }).snapshots.get(store.projectId)!;
+      const target = state.screens.find(screen => screen.id === "platform-screen-2")!;
+      target.appVersion = "0.9.0";
+      await adapter.previewVersionSync(store.projectId, [target.id]); await store.refresh(); await flushPromises();
+      const read = vi.spyOn(adapter, "previewVersionSync"), submit = vi.spyOn(adapter, "submitVersionSync"), execute = vi.spyOn(adapter, "execute");
+      await wrapper.get(`[data-testid="screen-version-sync-${target.id}"]`).trigger("click"); await flushPromises();
+      expect(read).toHaveBeenCalledExactlyOnceWith(store.projectId, [target.id]);
+      expect(wrapper.getComponent(ScreenVersionSyncDialog).props("ids")).toEqual([target.id]);
+      expect(submit).not.toHaveBeenCalled(); expect(execute).not.toHaveBeenCalled();
+      expect(store.snapshot.screens.find(screen => screen.id === target.id)?.appVersion).toBe("0.9.0");
+      await wrapper.get('[data-testid="screen-version-submit"]').trigger("click"); await flushPromises();
+      await vi.waitFor(() => expect(store.snapshot.screens.find(screen => screen.id === target.id)?.appVersion).toBe("1.5.2"));
+      expect(submit).toHaveBeenCalledOnce(); expect(execute).not.toHaveBeenCalled();
+      expect(wrapper.find(`[data-testid="screen-version-sync-${target.id}"]`).exists()).toBe(false);
+      expect(store.draftIds.has(target.id)).toBe(false);
+      expect(store.snapshot.tasks.some(task => task.action === "version_sync")).toBe(true);
+      expect(store.snapshot.tasks.some(task => task.action === "install" || task.action === "register")).toBe(false);
+    } finally { wrapper.unmount(); store.stop(); adapter.dispose(); }
+  }, 30000);
+
   it.each(["ping", "inspect", "mac"] as const)("%s 完成后从结果打开屏详情，关闭后保留结果且不重复检查", async (action) => {
     const { wrapper, adapter, store } = await render();
     const execute = vi.spyOn(adapter, "execute");

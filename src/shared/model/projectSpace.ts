@@ -13,7 +13,8 @@ export interface ProjectSpaceOption {
   children?: ProjectSpaceOption[];
 }
 
-function pathResolver(spaces: readonly ProjectSpaceNode[]) {
+/** 为一份目录建立可复用的路径查询；目录变化时由调用方重新创建。 */
+export function createProjectSpacePathResolver(spaces: readonly ProjectSpaceNode[]) {
   const nodes = new Map<string, ProjectSpaceNode>();
   const duplicates = new Set<string>();
   for (const node of spaces) {
@@ -21,7 +22,8 @@ function pathResolver(spaces: readonly ProjectSpaceNode[]) {
     nodes.set(node.id, node);
   }
   const cache = new Map<string, ProjectSpaceNode[] | undefined>();
-  return (id: string): ProjectSpaceNode[] | undefined => {
+  return (id?: string | null): ProjectSpaceNode[] | undefined => {
+    if (!id) return undefined;
     if (cache.has(id)) return cache.get(id);
     const path: ProjectSpaceNode[] = [], seen = new Set<string>();
     let current: string | undefined = id;
@@ -40,7 +42,7 @@ function pathResolver(spaces: readonly ProjectSpaceNode[]) {
 }
 
 export function getProjectSpacePath(spaces: readonly ProjectSpaceNode[], id?: string | null): ProjectSpaceNode[] | undefined {
-  return id ? pathResolver(spaces)(id) : undefined;
+  return id ? createProjectSpacePathResolver(spaces)(id) : undefined;
 }
 
 const pathText = (path: readonly ProjectSpaceNode[]) => path.map((node) => node.name.trim()).join("/");
@@ -51,7 +53,7 @@ export function projectSpacePath(spaces: readonly ProjectSpaceNode[], id?: strin
 }
 
 export function buildProjectSpaceTree(spaces: readonly ProjectSpaceNode[]): ProjectSpaceOption[] {
-  const resolve = pathResolver(spaces), options = new Map<string, ProjectSpaceOption>();
+  const resolve = createProjectSpacePathResolver(spaces), options = new Map<string, ProjectSpaceOption>();
   for (const node of spaces) {
     const path = resolve(node.id);
     if (path) options.set(node.id, { value: node.id, label: node.name, path: pathText(path) });
@@ -82,7 +84,7 @@ export function resolveProjectSpacePath(text: string, spaces: readonly ProjectSp
   const input = text.trim();
   if (!input) return { status: "empty", path: "", error: "" };
   if (!available) return { status: "unavailable", path: input, error: "空间目录暂不可用，请恢复后重新匹配或明确设为待定空间" };
-  const resolve = pathResolver(spaces), normalized = normalizedPath(input);
+  const resolve = createProjectSpacePathResolver(spaces), normalized = normalizedPath(input);
   const matches = spaces.filter((node) => {
     const path = resolve(node.id);
     return path && normalizedPath(pathText(path)) === normalized;

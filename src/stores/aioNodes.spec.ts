@@ -25,6 +25,33 @@ describe("aio nodes store", () => {
     vi.useRealTimers();
   });
 
+  it("项目上下文切换使旧详情、导入及选择请求失效并立即解除加载状态", async () => {
+    const adapter = new FixtureAioAdapter();
+    configureAioAdapter(adapter);
+    const store = useAioNodesStore();
+    await store.refresh(projectId);
+    const target = store.nodes[0]!;
+    const originalPage = await adapter.listNodes(projectId, { page: 1, pageSize: 100 });
+    let resolveDetail!: (value: Awaited<ReturnType<FixtureAioAdapter["getNodeDetail"]>>) => void;
+    let resolveImport!: (value: Awaited<ReturnType<FixtureAioAdapter["getLatestImport"]>>) => void;
+    let resolveSelection!: (value: Awaited<ReturnType<FixtureAioAdapter["listNodes"]>>) => void;
+    vi.spyOn(adapter, "getNodeDetail").mockImplementationOnce(() => new Promise(resolve => { resolveDetail = resolve; }));
+    vi.spyOn(adapter, "getLatestImport").mockImplementationOnce(() => new Promise(resolve => { resolveImport = resolve; }));
+    vi.spyOn(adapter, "listNodes").mockImplementationOnce(() => new Promise(resolve => { resolveSelection = resolve; }));
+    const pending = [store.loadDetail(target.mac), store.resumeImport(), store.loadSelectionNodes(projectId)];
+    expect([store.detailLoading, store.importLoading, store.selectionLoading]).toEqual([true, true, true]);
+    expect(store.setProjectContext("another-project")).toBe(true);
+    expect([store.loading, store.detailLoading, store.importLoading, store.selectionLoading]).toEqual([false, false, false, false]);
+    expect(store.nodes).toEqual([]); expect(store.total).toBe(0);
+    resolveDetail({ node: target, versions: [], platform: undefined }); resolveImport(null); resolveSelection(originalPage);
+    await Promise.all(pending);
+    expect(store.detail).toBeUndefined(); expect(store.importPreview).toBeUndefined(); expect(store.selectionNodes).toEqual([]);
+    expect([store.detailLoading, store.importLoading, store.selectionLoading]).toEqual([false, false, false]);
+    expect(store.setProjectContext("another-project")).toBe(false);
+    await store.refresh("another-project");
+    expect(store.nodes.length).toBeGreaterThan(0);
+  });
+
   it("普通刷新只读记录，显式服务检查防重复且终态刷新列表与详情", async () => {
     vi.useFakeTimers();
     const adapter = new FixtureAioAdapter();

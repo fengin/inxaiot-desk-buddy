@@ -52,25 +52,35 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
 
   watch(pageSize, () => { page.value = 1; });
 
+  function setProjectContext(nextProjectId: string) {
+    if (projectId.value === nextProjectId) return false;
+    listRequest += 1;
+    detailRequest += 1;
+    importRequest += 1;
+    selectionRequest += 1;
+    nodes.value = [];
+    metadataWarning.value = "";
+    stats.value = emptyStats();
+    total.value = 0;
+    detail.value = undefined;
+    importPreview.value = undefined;
+    latestImportSessionId.value = "";
+    platformIssues.value = [];
+    pagePlatformIssues.value = [];
+    selectionNodes.value = [];
+    projectId.value = nextProjectId;
+    loading.value = false;
+    detailLoading.value = false;
+    importLoading.value = false;
+    selectionLoading.value = false;
+    error.value = "";
+    return true;
+  }
+
   async function refresh(nextProjectId = projectId.value, search = "", state = "all") {
     if (!nextProjectId) return;
+    setProjectContext(nextProjectId);
     const request = ++listRequest;
-    if (projectId.value !== nextProjectId) {
-      detailRequest += 1;
-      importRequest += 1;
-      nodes.value = [];
-      metadataWarning.value = "";
-      stats.value = emptyStats();
-      total.value = 0;
-      detail.value = undefined;
-      importPreview.value = undefined;
-      latestImportSessionId.value = "";
-      platformIssues.value = [];
-      pagePlatformIssues.value = [];
-      selectionRequest += 1;
-      selectionNodes.value = [];
-    }
-    projectId.value = nextProjectId;
     listSearch = search;
     listState = state;
     loading.value = true;
@@ -333,6 +343,6 @@ export const useAioNodesStore = defineStore("aio-nodes", () => {
     realBackend, nodes, stats, total, page, pageSize, refreshedAt, latestImportSessionId,
     loading, error, metadataWarning, detail, detailLoading, importPreview, importLoading, platformIssues, pagePlatformIssues,
     selectionNodes, selectionLoading, serviceInspections, serviceInspection,
-    refresh, loadSelectionNodes, loadDetail, checkServices, resumeImport, previewImport, updateSelection, applyImport, discardImport
+    setProjectContext, refresh, loadSelectionNodes, loadDetail, checkServices, resumeImport, previewImport, updateSelection, applyImport, discardImport
   };
 });

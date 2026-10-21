@@ -8,6 +8,8 @@ export interface ScreenEnvironmentConfig {
 }
 export interface ScreenAppConfiguration {
   customDeviceName: string | null;
+  /** 旧 APK 未提供此字段时保持未知，不能默认为关闭。 */
+  autoStartVoiceEngine?: boolean;
   environments: { current: AppEnvironment } & Record<AppEnvironment, ScreenEnvironmentConfig>;
 }
 export interface ScreenAppConfigRead {
@@ -20,6 +22,7 @@ export interface ScreenAppConfigPatch { set: Record<string, string | boolean>; c
 export interface ScreenAppConfigDraft {
   environment: AppEnvironment; switchEnvironment: boolean; readyMode: "keep" | "on" | "off";
   homeMode?: "keep" | "on" | "off";
+  voiceMode?: "keep" | "on" | "off";
   edits: Record<string, { mode: "keep" | "set" | "clear"; value: string }>;
   names: Record<string, { mode: "keep" | "set" | "clear"; value: string }>;
   targetIds: string[]; includedIds: string[]; rows: ScreenAppConfigRead[]; savedAt?: string;
@@ -27,12 +30,11 @@ export interface ScreenAppConfigDraft {
 export const appEnvironments = [{ label: "测试环境", value: "test" }, { label: "预发环境", value: "pre" }, { label: "生产环境", value: "prod" }];
 export const appConfigSources: Record<string, string> = { manual: "手动设置", server: "服务端下发", default: "默认网页", none: "尚未配置" };
 export function appConfigReadTime(value: string) {
-  const milliseconds = Date.parse(value);
-  return formatDisplayDateTime(Number.isFinite(milliseconds) ? String(milliseconds) : value);
+  return formatDisplayDateTime(value);
 }
 export function appConfigFieldLabel(field: string) {
   const parts=field.split('.'), key = parts.at(-1)!;
-  const label=({ customDeviceName: "设备名", current: "选择环境", otaUrl: "OTA 地址", wsUrl: "WebSocket(可选)", h5Url: "H5地址(可选)", h5ReadyCheckEnabled: "H5检测", homeEnabled: "固定小新为主屏", h5ReadyRecord: "网页初始化记录" } as Record<string, string>)[key] ?? field;
+  const label=({ customDeviceName: "设备名", autoStartVoiceEngine: "语音引擎随应用启动", current: "选择环境", otaUrl: "OTA 地址", wsUrl: "WebSocket(可选)", h5Url: "H5地址(可选)", h5ReadyCheckEnabled: "H5检测", homeEnabled: "固定小新为主屏", h5ReadyRecord: "网页初始化记录" } as Record<string, string>)[key] ?? field;
   const environment=parts.length===3?appEnvironments.find(item=>item.value===parts[1])?.label:undefined;
   return environment?`${environment} · ${label}`:label;
 }
@@ -58,8 +60,15 @@ export function appHomeDisplay(home?: ScreenAppConfigRead["home"]) {
   if (!home.enabled) return "未固定";
   return home.active === true ? "固定并已激活" : home.active === false ? "已固定，待激活" : "已固定，激活待核实";
 }
+export function appConfigVoiceSupported(row: ScreenAppConfigRead): boolean {
+  return row.capabilities?.ready === true && Array.isArray(row.capabilities.supportedFields) && row.capabilities.supportedFields.includes("autoStartVoiceEngine")
+    && typeof row.config?.autoStartVoiceEngine === "boolean";
+}
+export function appConfigVoiceDisplay(row: ScreenAppConfigRead): string {
+  return appConfigVoiceSupported(row) ? appConfigDisplay(row.config!.autoStartVoiceEngine) : "未确认，当前不可修改";
+}
 export function appConfigRestartRequired(config: ScreenAppConfiguration, patch: ScreenAppConfigPatch) {
-  return appConfigChanges(config, patch).some(({ key }) => key === "environments.current" || key.startsWith(`environments.${config.environments.current}.`));
+  return appConfigChanges(config, patch).some(({ key }) => key === "autoStartVoiceEngine" || key === "environments.current" || key.startsWith(`environments.${config.environments.current}.`));
 }
 export function appConfigEffectiveAfter(config: ScreenAppConfiguration, patch: ScreenAppConfigPatch, environment: AppEnvironment) {
   const current=config.environments[environment];

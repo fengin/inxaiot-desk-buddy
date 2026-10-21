@@ -1,6 +1,7 @@
 import {
   appConfigDisplay,
   appConfigFieldLabel,
+  appConfigVoiceSupported,
   type AppEnvironment,
   type ScreenAppConfigDraft,
   type ScreenAppConfiguration,
@@ -17,7 +18,7 @@ export interface AppConfigValueSummary {
   total: number;
 }
 
-export type AppConfigEditorField = "current" | "otaUrl" | "wsUrl" | "h5Url" | "h5ReadyCheckEnabled";
+export type AppConfigEditorField = "current" | "otaUrl" | "wsUrl" | "h5Url" | "h5ReadyCheckEnabled" | "autoStartVoiceEngine";
 export type AppConfigSummaries = Record<AppConfigEditorField, AppConfigValueSummary>;
 
 export interface AppConfigDifference {
@@ -27,7 +28,7 @@ export interface AppConfigDifference {
   reference: string;
 }
 
-const editorFields: AppConfigEditorField[] = ["current", "otaUrl", "wsUrl", "h5Url", "h5ReadyCheckEnabled"];
+const editorFields: AppConfigEditorField[] = ["current", "otaUrl", "wsUrl", "h5Url", "h5ReadyCheckEnabled", "autoStartVoiceEngine"];
 
 function normalizeValue(value: AppConfigValue): string | boolean | null {
   return value === "" || value === undefined ? null : value;
@@ -52,15 +53,15 @@ export function summarizeAppConfigValues(values: AppConfigValue[]): AppConfigVal
 }
 
 function fieldValue(config: ScreenAppConfiguration, field: AppConfigEditorField, environment: AppEnvironment): AppConfigValue {
-  return field === "current" ? config.environments.current : config.environments[environment][field];
+  return field === "current" ? config.environments.current : field === "autoStartVoiceEngine" ? config.autoStartVoiceEngine : config.environments[environment][field];
 }
 
 /** 调用方传入已勾选的读取结果；读取失败的屏不参与代表值统计。 */
 export function summarizeAppConfigs(rows: ScreenAppConfigRead[], environment: AppEnvironment): AppConfigSummaries {
-  const configurations = rows.flatMap(row => row.config ? [row.config] : []);
+  const readable = rows.filter(row => row.config);
   return Object.fromEntries(editorFields.map(field => [
     field,
-    summarizeAppConfigValues(configurations.map(config => fieldValue(config, field, environment))),
+    summarizeAppConfigValues(readable.map(row => field === "autoStartVoiceEngine" && !appConfigVoiceSupported(row) ? undefined : fieldValue(row.config!, field, environment))),
   ])) as AppConfigSummaries;
 }
 
@@ -68,16 +69,17 @@ export function appConfigDifferences(
   config: ScreenAppConfiguration,
   summaries: AppConfigSummaries,
   environment: AppEnvironment,
+  voiceSupported = true,
 ): AppConfigDifference[] {
   return editorFields.flatMap(key => {
     const summary = summaries[key];
-    const value = fieldValue(config, key, environment);
+    const value = key === "autoStartVoiceEngine" && !voiceSupported ? undefined : fieldValue(config, key, environment);
     if (summary.total === 0 || (!summary.tied && normalizeValue(value) === summary.value)) return [];
     return [{
       key,
       label: appConfigFieldLabel(key),
-      value: appConfigDisplay(value, key === "current"),
-      reference: summary.tied ? "多个值，无多数值" : appConfigDisplay(summary.value, key === "current"),
+      value: key === "autoStartVoiceEngine" && typeof value !== "boolean" ? "未确认" : appConfigDisplay(value, key === "current"),
+      reference: summary.tied ? "多个值，无多数值" : key === "autoStartVoiceEngine" && typeof summary.value !== "boolean" ? "未确认" : appConfigDisplay(summary.value, key === "current"),
     }];
   });
 }

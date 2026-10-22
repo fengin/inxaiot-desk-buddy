@@ -56,6 +56,18 @@ fn detail(plan: &ScreenPlan) -> AppResult<MaintenancePlan> {
     serde_json::from_value(plan.detail.clone())
         .map_err(|_| AppError::Conflict("设备操作检查记录无效".into()))
 }
+fn validate_configuration_batch(targets: &[ScreenAsset], snapshot: &ScreenSnapshot) -> AppResult<()> {
+    crate::domain::smart_screen::app_config::validate_batch_sizes(targets.iter().map(|screen| screen.fields.size.as_str()))?;
+    let current = targets.iter().map(|screen| snapshot.screens.iter().find(|item| item.id == screen.id)
+        .ok_or_else(|| AppError::Conflict("设备资料已变化，请重新读取配置".into())))
+        .collect::<AppResult<Vec<_>>>()?;
+    crate::domain::smart_screen::app_config::validate_batch_sizes(current.iter().map(|screen| screen.fields.size.as_str()))?;
+    // 此整批门禁只处理尺寸；IP、MAC等变化继续由原提交及逐屏same_target保护处理。
+    if targets.iter().zip(current).any(|(before, after)| before.fields.size != after.fields.size) {
+        return Err(AppError::Conflict("设备关键资料已变化或尚未提交".into()));
+    }
+    Ok(())
+}
 async fn device_idle(state: &FormalAppState, ip: &str, except: Option<&str>) -> AppResult<()> {
     let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM local_task t JOIN local_screen_task_data d ON d.local_task_id=t.id,json_each(d.plan_json,'$.targets') target WHERE t.domain_type='smart_screen' AND (? IS NULL OR t.id<>?) AND json_extract(target.value,'$.ip')=? AND (t.state IN ('queued','running','cancelling','finalizing_failed') OR EXISTS(SELECT 1 FROM local_task_result_guard g WHERE g.local_task_id=t.id))")
         .bind(except).bind(except).bind(ip).fetch_one(state.local_store.pool()).await.map_err(|e|AppError::database("检查同地址活动任务",&e))?;
@@ -179,6 +191,9 @@ async fn preflight_with_settings(
                 .ok_or_else(|| AppError::NotFound("所选屏已经变化".into()))
         })
         .collect::<AppResult<Vec<_>>>()?;
+    if input.action == "app_config" {
+        crate::domain::smart_screen::app_config::validate_batch_sizes(selected.iter().map(|screen| screen.fields.size.as_str()))?;
+    }
     if input.action == "install" {
         let sizes = selected
             .iter()
@@ -286,7 +301,7 @@ async fn preflight_with_settings(
                         let patch = &app_config.as_ref().expect("checked config")[&screen.id];
                         match super::app_config::read_device(&device, &screen.fields.ip, Some(patch)).await {
                             Err(error) => reason = Some(error.to_string()),
-                            Ok((_, before)) if patch.restart_required(&before) => {
+                            Ok((capabilities, before)) if patch.restart_required_with_capabilities(&before, &capabilities) => {
                                 if let Err(error) = super::device_maintenance::capability(&device, &screen, &observation, "restart").await {
                                     reason = Some(error.to_string());
                                 }
@@ -401,7 +416,20 @@ pub async fn submit(
     if !ids.is_subset(&plan.targets.iter().map(|s| s.id.clone()).collect()) {
         return Err(AppError::Conflict("不能执行未检查通过的目标".into()));
     }
+    if input.action == "app_config" {
+        // 旧版产生的混合预览必须重做，不能缩小提交选择后沿用原预览绕过尺寸门禁。
+        crate::domain::smart_screen::app_config::validate_batch_sizes(plan.targets.iter().map(|screen| screen.fields.size.as_str()))?;
+    }
     let snapshot = local(state).snapshot(project).await?;
+    if input.action == "app_config" {
+        // 原预览可能只保留检查通过的targets，仍须复核原始整批选择，不能遗漏被过滤目标。
+        let originally_selected = plan.input.target_ids.iter().map(|id| snapshot.screens.iter().find(|screen| &screen.id == id)
+            .ok_or_else(|| AppError::Conflict("设备资料已变化，请重新读取配置".into())))
+            .collect::<AppResult<Vec<_>>>()?;
+        crate::domain::smart_screen::app_config::validate_batch_sizes(originally_selected.iter().map(|screen| screen.fields.size.as_str()))?;
+        let selected = plan.targets.iter().filter(|screen| ids.contains(&screen.id)).cloned().collect::<Vec<_>>();
+        validate_configuration_batch(&selected, &snapshot)?;
+    }
     for screen in plan.targets.iter().filter(|s| ids.contains(&s.id)) {
         local(state).require_idle(project, &screen.id).await?;
         device_idle(state, &screen.fields.ip, None).await?;
@@ -603,6 +631,12 @@ pub async fn run(
     let project = &envelope.local_project_id;
     let (plan, _) = task_data::read_plan(state.local_store.pool(), project, id).await?;
     let data = detail(&plan)?;
+    if plan.input.action == "app_config" {
+        let snapshot = local(state).snapshot(project).await?;
+        if let Err(error) = validate_configuration_batch(&plan.targets, &snapshot) {
+            return reject_unstarted_configuration_batch(state, id, &plan, error).await;
+        }
+    }
     state
         .task_repository
         .initialize_target_progress(id, "等待执行", 100)
@@ -733,6 +767,39 @@ pub async fn run(
     let mut results = task_data::read_results(state.local_store.pool(), project, id).await?;
     finish(state, id, &plan, &mut results).await
 }
+
+/// 仅结束从未进入设备阶段的旧排队批次；已有执行证据仍交给原只读恢复流程。
+async fn reject_unstarted_configuration_batch(
+    state: &FormalAppState,
+    id: &str,
+    plan: &ScreenPlan,
+    error: AppError,
+) -> AppResult<()> {
+    let previous = task_data::read_results(state.local_store.pool(), &plan.project_id, id).await?;
+    if state.task_repository.get(id).await?.state != TaskState::Queued || !previous.targets.is_empty() {
+        return Err(AppError::Conflict("原配置任务已有执行记录，请核实原任务；未重放设备动作".into()));
+    }
+    state.task_repository.initialize_target_progress(id, "配置批次检查", 100).await?;
+    state.task_repository.transition(id, TaskState::Queued, TaskState::Running, None, None).await?;
+    let message = format!("{error} 本批次未连接设备或修改配置，请重新选择后读取。");
+    let blocked = ScreenResults {
+        targets: plan.targets.iter().map(|screen| (screen.id.clone(), ScreenTargetResult {
+            format_version: 1, screen_id: screen.id.clone(), device: ResultState::Failed,
+            business: ResultState::NotRequired, shared: ResultState::NotRequired, message: message.clone(),
+            evidence: json!({"phase":"config_batch_blocked","config":{"save":"not_required","restart":"not_required","readback":"not_required"}}),
+            ..Default::default()
+        })).collect(),
+        finished: true,
+    };
+    task_data::save_results(state.local_store.pool(), &plan.project_id, id, &blocked).await?;
+    for result in blocked.targets.values() { target_state(state, id, result, true).await?; }
+    // 尚未建立平台操作起点，不调用共享写入；本机明确记录整批未执行。
+    state.task_repository.transition(id, TaskState::Running, TaskState::Failed,
+        Some("SCREEN_CONFIG_BATCH_BLOCKED"), Some(&message)).await?;
+    state.task_repository.resolve_results(id).await?;
+    tasks::event(state, id, None, "blocked", &message, TaskEventLevel::Warn).await
+}
+
 async fn execute_target(
     state: &FormalAppState,
     id: &str,

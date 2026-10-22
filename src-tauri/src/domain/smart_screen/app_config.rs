@@ -2,6 +2,19 @@ use crate::core::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use super::app_config_schema::{self as schema, ConfigFieldDefinition, ConfigSchema, FieldType, values_equal};
+
+/// 配置与安装一样按明确尺寸分批；与应用版本和单个字段能力相互独立。
+pub fn validate_batch_sizes<'a>(sizes: impl IntoIterator<Item = &'a str>) -> AppResult<()> {
+    let sizes = sizes.into_iter().collect::<BTreeSet<_>>();
+    if sizes.is_empty() || sizes.iter().any(|size| !["4", "10"].contains(size)) {
+        return Err(AppError::InvalidConfig("请先确认所选屏尺寸".into()));
+    }
+    if sizes.len() != 1 {
+        return Err(AppError::InvalidConfig("4 寸屏和 10 寸屏不能同时修改配置，请分批选择。".into()));
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -40,10 +53,17 @@ impl AppConfigPatch {
             };
             let value = self.set.get(&field);
             let parts: Vec<_> = field.split('.').collect();
-            if parts.len() == 3 {
+            if parts.len() == 3 && parts[0] == "environments" {
                 environments.insert(parts[1].to_string());
             }
             match value {
+                Some(v) if schema::audio_field(&field) => {
+                    // 类型、范围、选项和权限必须在实际屏重新读取schema后复核。
+                    if !(v.is_boolean() || v.as_f64().is_some_and(f64::is_finite)
+                        || v.as_str().is_some_and(|s| !s.trim().is_empty() && s.chars().count() <= 4096 && !s.chars().any(char::is_control))) {
+                        return Err(invalid());
+                    }
+                }
                 None if field == "customDeviceName"
                     || field.ends_with(".wsUrl")
                     || field.ends_with(".h5Url") => {}
@@ -97,7 +117,7 @@ impl AppConfigPatch {
     pub fn matches(&self, config: &Value) -> bool {
         self.set
             .iter()
-            .all(|(key, value)| field_value(config, key) == Some(value))
+            .all(|(key, value)| field_value(config, key).is_some_and(|before| values_equal(before, value)))
             && self
                 .clear
                 .iter()
@@ -107,22 +127,21 @@ impl AppConfigPatch {
         let current = before["environments"]["current"].as_str().unwrap_or("");
         self.fields().iter().any(|field| {
             let value = self.set.get(field).unwrap_or(&Value::Null);
-            field_value(before, field) != Some(value)
+            !field_value(before, field).is_some_and(|before| values_equal(before, value))
                 && (field == "environments.current"
                     || field == "autoStartVoiceEngine"
                     || field.starts_with(&format!("environments.{current}.")))
         })
     }
+    pub fn restart_required_with_capabilities(&self, before: &Value, cap: &Value) -> bool {
+        match ConfigSchema::from_capabilities(cap) {
+            Ok(Some(schema)) => schema.restart_required(self, before),
+            _ => self.restart_required(before),
+        }
+    }
 }
 pub fn supported_field(field: &str) -> bool {
-    if ["customDeviceName", "environments.current", "autoStartVoiceEngine"].contains(&field) {
-        return true;
-    }
-    let p: Vec<_> = field.split('.').collect();
-    p.len() == 3
-        && p[0] == "environments"
-        && ["test", "pre", "prod"].contains(&p[1])
-        && ["otaUrl", "wsUrl", "h5Url", "h5ReadyCheckEnabled"].contains(&p[2])
+    schema::safe_field_path(field)
 }
 fn field_label(field: &str) -> &str {
     match field.rsplit('.').next().unwrap_or(field) {
@@ -141,7 +160,7 @@ pub fn field_value<'a>(config: &'a Value, path: &str) -> Option<&'a Value> {
         .try_fold(config, |value, key| value.get(key))
 }
 
-/// 共享结果仅保留名称、运行环境和开关的前后值；地址可能含凭据，不共享地址值。
+/// 共享结果保留旧安全字段及schema确认的语音数值/布尔值，不共享地址和私有字段。
 pub fn shared_changes(evidence: &Value) -> Vec<Value> {
     evidence["fields"]
         .as_array()
@@ -149,6 +168,19 @@ pub fn shared_changes(evidence: &Value) -> Vec<Value> {
         .flatten()
         .filter_map(|item| {
             let field = item.as_str()?;
+            if schema::audio_field(field) {
+                let definition: ConfigFieldDefinition = evidence["fieldDefinitions"].as_array()?.iter()
+                    .find(|definition| definition["key"] == field)
+                    .and_then(|value| serde_json::from_value(value.clone()).ok())?;
+                if !definition.shape_valid() || !matches!(definition.field_type, FieldType::Boolean | FieldType::Integer | FieldType::Number) { return None; }
+                let before = field_value(&evidence["before"], field)?;
+                let after = field_value(&evidence["after"], field)?;
+                if before.is_null() || after.is_null() || !definition.readable_value(before) || !definition.readable_value(after) || values_equal(before, after) { return None; }
+                let mut change = serde_json::json!({"field":field,"before":before,"after":after});
+                if safe_shared_label(&definition.label) { change["label"] = serde_json::json!(definition.label); }
+                if let Some(unit) = definition.unit.filter(|unit| safe_shared_label(unit)) { change["unit"] = serde_json::json!(unit); }
+                return Some(change);
+            }
             if field != "customDeviceName"
                 && field != "environments.current"
                 && field != "autoStartVoiceEngine"
@@ -161,7 +193,7 @@ pub fn shared_changes(evidence: &Value) -> Vec<Value> {
             if field == "autoStartVoiceEngine" && (!before.is_boolean() || !after.is_boolean()) {
                 return None;
             }
-            if before == after
+            if values_equal(before, after)
                 || !(before.is_null() || before.is_string() || before.is_boolean())
                 || !(after.is_null() || after.is_string() || after.is_boolean())
             {
@@ -170,6 +202,20 @@ pub fn shared_changes(evidence: &Value) -> Vec<Value> {
             Some(serde_json::json!({"field":field,"before":before,"after":after}))
         })
         .collect()
+}
+
+/// 失败或同值结果也能显示语音参数名称；只共享定义中的短标签，不复制默认值或地址。
+pub fn shared_field_labels(evidence: &Value) -> BTreeMap<String, String> {
+    evidence["fieldDefinitions"].as_array().into_iter().flatten().take(64)
+        .filter_map(|raw| serde_json::from_value::<ConfigFieldDefinition>(raw.clone()).ok())
+        .filter(|definition| definition.shape_valid()
+            && evidence["fields"].as_array().is_some_and(|fields| fields.contains(&Value::String(definition.key.clone())))
+            && safe_shared_label(&definition.label))
+        .map(|definition| (definition.key, definition.label)).collect()
+}
+
+fn safe_shared_label(label: &str) -> bool {
+    !label.contains("://") && !["password=", "token="].iter().any(|key| label.to_ascii_lowercase().contains(key))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -199,6 +245,19 @@ pub struct AppHomeRead {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn configuration_batch_accepts_only_one_known_size_independent_of_app_version() {
+        for sizes in [vec!["4"], vec!["10"], vec!["4", "4"], vec!["10", "10", "10"]] {
+            assert!(validate_batch_sizes(sizes).is_ok());
+        }
+        for sizes in [vec![], vec!["unknown"], vec![""], vec!["7"], vec!["4", "unknown"], vec!["10", "unknown"]] {
+            assert!(matches!(validate_batch_sizes(sizes), Err(AppError::InvalidConfig(message)) if message == "请先确认所选屏尺寸"));
+        }
+        for sizes in [vec!["4", "10"], vec!["10", "4"], vec!["4", "4", "10"]] {
+            assert!(matches!(validate_batch_sizes(sizes), Err(AppError::InvalidConfig(message)) if message == "4 寸屏和 10 寸屏不能同时修改配置，请分批选择。"));
+        }
+    }
+
     #[test]
     fn home_patch_is_explicit_and_separate_from_dart_fields_and_restart() {
         for enabled in [true, false] {

@@ -1,0 +1,404 @@
+{
+  "data": {
+    "configSchema": {
+      "fields": [
+        {
+          "clearable": true,
+          "defaultValue": null,
+          "label": "设备名",
+          "type": "string",
+          "restartPolicy": "none",
+          "key": "customDeviceName",
+          "maxLength": 128,
+          "group": "general",
+          "order": 0,
+          "writable": true
+        },
+        {
+          "clearable": false,
+          "defaultValue": "pre",
+          "options": [
+            {
+              "label": "测试环境",
+              "value": "test"
+            },
+            {
+              "label": "预发环境",
+              "value": "pre"
+            },
+            {
+              "label": "生产环境",
+              "value": "prod"
+            }
+          ],
+          "label": "选择环境",
+          "type": "string",
+          "restartPolicy": "appRestart",
+          "key": "environments.current",
+          "group": "environment",
+          "order": 0,
+          "writable": true
+        },
+        {
+          "clearable": false,
+          "defaultValue": "http://192.168.3.100:8091/api/device/ota",
+          "format": "httpUrl",
+          "label": "OTA 地址",
+          "type": "string",
+          "restartPolicy": "currentEnvironmentRestart",
+          "key": "environments.test.otaUrl",
+          "maxLength": 4096,
+          "group": "environment",
+          "order": 10,
+          "writable": true
+        },
+        {
+          "clearable": true,
+          "defaultValue": "ws://192.168.3.100:8091/ws/xiaoxin/v1/",
+          "format": "websocketUrl",
+          "label": "WebSocket(可选)",
+          "type": "string",
+          "restartPolicy": "currentEnvironmentRestart",
+          "key": "environments.test.wsUrl",
+          "maxLength": 4096,
+          "group": "environment",
+          "order": 20,
+          "writable": true
+        },
+        {
+          "clearable": true,
+          "defaultValue": null,
+          "format": "httpUrl",
+          "label": "H5地址(可选)",
+          "type": "string",
+          "restartPolicy": "currentEnvironmentRestart",
+          "key": "environments.test.h5Url",
+          "maxLength": 4096,
+          "group": "environment",
+          "order": 30,
+          "writable": true
+        },
+        {
+          "clearable": false,
+          "defaultValue": true,
+          "label": "检查H5地址",
+          "type": "boolean",
+          "restartPolicy": "currentEnvironmentRestart",
+          "key": "environments.test.h5ReadyCheckEnabled",
+          "group": "environment",
+          "order": 40,
+          "writable": true
+        },
+        {
+          "clearable": false,
+          "defaultValue": "https://app.inxvision.com/api/device/ota",
+          "format": "httpUrl",
+          "label": "OTA 地址",
+          "type": "string",
+          "restartPolicy": "currentEnvironmentRestart",
+          "key": "environments.pre.otaUrl",
+          "maxLength": 4096,
+          "group": "environment",
+          "order": 10,
+          "writable": true
+        },
+        {
+          "clearable": true,
+          "defaultValue": null,
+          "format": "websocketUrl",
+          "label": "WebSocket(可选)",
+          "type": "string",
+          "restartPolicy": "currentEnvironmentRestart",
+          "key": "environments.pre.wsUrl",
+          "maxLength": 4096,
+          "group": "environment",
+          "order": 20,
+          "writable": true
+        },
+        {
+          "clearable": true,
+          "defaultValue": "https://app.inxvision.com/login",
+          "format": "httpUrl",
+          "label": "H5地址(可选)",
+          "type": "string",
+          "restartPolicy": "currentEnvironmentRestart",
+          "key": "environments.pre.h5Url",
+          "maxLength": 4096,
+          "group": "environment",
+          "order": 30,
+          "writable": true
+        },
+        {
+          "clearable": false,
+          "defaultValue": true,
+          "label": "检查H5地址",
+          "type": "boolean",
+          "restartPolicy": "currentEnvironmentRestart",
+          "key": "environments.pre.h5ReadyCheckEnabled",
+          "group": "environment",
+          "order": 40,
+          "writable": true
+        },
+        {
+          "clearable": false,
+          "defaultValue": "https://api.tenclass.net/xiaozhi/ota/",
+          "format": "httpUrl",
+          "label": "OTA 地址",
+          "type": "string",
+          "restartPolicy": "currentEnvironmentRestart",
+          "key": "environments.prod.otaUrl",
+          "maxLength": 4096,
+          "group": "environment",
+          "order": 10,
+          "writable": true
+        },
+        {
+          "clearable": true,
+          "defaultValue": null,
+          "format": "websocketUrl",
+          "label": "WebSocket(可选)",
+          "type": "string",
+          "restartPolicy": "currentEnvironmentRestart",
+          "key": "environments.prod.wsUrl",
+          "maxLength": 4096,
+          "group": "environment",
+          "order": 20,
+          "writable": true
+        },
+        {
+          "clearable": true,
+          "defaultValue": null,
+          "format": "httpUrl",
+          "label": "H5地址(可选)",
+          "type": "string",
+          "restartPolicy": "currentEnvironmentRestart",
+          "key": "environments.prod.h5Url",
+          "maxLength": 4096,
+          "group": "environment",
+          "order": 30,
+          "writable": true
+        },
+        {
+          "clearable": false,
+          "defaultValue": true,
+          "label": "检查H5地址",
+          "type": "boolean",
+          "restartPolicy": "currentEnvironmentRestart",
+          "key": "environments.prod.h5ReadyCheckEnabled",
+          "group": "environment",
+          "order": 40,
+          "writable": true
+        },
+        {
+          "clearable": false,
+          "defaultValue": false,
+          "description": "开启后，下次启动小新时自动准备语音。",
+          "section": "启动",
+          "label": "语音引擎随应用启动",
+          "type": "boolean",
+          "restartPolicy": "appRestart",
+          "key": "autoStartVoiceEngine",
+          "group": "voice",
+          "order": 0,
+          "writable": true
+        },
+        {
+          "clearable": false,
+          "max": 2,
+          "defaultValue": 2,
+          "description": "数值越高，热词越容易触发。",
+          "section": "热词识别",
+          "label": "热词增强分数",
+          "type": "number",
+          "restartPolicy": "appRestart",
+          "writable": true,
+          "min": 1,
+          "step": 0.1,
+          "key": "audioConfig.keywordsScore",
+          "group": "voice",
+          "order": 10
+        },
+        {
+          "clearable": false,
+          "max": 0.8,
+          "defaultValue": 0.2,
+          "description": "数值越高，热词识别越严格。",
+          "section": "热词识别",
+          "label": "热词触发阈值",
+          "type": "number",
+          "restartPolicy": "appRestart",
+          "writable": true,
+          "min": 0.2,
+          "step": 0.05,
+          "key": "audioConfig.keywordsThreshold",
+          "group": "voice",
+          "order": 20
+        },
+        {
+          "clearable": false,
+          "max": 0.9,
+          "defaultValue": 0.8,
+          "description": "数值越高，语音判定越严格。",
+          "section": "语音检测",
+          "label": "语音检测阈值",
+          "type": "number",
+          "restartPolicy": "appRestart",
+          "writable": true,
+          "min": 0.3,
+          "step": 0.05,
+          "key": "audioConfig.vadThreshold",
+          "group": "voice",
+          "order": 30
+        },
+        {
+          "clearable": false,
+          "max": 2,
+          "defaultValue": 0.6,
+          "description": "说完后等待的静音时间。",
+          "section": "语音检测",
+          "label": "静音判定时长",
+          "type": "number",
+          "restartPolicy": "appRestart",
+          "writable": true,
+          "unit": "秒",
+          "min": 0.3,
+          "step": 0.1,
+          "key": "audioConfig.minSilenceDuration",
+          "group": "voice",
+          "order": 40
+        },
+        {
+          "clearable": false,
+          "max": 0.8,
+          "defaultValue": 0.3,
+          "description": "达到此长度才作为有效语音。",
+          "section": "语音检测",
+          "label": "最小语音时长",
+          "type": "number",
+          "restartPolicy": "appRestart",
+          "writable": true,
+          "unit": "秒",
+          "min": 0.1,
+          "step": 0.1,
+          "key": "audioConfig.minSpeechDuration",
+          "group": "voice",
+          "order": 50
+        },
+        {
+          "clearable": false,
+          "defaultValue": 512,
+          "options": [
+            {
+              "label": "256 采样点",
+              "value": 256
+            },
+            {
+              "label": "512 采样点",
+              "value": 512
+            },
+            {
+              "label": "1024 采样点",
+              "value": 1024
+            }
+          ],
+          "section": "语音检测",
+          "label": "语音检测窗口",
+          "type": "integer",
+          "restartPolicy": "appRestart",
+          "key": "audioConfig.vadWindowSize",
+          "group": "voice",
+          "order": 60,
+          "writable": true
+        },
+        {
+          "clearable": false,
+          "max": 800,
+          "defaultValue": 800,
+          "description": "保留判定开始前的音频，减少句首丢字。",
+          "section": "语音检测",
+          "label": "语音预缓存时长",
+          "type": "integer",
+          "restartPolicy": "appRestart",
+          "writable": true,
+          "unit": "毫秒",
+          "min": 200,
+          "step": 100,
+          "key": "audioConfig.vadPreCacheDurationMs",
+          "group": "voice",
+          "order": 70
+        },
+        {
+          "clearable": false,
+          "defaultValue": 16000,
+          "options": [
+            {
+              "label": "8000 Hz",
+              "value": 8000
+            },
+            {
+              "label": "11025 Hz",
+              "value": 11025
+            },
+            {
+              "label": "16000 Hz",
+              "value": 16000
+            },
+            {
+              "label": "22050 Hz",
+              "value": 22050
+            },
+            {
+              "label": "44100 Hz",
+              "value": 44100
+            },
+            {
+              "label": "48000 Hz",
+              "value": 48000
+            }
+          ],
+          "description": "按麦克风能力设置；缺省值按设备显示尺寸适配。",
+          "section": "音频",
+          "label": "麦克风采样率",
+          "type": "integer",
+          "restartPolicy": "appRestart",
+          "key": "audioConfig.micSampleRate",
+          "group": "voice",
+          "order": 80,
+          "writable": true
+        }
+      ],
+      "version": 1
+    },
+    "ready": true,
+    "protocolVersion": 1,
+    "packageName": "chat.xiaoxin.app",
+    "appVersionName": "9.9.9-test",
+    "appVersionCode": 99999,
+    "supportedFields": [
+      "customDeviceName",
+      "environments.current",
+      "environments.test.otaUrl",
+      "environments.test.wsUrl",
+      "environments.test.h5Url",
+      "environments.test.h5ReadyCheckEnabled",
+      "environments.pre.otaUrl",
+      "environments.pre.wsUrl",
+      "environments.pre.h5Url",
+      "environments.pre.h5ReadyCheckEnabled",
+      "environments.prod.otaUrl",
+      "environments.prod.wsUrl",
+      "environments.prod.h5Url",
+      "environments.prod.h5ReadyCheckEnabled",
+      "autoStartVoiceEngine",
+      "audioConfig.keywordsScore",
+      "audioConfig.keywordsThreshold",
+      "audioConfig.vadThreshold",
+      "audioConfig.minSilenceDuration",
+      "audioConfig.minSpeechDuration",
+      "audioConfig.vadWindowSize",
+      "audioConfig.vadPreCacheDurationMs",
+      "audioConfig.micSampleRate"
+    ]
+  },
+  "status": "ok"
+}

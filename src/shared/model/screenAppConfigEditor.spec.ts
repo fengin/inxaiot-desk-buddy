@@ -141,9 +141,9 @@ describe("直接输入配置修改", () => {
     expect(appConfigTextEdit("   ", summarizeAppConfigValues([null]), true)).toEqual({ mode: "keep", value: "   " });
   });
 
-  it("并列值由用户实际输入决定修改；主动输入空值可明确清空", () => {
+  it("并列值由用户实际输入决定修改，输入再清空恢复各自原值", () => {
     const baseline = summarizeAppConfigValues([null, "wss://voice.example.org"]);
-    expect(appConfigTextEdit("", baseline, true)).toEqual({ mode: "clear", value: "" });
+    expect(appConfigTextEdit("", baseline, true)).toEqual({ mode: "keep", value: "" });
     expect(appConfigTextEdit("wss://voice.example.org", baseline, true)).toEqual({ mode: "set", value: "wss://voice.example.org" });
   });
 });

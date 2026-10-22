@@ -1,6 +1,7 @@
 use super::device::{AdbDevice, AndroidTools, DeviceCommandPort};
 use crate::core::error::{AppError, AppResult};
 use crate::domain::smart_screen::app_config::{AppConfigPatch, AppConfigRead, AppHomeRead};
+use crate::domain::smart_screen::app_config_schema::{self as config_schema, ConfigSchema};
 use crate::formal::app_state::FormalAppState;
 use crate::infrastructure::local_sqlite::screen_repository::{ScreenRepository, now};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -54,7 +55,9 @@ pub async fn save_draft(
             "edits",
             "readyMode",
             "homeMode",
+            "homeActivation",
             "voiceMode",
+            "voiceEdits",
             "names",
             "targetIds",
             "includedIds",
@@ -80,6 +83,18 @@ pub async fn save_draft(
             "主屏设置草稿无效，请重新选择".into(),
         ));
     }
+    if draft.get("homeActivation").is_some_and(|value| !value.is_boolean()) {
+        return Err(AppError::InvalidConfig("切到小新主屏草稿无效，请重新选择".into()));
+    }
+    validate_voice_draft(draft.get("voiceEdits"))?;
+    // 字段定义来自设备；草稿恢复必须重新读取，避免为每台重复持久化同一schema。
+    if let Some(rows) = draft["rows"].as_array_mut() {
+        for row in rows {
+            if let Some(cap) = row.get_mut("capabilities").and_then(Value::as_object_mut) {
+                cap.remove("configSchema");
+            }
+        }
+    }
     if draft
         .get("voiceMode")
         .is_some_and(|mode| !matches!(mode.as_str(), Some("keep" | "on" | "off")))
@@ -99,6 +114,27 @@ pub async fn save_draft(
     let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
     sqlx::query("INSERT INTO local_screen_task_data(local_task_id,local_project_id,plan_json,plan_sha256,result_json,updated_at) VALUES(?,?,?,?,'{}',?) ON CONFLICT(local_task_id) DO UPDATE SET plan_json=excluded.plan_json,plan_sha256=excluded.plan_sha256,updated_at=excluded.updated_at WHERE local_screen_task_data.local_project_id=excluded.local_project_id")
         .bind(id).bind(project).bind(text).bind(hash).bind(now()).execute(state.local_store.pool()).await.map_err(|e|AppError::database("保存本机小新配置草稿",&e))?;
+    Ok(())
+}
+
+fn validate_voice_draft(value: Option<&Value>) -> AppResult<()> {
+    let Some(value) = value else { return Ok(()); };
+    let invalid = || AppError::InvalidConfig("语音配置草稿无效，请重新读取配置".into());
+    let edits = value.as_object().ok_or_else(invalid)?;
+    if edits.len() > 64 { return Err(invalid()); }
+    for (key, value) in edits {
+        if key != "autoStartVoiceEngine" && !config_schema::audio_field(key) { return Err(invalid()); }
+        let edit = value.as_object().ok_or_else(invalid)?;
+        if edit.keys().any(|key| !["mode", "value"].contains(&key.as_str())) { return Err(invalid()); }
+        let candidate = edit.get("value");
+        let scalar = |value: &Value| value.is_boolean() || value.as_f64().is_some_and(f64::is_finite)
+            || value.as_str().is_some_and(|s| s.chars().count() <= 4096 && !s.chars().any(char::is_control));
+        match edit.get("mode").and_then(Value::as_str) {
+            Some("keep") if candidate.is_none_or(|v| v.is_null() || scalar(v)) => {},
+            Some("set") if candidate.is_some_and(scalar) => {},
+            _ => return Err(invalid()),
+        }
+    }
     Ok(())
 }
 
@@ -225,8 +261,13 @@ pub async fn read_device<P: DeviceCommandPort>(
     ip: &str,
     patch: Option<&AppConfigPatch>,
 ) -> AppResult<(Value, Value)> {
+    if let Some(patch) = patch { patch.validate()?; }
     device.connect(ip, CancellationToken::new()).await?;
-    let cap = accepted(call(device, ip, "getCapabilities", None).await?)?;
+    let received_cap = accepted(call(device, ip, "getCapabilities", None).await?)?;
+    let mut cap = json!({});
+    for key in ["packageName", "appVersionName", "appVersionCode", "protocolVersion", "ready", "supportedFields", "configSchema"] {
+        if let Some(value) = received_cap.get(key) { cap[key] = value.clone(); }
+    }
     if cap["protocolVersion"] != 1 || cap["packageName"] != "chat.xiaoxin.app" {
         return Err(AppError::Conflict(
             "当前小新不支持此配置，请先升级应用".into(),
@@ -236,6 +277,20 @@ pub async fn read_device<P: DeviceCommandPort>(
         return Err(AppError::Conflict(
             "小新尚未就绪，请启动应用后重新读取".into(),
         ));
+    }
+    let schema = match ConfigSchema::from_capabilities(&cap) {
+        Ok(schema) => schema,
+        Err(message) => {
+            cap.as_object_mut().unwrap().remove("configSchema");
+            cap["configSchemaError"] = json!(message);
+            cap["supportedFields"] = json!(cap["supportedFields"].as_array().into_iter().flatten()
+                .filter_map(|field| field.as_str().filter(|key| config_schema::legacy_field(key))).collect::<BTreeSet<_>>());
+            None
+        }
+    };
+    if patch.is_some_and(|patch| patch.fields().iter().any(|key| config_schema::audio_field(key))) && schema.is_none() {
+        return Err(AppError::Conflict(cap["configSchemaError"].as_str()
+            .unwrap_or("当前小新尚未开放语音参数，请升级小新应用后重新读取").into()));
     }
     if let Some(patch) = patch {
         let supported = cap["supportedFields"]
@@ -296,6 +351,17 @@ pub async fn read_device<P: DeviceCommandPort>(
         }
         safe["environments"][env] = Value::Object(fields);
     }
+    if let Some(schema) = &schema {
+        cap["configSchema"] = serde_json::to_value(schema).map_err(|_| AppError::Conflict("小新字段定义无法读取".into()))?;
+        let mut audio = serde_json::Map::new();
+        for field in schema.fields.iter().filter(|field| config_schema::audio_field(&field.key)) {
+            if let Some(value) = crate::domain::smart_screen::app_config::field_value(&config, &field.key).filter(|value| field.readable_value(value)) {
+                audio.insert(field.key.trim_start_matches("audioConfig.").into(), value.clone());
+            }
+        }
+        safe["audioConfig"] = Value::Object(audio);
+        if let Some(patch) = patch { schema.validate_patch(patch, &safe)?; }
+    }
     Ok((cap, safe))
 }
 pub async fn read(
@@ -308,10 +374,15 @@ pub async fn read(
         return Err(AppError::InvalidConfig("请选择不同的智能屏".into()));
     }
     let repo = ScreenRepository::new(state.local_store.pool().clone());
+    let snapshot = repo.snapshot(project).await?;
+    // 先解析完整批次；不能连过前几台后才发现后面混入另一尺寸或已移除目标。
+    let selected = ids.iter().map(|id| snapshot.screens.iter().find(|screen| &screen.id == id)
+        .ok_or_else(|| AppError::NotFound("该屏不在当前项目中".into())))
+        .collect::<AppResult<Vec<_>>>()?;
+    crate::domain::smart_screen::app_config::validate_batch_sizes(selected.iter().map(|screen| screen.fields.size.as_str()))?;
     let device = AdbDevice::new(AndroidTools::discover()?);
     let mut rows = Vec::new();
-    for id in ids {
-        let screen = repo.asset(project, id).await?;
+    for screen in selected {
         let result = read_device(&device, &screen.fields.ip, None).await;
         let (config, capabilities, message) = match result {
             Ok((cap, data)) => (Some(data), Some(cap), "已从当前屏读取".into()),
@@ -324,7 +395,7 @@ pub async fn read(
             None
         };
         rows.push(AppConfigRead {
-            screen_id: id.clone(),
+            screen_id: screen.id.clone(),
             read_at: now(),
             config,
             capabilities,
@@ -629,7 +700,7 @@ pub async fn execute(
             "屏身份与检查时不一致，未修改配置".into(),
         ));
     }
-    let (_, before) = read_device(&device, &screen.fields.ip, Some(patch)).await?;
+    let (capabilities, before) = read_device(&device, &screen.fields.ip, Some(patch)).await?;
     let home_before = if patch.home_enabled.is_some() {
         Some(super::home::query(&device, &screen.fields.ip).await?)
     } else {
@@ -643,6 +714,9 @@ pub async fn execute(
     };
     result.observation = Some(observed.clone());
     result.evidence = json!({"phase":"config_checked","config":{"before":before,"fields":patch.fields(),"save":"pending","restart":"not_required","readback":"pending"}});
+    if let Ok(Some(schema)) = ConfigSchema::from_capabilities(&capabilities) {
+        result.evidence["config"]["fieldDefinitions"] = json!(schema.selected_definitions(&patch.fields()));
+    }
     if let Some(enabled) = patch.home_enabled {
         result.evidence["home"] = json!({"component":super::home::COMPONENT,"targetEnabled":enabled,"before":home_before,"save":"pending","readback":"pending","activation":if enabled { "pending" } else { "not_required" },"runtimeReadback":if enabled { "pending" } else { "not_required" },"runtimeBefore":runtime_before});
     }
@@ -713,7 +787,7 @@ pub async fn execute(
         .into();
         return checkpoint(state, id, plan, result).await;
     }
-    let restart = patch.restart_required(&before);
+    let restart = patch.restart_required_with_capabilities(&before, &capabilities);
     let capability = if restart {
         Some(device_maintenance::capability(&device, screen, &observed, "restart").await?)
     } else {
@@ -783,7 +857,7 @@ pub async fn execute(
             // 实际屏在读取后切换了环境，重新检查重启条件。
             result.device = ResultState::Failed;
             result.evidence["config"]["restart"] = json!("not_started");
-            result.message = "配置已保存，实际运行环境已变化；请单独重启小新使配置生效".into();
+            result.message = "配置已保存，小新返回的重启要求与检查时不同；请单独重启小新使配置生效".into();
             return checkpoint(state, id, plan, result).await;
         };
         progress
@@ -992,6 +1066,54 @@ fn record_configuration_readback(
     true
 }
 
+async fn verify_configuration_readback<P: DeviceCommandPort>(
+    device: &AdbDevice<P>,
+    ip: &str,
+    patch: &AppConfigPatch,
+    after: &Value,
+    result: &mut ScreenTargetResult,
+    limit: Duration,
+    interval: Duration,
+) -> AppResult<()> {
+    if !record_configuration_readback(patch, after, result) {
+        return Ok(());
+    }
+    let needs_restart = result.evidence["config"]["restartRequired"] == true;
+    if needs_restart {
+        let before = result.evidence["config"]["beforePid"].as_str().unwrap_or("");
+        // 冷 Provider 可以独立回读，不能把它的新 PID 当作主应用已启动。
+        // 在本次核实内有限等待，避免返回 Failed 后结束外层读取重试。
+        let started = if restart_was_requested(&result.evidence) {
+            match device_maintenance::application_started_with_limit(
+                device, ip, before, limit, interval,
+            ).await {
+                Ok(started) => started,
+                Err(error) => {
+                    result.device = ResultState::Unknown;
+                    result.evidence["config"]["restart"] = json!("unknown");
+                    result.message = format!("配置已保存并回读一致，应用启动状态仍待核实：{error}");
+                    return Err(AppError::Conflict(result.message.clone()));
+                }
+            }
+        } else { false };
+        if !started {
+            result.device = ResultState::Failed;
+            result.evidence["config"]["restart"] = json!("not_confirmed");
+            result.message = "配置已保存并回读一致，但未确认小新新进程和主界面；请检查屏端状态，必要时单独重启小新，无需重新保存".into();
+            return Ok(());
+        }
+        result.evidence["config"]["restart"] = json!("succeeded");
+    }
+    result.device = ResultState::Succeeded;
+    result.evidence["phase"] = json!("config_verified");
+    result.message = if needs_restart {
+        "配置已保存并回读一致，已确认小新新进程和主界面"
+    } else {
+        "配置已保存并回读一致，本次无需重启"
+    }.into();
+    Ok(())
+}
+
 /// 结果核实只读取；任何不确定的保存、主屏策略或重启都不自动重放。
 pub async fn verify(
     state: &FormalAppState,
@@ -1092,40 +1214,13 @@ pub async fn verify(
     result.evidence["config"]["after"] = after.clone();
     result.evidence["config"]["readAt"] = json!(now());
     result.observation = Some(observed);
-    if !record_configuration_readback(patch, &after, result) {
-        return finish_verification(state, id, plan, result, home_error).await;
+    if let Err(error) = verify_configuration_readback(
+        &device, &screen.fields.ip, patch, &after, result,
+        Duration::from_secs(15), Duration::from_millis(250),
+    ).await {
+        checkpoint(state, id, plan, result).await?;
+        return Err(error);
     }
-    let needs_restart = result.evidence["config"]["restartRequired"] == true;
-    if needs_restart {
-        let pid = device
-            .shell(
-                &screen.fields.ip,
-                &["pidof", super::device::XIAOXIN_PACKAGE],
-                CancellationToken::new(),
-            )
-            .await?;
-        let before = result.evidence["config"]["beforePid"]
-            .as_str()
-            .unwrap_or("");
-        let sent = restart_was_requested(&result.evidence);
-        if !sent || pid.is_empty() || pid == before {
-            result.device = ResultState::Failed;
-            result.evidence["config"]["restart"] = json!("not_confirmed");
-            result.message =
-                "配置已保存并回读一致，但未确认小新完成重启；只需单独重启小新，无需重新保存"
-                    .into();
-            return finish_verification(state, id, plan, result, home_error).await;
-        }
-        result.evidence["config"]["restart"] = json!("succeeded");
-    }
-    result.device = ResultState::Succeeded;
-    result.evidence["phase"] = json!("config_verified");
-    result.message = if needs_restart {
-        "配置已保存，小新已重启，回读一致"
-    } else {
-        "配置已保存并回读一致，本次无需重启"
-    }
-    .into();
     finish_verification(state, id, plan, result, home_error).await
 }
 
@@ -1170,8 +1265,9 @@ mod tests {
                     "saveConfig" => {
                         let encoded = args.iter().find_map(|value| value.strip_prefix("payload:s:")).unwrap();
                         let request: Value = serde_json::from_slice(&STANDARD.decode(encoded).unwrap()).unwrap();
+                        let fields = request["set"].as_object().unwrap().keys().cloned().chain(request["clear"].as_array().unwrap().iter().map(|v|v.as_str().unwrap().into())).collect::<Vec<_>>();
                         self.requests.lock().unwrap().push(request);
-                        json!({"status":"saved","savedFields":["autoStartVoiceEngine"],"failedFields":[],"restartRequired":true})
+                        json!({"status":"saved","savedFields":fields,"failedFields":[],"restartRequired":true})
                     }
                     _ => panic!("unexpected method: {method}"),
                 };
@@ -1188,6 +1284,166 @@ mod tests {
             capabilities: json!({"protocolVersion":1,"packageName":"chat.xiaoxin.app","ready":true,"supportedFields":supported}),
             config, requests: Arc::new(Mutex::new(Vec::new()))
         })
+    }
+
+    fn numeric_schema_fixture() -> (Value,Value) {
+        let mut config = configuration_fixture();
+        config["autoStartVoiceEngine"] = json!(false);
+        config["audioConfig"] = json!({"keywordsScore":2.0,"keywordsThreshold":0.2,"vadThreshold":0.8,"minSilenceDuration":0.6,
+            "minSpeechDuration":0.3,"vadWindowSize":512,"vadPreCacheDurationMs":800,"micSampleRate":11025,"privateValue":"must-not-project"});
+        let mut fields = vec![
+            json!({"key":"customDeviceName","type":"string","label":"设备名","group":"general","order":0,"writable":true,"clearable":true,"defaultValue":null,"maxLength":128,"restartPolicy":"none"}),
+            json!({"key":"autoStartVoiceEngine","type":"boolean","label":"语音引擎随应用启动","group":"voice","order":0,"writable":true,"clearable":false,"defaultValue":false,"restartPolicy":"appRestart"}),
+        ];
+        for (index,(key,kind,default,min,max)) in [
+            ("keywordsScore","number",json!(2.0),1.0,2.0),("keywordsThreshold","number",json!(0.2),0.2,0.8),
+            ("vadThreshold","number",json!(0.8),0.3,0.9),("minSilenceDuration","number",json!(0.6),0.3,2.0),
+            ("minSpeechDuration","number",json!(0.3),0.1,0.8),("vadWindowSize","integer",json!(512),256.0,1024.0),
+            ("vadPreCacheDurationMs","integer",json!(800),200.0,800.0),("micSampleRate","integer",json!(11025),8000.0,48000.0),
+        ].into_iter().enumerate() {
+            fields.push(json!({"key":format!("audioConfig.{key}"),"type":kind,"label":key,"group":"voice","order":index+1,"writable":true,"clearable":false,"defaultValue":default,"min":min,"max":max,"step":0.1,"restartPolicy":"appRestart"}));
+        }
+        let cap = json!({"packageName":"chat.xiaoxin.app","protocolVersion":1,"ready":true,"privateCapability":"must-not-project",
+            "supportedFields":fields.iter().map(|field|field["key"].clone()).collect::<Vec<_>>(),"configSchema":{"version":1,"fields":fields}});
+        (cap,config)
+    }
+
+    fn schema_device(cap:Value,config:Value) -> AdbDevice<ConfigurationApplication> {
+        AdbDevice::with_commands(AndroidTools { adb:"mock-adb-never-executed".into() },ConfigurationApplication { capabilities:cap,config,requests:Arc::new(Mutex::new(Vec::new())) })
+    }
+
+    #[tokio::test]
+    async fn actual_kotlin_store_envelopes_are_compatible_for_default_and_adaptive_small_screens() {
+        for (cap_text,read_text,rate) in [
+            (include_str!(concat!(env!("CARGO_MANIFEST_DIR"),"/../test/fixtures/app-config-schema-v1/schema-capabilities-default.json")),include_str!(concat!(env!("CARGO_MANIFEST_DIR"),"/../test/fixtures/app-config-schema-v1/schema-read-default.json")),16000),
+            (include_str!(concat!(env!("CARGO_MANIFEST_DIR"),"/../test/fixtures/app-config-schema-v1/schema-capabilities-small.json")),include_str!(concat!(env!("CARGO_MANIFEST_DIR"),"/../test/fixtures/app-config-schema-v1/schema-read-small.json")),11025),
+        ] {
+            let cap=accepted(serde_json::from_str(cap_text).unwrap()).unwrap();
+            let read=accepted(serde_json::from_str(read_text).unwrap()).unwrap();
+            let device=schema_device(cap,read);
+            let patch:AppConfigPatch=serde_json::from_value(json!({"set":{"audioConfig.minSilenceDuration":0.62}})).unwrap();
+            let (cap,read)=read_device(&device,"192.0.2.1",Some(&patch)).await.unwrap();
+            assert_eq!(cap["configSchema"]["fields"].as_array().unwrap().len(),23);
+            assert_eq!(read["audioConfig"].as_object().unwrap().len(),8);
+            assert_eq!(read["audioConfig"]["micSampleRate"],rate);
+            assert!(patch.restart_required_with_capabilities(&read,&cap));
+            for field in ["authCode","deviceId","clientId","extendParams","storage","defaults"] { assert!(read.get(field).is_none()); }
+            // 数学同值不触发保存/重启，即使Kotlin默认分数被编码为2.0而客户端发2。
+            let same:AppConfigPatch=serde_json::from_value(json!({"set":{"audioConfig.keywordsScore":2}})).unwrap();
+            assert!(same.matches(&read));
+            assert!(!same.restart_required_with_capabilities(&read,&cap));
+        }
+    }
+
+    #[tokio::test]
+    async fn schema_read_projects_eight_audio_leaves_without_private_values_or_invented_defaults() {
+        let (cap,config)=numeric_schema_fixture();
+        let device=schema_device(cap,config);
+        let (cap,safe)=read_device(&device,"192.0.2.1",None).await.unwrap();
+        assert!(cap.get("privateCapability").is_none());
+        assert_eq!(safe["audioConfig"].as_object().unwrap().len(),8);
+        assert!(safe["audioConfig"].get("privateValue").is_none());
+        assert_eq!(safe["audioConfig"]["micSampleRate"],11025);
+        let patch:AppConfigPatch=serde_json::from_value(json!({"set":{"audioConfig.minSilenceDuration":0.62}})).unwrap();
+        assert!(read_device(&device,"192.0.2.1",Some(&patch)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn missing_or_malformed_audio_value_is_unknown_instead_of_default_and_blocks_that_patch() {
+        let patch:AppConfigPatch=serde_json::from_value(json!({"set":{"audioConfig.vadThreshold":0.7}})).unwrap();
+        let legacy:AppConfigPatch=serde_json::from_value(json!({"set":{"customDeviceName":"仍可改名"}})).unwrap();
+        for value in [None,Some(Value::Null),Some(json!("0.8")),Some(json!(true))] {
+            let (cap,mut config)=numeric_schema_fixture();
+            if let Some(value)=value {config["audioConfig"]["vadThreshold"]=value;} else {config["audioConfig"].as_object_mut().unwrap().remove("vadThreshold");}
+            let device=schema_device(cap,config);
+            let (_,safe)=read_device(&device,"192.0.2.1",None).await.unwrap();
+            assert!(safe["audioConfig"].get("vadThreshold").is_none());
+            assert!(read_device(&device,"192.0.2.1",Some(&patch)).await.is_err());
+            assert!(read_device(&device,"192.0.2.1",Some(&legacy)).await.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn historical_audio_value_outside_new_range_is_preserved_and_can_be_corrected() {
+        let (cap,mut config)=numeric_schema_fixture();
+        config["audioConfig"]["vadThreshold"]=json!(1.8);
+        let device=schema_device(cap,config);
+        let (_,safe)=read_device(&device,"192.0.2.1",None).await.unwrap();
+        assert_eq!(safe["audioConfig"]["vadThreshold"],1.8);
+        let valid:AppConfigPatch=serde_json::from_value(json!({"set":{"audioConfig.vadThreshold":0.7}})).unwrap();
+        let invalid:AppConfigPatch=serde_json::from_value(json!({"set":{"audioConfig.vadThreshold":1.2}})).unwrap();
+        assert!(read_device(&device,"192.0.2.1",Some(&valid)).await.is_ok());
+        assert!(read_device(&device,"192.0.2.1",Some(&invalid)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn old_apps_and_bad_new_schemas_keep_legacy_edits_but_cannot_authorize_audio() {
+        let audio:AppConfigPatch=serde_json::from_value(json!({"set":{"audioConfig.keywordsScore":1.5}})).unwrap();
+        let name:AppConfigPatch=serde_json::from_value(json!({"set":{"customDeviceName":"兼容名称"}})).unwrap();
+        let (cap,config)=numeric_schema_fixture();
+        for variant in 0..4 {
+            let mut candidate=cap.clone();
+            match variant {
+                0=>{candidate.as_object_mut().unwrap().remove("configSchema");},
+                1=>{candidate["configSchema"]["version"]=json!(2);},
+                2=>{candidate["configSchema"]["fields"][2]["min"]=json!(10);},
+                _=>{candidate["configSchema"]["fields"][2]["key"]=json!("authCode");},
+            }
+            let device=schema_device(candidate,config.clone());
+            let (read_cap,safe)=read_device(&device,"192.0.2.1",None).await.unwrap();
+            assert!(safe.get("audioConfig").is_none());
+            assert_eq!(read_cap.get("configSchemaError").is_some(),variant!=0);
+            assert!(read_device(&device,"192.0.2.1",Some(&name)).await.is_ok());
+            assert!(read_device(&device,"192.0.2.1",Some(&audio)).await.is_err());
+        }
+    }
+
+    struct MutableSchemaApplication {
+        cap:Arc<Mutex<Value>>,config:Value,requests:Arc<Mutex<Vec<Value>>>,
+    }
+    impl DeviceCommandPort for MutableSchemaApplication {
+        async fn execute(&self,path:&std::path::Path,args:Vec<String>,timeout:Duration,cancel:CancellationToken)->AppResult<super::super::device::ProcessOutput>{
+            let capabilities=self.cap.lock().unwrap().clone();
+            ConfigurationApplication{capabilities,config:self.config.clone(),requests:self.requests.clone()}.execute(path,args,timeout,cancel).await
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_device_definition_is_rechecked_before_write_not_trusted_from_frontend_snapshot() {
+        let (cap,config)=numeric_schema_fixture();
+        let cap=Arc::new(Mutex::new(cap));let requests=Arc::new(Mutex::new(Vec::new()));
+        let device=AdbDevice::with_commands(AndroidTools{adb:"mock-adb-never-executed".into()},MutableSchemaApplication{cap:cap.clone(),config,requests:requests.clone()});
+        let patch:AppConfigPatch=serde_json::from_value(json!({"set":{"audioConfig.minSilenceDuration":0.8}})).unwrap();
+        assert!(read_device(&device,"192.0.2.1",Some(&patch)).await.is_ok());
+        // 打开表单后设备能力改变；再次预检/执行必须重新拿真实定义。
+        cap.lock().unwrap()["configSchema"]["fields"][5]["max"]=json!(0.7);
+        assert!(read_device(&device,"192.0.2.1",Some(&patch)).await.is_err());
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn audio_leaf_keeps_existing_set_clear_protocol_without_sending_root_object_or_schema() {
+        let (cap,config)=numeric_schema_fixture();let requests=Arc::new(Mutex::new(Vec::new()));
+        let device=AdbDevice::with_commands(AndroidTools{adb:"mock-adb-never-executed".into()},ConfigurationApplication{capabilities:cap,config,requests:requests.clone()});
+        let patch:AppConfigPatch=serde_json::from_value(json!({"set":{"audioConfig.minSilenceDuration":0.62}})).unwrap();
+        read_device(&device,"192.0.2.1",Some(&patch)).await.unwrap();
+        let request=json!({"protocolVersion":1,"requestId":"voice-leaf-fixture","set":patch.set,"clear":patch.clear});
+        let response=call(&device,"192.0.2.1","saveConfig",Some(&request)).await.unwrap();
+        assert_eq!(validated_save_status(&response,&patch).unwrap(),"saved");
+        let recorded=requests.lock().unwrap();
+        assert_eq!(recorded.as_slice(),&[request]);
+        assert_eq!(recorded[0]["set"].as_object().unwrap().len(),1);
+        assert!(recorded[0].get("configSchema").is_none());
+        assert!(recorded[0]["set"].get("audioConfig").is_none());
+    }
+
+    #[test]
+    fn voice_drafts_accept_old_absence_and_safe_partial_values_but_never_authorize_arbitrary_json() {
+        assert!(validate_voice_draft(None).is_ok());
+        assert!(validate_voice_draft(Some(&json!({"autoStartVoiceEngine":{"mode":"set","value":false},"audioConfig.vadThreshold":{"mode":"set","value":0.62},"audioConfig.keywordsScore":{"mode":"keep"}}))).is_ok());
+        for value in [json!([]),json!({"authCode":{"mode":"set","value":"private"}}),json!({"audioConfig":{"mode":"set","value":{}}}),json!({"audioConfig.__proto__":{"mode":"set","value":1}}),json!({"audioConfig.vadThreshold":{"mode":"set","value":null}}),json!({"audioConfig.vadThreshold":{"mode":"set","value":{"x":1}}})] {
+            assert!(validate_voice_draft(Some(&value)).is_err());
+        }
     }
 
     #[tokio::test]
@@ -1271,6 +1527,156 @@ mod tests {
             assert_eq!(result.evidence["config"]["save"], saved);
             assert_eq!(result.evidence["config"]["restart"], "not_started");
         }
+    }
+
+    #[derive(Clone)]
+    struct ConfigurationRuntime {
+        pid: &'static str,
+        activities: Arc<Mutex<std::collections::VecDeque<&'static str>>>,
+        fallback: &'static str,
+        disconnected: bool,
+        query_hangs: bool,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+    }
+    const PROVIDER_ONLY: &str = "ProviderRecord{abcd chat.xiaoxin.app/.WorkbenchConfigProvider}";
+    const MAIN_RESUMED: &str = "mResumedActivity: ActivityRecord{abcd u0 chat.xiaoxin.app/.MainActivity t8}";
+    impl ConfigurationRuntime {
+        fn new(pid: &'static str, activities: Vec<&'static str>, fallback: &'static str) -> Self {
+            Self { pid, activities: Arc::new(Mutex::new(activities.into())), fallback,
+                disconnected: false, query_hangs: false, calls: Arc::default() }
+        }
+        fn device(&self) -> AdbDevice<Self> {
+            AdbDevice::with_commands(AndroidTools { adb: "mock-adb-never-executed".into() }, self.clone())
+        }
+    }
+    impl DeviceCommandPort for ConfigurationRuntime {
+        async fn execute(
+            &self, _: &std::path::Path, args: Vec<String>, _: Duration, _: CancellationToken,
+        ) -> AppResult<super::super::device::ProcessOutput> {
+            let stdout = if args.iter().any(|arg| arg.contains("__INX_XIAOXIN_PIDOF_EXIT__=")) {
+                self.calls.lock().unwrap().push("pid");
+                if self.disconnected { return Err(AppError::Conflict("模拟 ADB 连接断开".into())); }
+                if self.query_hangs { std::future::pending::<()>().await; }
+                format!("{}\n__INX_XIAOXIN_PIDOF_EXIT__=0\n", self.pid)
+            } else if args.ends_with(&["dumpsys".into(), "activity".into(), "activities".into()]) {
+                self.calls.lock().unwrap().push("activity");
+                self.activities.lock().unwrap().pop_front().unwrap_or(self.fallback).into()
+            } else {
+                panic!("配置结果核实不得保存、停止或启动应用：{args:?}");
+            };
+            Ok(super::super::device::ProcessOutput { success: true, stdout, stderr: String::new() })
+        }
+    }
+    fn pending_configuration_restart(sent: bool) -> ScreenTargetResult {
+        ScreenTargetResult { device: ResultState::Unknown,
+            evidence: json!({"phase":"config_saved","config":{"save":"saved","restartRequired":true,
+                "restartRequested":sent,"beforePid":"2125","restart":"unknown","readback":"pending"}}),
+            ..Default::default() }
+    }
+    async fn verify_runtime(runtime: &ConfigurationRuntime, result: &mut ScreenTargetResult) -> AppResult<()> {
+        let patch = serde_json::from_value(json!({"set":{"autoStartVoiceEngine":false}})).unwrap();
+        verify_configuration_readback(&runtime.device(), "192.0.2.1", &patch,
+            &json!({"autoStartVoiceEngine":false}), result, Duration::from_millis(30), Duration::from_millis(1)).await
+    }
+
+    #[tokio::test]
+    async fn configuration_restart_rejects_cold_provider_pid_and_preserves_saved_readback() {
+        let runtime = ConfigurationRuntime::new("5447", vec![], PROVIDER_ONLY);
+        let mut result = pending_configuration_restart(true);
+        verify_runtime(&runtime, &mut result).await.unwrap();
+        assert_eq!(result.device, ResultState::Failed);
+        assert_eq!(result.evidence["config"]["save"], "saved");
+        assert_eq!(result.evidence["config"]["readback"], "succeeded");
+        assert_eq!(result.evidence["config"]["restart"], "not_confirmed");
+        assert!(result.message.contains("主界面"));
+        assert!(runtime.calls.lock().unwrap().iter().filter(|call| **call == "activity").count() > 1);
+    }
+
+    #[tokio::test]
+    async fn configuration_restart_waits_for_main_activity_after_provider_becomes_ready() {
+        let runtime = ConfigurationRuntime::new("5447", vec![PROVIDER_ONLY], MAIN_RESUMED);
+        let mut result = pending_configuration_restart(true);
+        verify_runtime(&runtime, &mut result).await.unwrap();
+        assert_eq!(result.device, ResultState::Succeeded);
+        assert_eq!(result.evidence["config"]["restart"], "succeeded");
+        assert_eq!(*runtime.calls.lock().unwrap(), vec!["pid", "activity", "pid", "activity"]);
+    }
+
+    #[tokio::test]
+    async fn configuration_restart_rejects_old_pid_even_with_main_activity() {
+        let runtime = ConfigurationRuntime::new("2125", vec![], MAIN_RESUMED);
+        let mut result = pending_configuration_restart(true);
+        verify_runtime(&runtime, &mut result).await.unwrap();
+        assert_eq!(result.device, ResultState::Failed);
+        assert_eq!(result.evidence["config"]["restart"], "not_confirmed");
+        assert!(runtime.calls.lock().unwrap().iter().all(|call| *call == "pid"));
+    }
+
+    #[tokio::test]
+    async fn configuration_restart_never_infers_an_unsent_restart_from_current_runtime() {
+        let runtime = ConfigurationRuntime::new("5447", vec![], MAIN_RESUMED);
+        let mut result = pending_configuration_restart(false);
+        result.evidence["config"]["save"] = json!("unknown");
+        verify_runtime(&runtime, &mut result).await.unwrap();
+        assert_eq!(result.device, ResultState::Failed);
+        assert_eq!(result.evidence["config"]["save"], "verified");
+        assert_eq!(result.evidence["config"]["readback"], "succeeded");
+        assert_eq!(result.evidence["config"]["restart"], "not_confirmed");
+        assert!(runtime.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn configuration_restart_connection_failure_remains_unknown_after_matching_readback() {
+        let mut runtime = ConfigurationRuntime::new("5447", vec![], MAIN_RESUMED);
+        runtime.disconnected = true;
+        let mut result = pending_configuration_restart(true);
+        assert!(verify_runtime(&runtime, &mut result).await.unwrap_err().to_string().contains("连接断开"));
+        assert_eq!(result.device, ResultState::Unknown);
+        assert_eq!(result.evidence["config"]["save"], "saved");
+        assert_eq!(result.evidence["config"]["readback"], "succeeded");
+        assert_eq!(result.evidence["config"]["restart"], "unknown");
+        assert_eq!(*runtime.calls.lock().unwrap(), vec!["pid"]);
+    }
+
+    #[tokio::test]
+    async fn configuration_restart_query_timeout_preserves_unknown_instead_of_reporting_stopped() {
+        let mut runtime = ConfigurationRuntime::new("5447", vec![], MAIN_RESUMED);
+        runtime.query_hangs = true;
+        let mut result = pending_configuration_restart(true);
+        assert!(verify_runtime(&runtime, &mut result).await.unwrap_err().to_string().contains("超时"));
+        assert_eq!(result.device, ResultState::Unknown);
+        assert_eq!(result.evidence["config"]["readback"], "succeeded");
+        assert_eq!(result.evidence["config"]["restart"], "unknown");
+        assert_eq!(*runtime.calls.lock().unwrap(), vec!["pid"]);
+    }
+
+    #[tokio::test]
+    async fn configuration_unknown_restart_recovers_with_readonly_runtime_and_matching_values() {
+        let runtime = ConfigurationRuntime::new("5447", vec![], MAIN_RESUMED);
+        let mut result = pending_configuration_restart(true);
+        result.evidence["config"]["save"] = json!("unknown");
+        verify_runtime(&runtime, &mut result).await.unwrap();
+        assert_eq!(result.device, ResultState::Succeeded);
+        assert_eq!(result.evidence["config"]["save"], "verified");
+        assert_eq!(result.evidence["config"]["readback"], "succeeded");
+        assert_eq!(result.evidence["config"]["restart"], "succeeded");
+        assert_eq!(*runtime.calls.lock().unwrap(), vec!["pid", "activity"]);
+    }
+
+    #[tokio::test]
+    async fn configuration_without_restart_accepts_cold_provider_readback_without_activity_query() {
+        // 此模拟只实现配置 Provider；任何运行态、保存或启动调用都会失败。
+        let device = configuration_device(false, configuration_fixture());
+        let patch = serde_json::from_value(json!({"set":{"customDeviceName":"测试小新"}})).unwrap();
+        let (_, after) = read_device(&device, "192.0.2.1", Some(&patch)).await.unwrap();
+        let mut result = pending_configuration_restart(false);
+        result.evidence["config"]["restartRequired"] = json!(false);
+        result.evidence["config"]["restart"] = json!("not_required");
+        verify_configuration_readback(&device, "192.0.2.1", &patch, &after, &mut result,
+            Duration::from_millis(30), Duration::from_millis(1)).await.unwrap();
+        assert_eq!(result.device, ResultState::Succeeded);
+        assert_eq!(result.evidence["config"]["readback"], "succeeded");
+        assert_eq!(result.evidence["config"]["restart"], "not_required");
     }
 
     #[test]

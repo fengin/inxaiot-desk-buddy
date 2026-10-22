@@ -19,8 +19,11 @@ const visibleTargets=computed(()=>detail.value?.targets.slice((targetPage.value-
 const lockColumns=[{key:'resource',title:'占用范围',width:'32%'},{key:'user',title:'操作人',width:'24%'},{key:'computer',title:'来源电脑'}];
 watch(()=>detail.value?.operation.id,()=>{targetPage.value=1;});
 watch(targetPageSize,()=>{targetPage.value=1;});
-function changeSummary(target:OperationHistoryTarget){return [...(target.details?.configuration?.changes?.map(change=>`${appConfigFieldLabel(change.field)}：${appConfigDisplay(change.before,change.field==='environments.current')} → ${appConfigDisplay(change.after,change.field==='environments.current')}`)??[]),...(target.details?.home?[screenHomeSummary(target.details.home)]:[])].join('；');}
-function changeFields(target:OperationHistoryTarget){return [...(target.details?.configuration?.fields?.map(appConfigFieldLabel)??[]),...(target.details?.home?['固定小新为主屏']:[])].join('、')||'未记录';}
+function changeSummary(target:OperationHistoryTarget){return [...(target.details?.configuration?.changes?.map(change=>{
+  const display=(value:typeof change.before)=>`${appConfigDisplay(value,change.field==='environments.current')}${typeof value==='number'&&change.unit?` ${change.unit}`:''}`;
+  return `${change.label||appConfigFieldLabel(change.field)}：${display(change.before)} → ${display(change.after)}`;
+})??[]),...(target.details?.home?[screenHomeSummary(target.details.home)]:[])].join('；');}
+function changeFields(target:OperationHistoryTarget){const config=target.details?.configuration;return [...(config?.fields?.map(field=>config.fieldLabels?.[field]||config.changes?.find(change=>change.field===field)?.label||appConfigFieldLabel(field))??[]),...(target.details?.home?['固定小新为主屏']:[])].join('、')||'未记录';}
 function configSummary(target:OperationHistoryTarget){const config=target.details?.configuration;return config?`保存：${config.save==='not_required'?'无需执行':configLabels[config.save??'pending']} · 重启：${configLabels[config.restart??'pending']} · 回读：${config.readback==='not_required'?'无需执行':configLabels[config.readback??'pending']}`:'';}
 function ntpSummary(target:OperationHistoryTarget){const ntp=target.details?.ntp;return ntp?`保存：${ntpStageLabel(ntp.save)} · 生效：${ntpStageLabel(ntp.activation)} · 授时：${ntpStageLabel(ntp.sync)}`:'';}
 function ntpAddressSummary(target:OperationHistoryTarget){const ntp=target.details?.ntp;return ntp?`${ntp.beforeServer == null ? '未读取' : ntpServerDisplay(ntp.beforeServer)} → ${ntp.targetServer == null ? '未记录' : ntpServerDisplay(ntp.targetServer)}`:'未记录';}

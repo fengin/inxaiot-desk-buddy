@@ -2498,19 +2498,6 @@ a {
 }
 
 @media (max-width: 1080px) {
-  .desktop-shell:not([data-navigation-collapsed="true"]) {
-    grid-template-columns: var(--inx-navigation-collapsed) minmax(0, 1fr);
-  }
-
-  .desktop-shell:not([data-navigation-collapsed="true"]) :is(.nav-group-title, .side-link span, .side-link em, .navigation-collapse span) {
-    display: none;
-  }
-
-  .desktop-shell:not([data-navigation-collapsed="true"]) :is(.side-link, .navigation-collapse) {
-    justify-content: center;
-    padding: 0;
-  }
-
   .summary-strip {
     grid-template-columns: repeat(6, minmax(125px, 1fr));
     overflow-x: auto;
@@ -2592,6 +2579,7 @@ a {
   color: var(--inx-color-text-secondary);
   font-size: 11px;
   text-decoration: none;
+  white-space: nowrap;
 }
 
 .sub-link:hover {

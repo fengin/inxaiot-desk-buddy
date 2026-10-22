@@ -7,6 +7,14 @@ vi.mock('@/shared/api/operationHistory', () => ({listBusinessOperationHistory:vi
 afterEach(()=>vi.clearAllMocks());
 const operation={id:'op-a',domainType:'smart_screen',operationType:'reboot',operationName:'重启屏',operatorName:'原操作人',instanceId:'电脑A',state:'running',targetCount:1,successCount:0,failureCount:0,cancelledCount:0,startedAt:'2026-10-03T00:00:00Z'};
 const locks=[{resourceType:'smart_screen',resourceKey:'777:900',ownerInstanceId:'电脑A',ownerUser:'原操作人',fencingToken:4}];
+it.each(['succeeded','failed'])('语音配置%s共享结果使用字段标签，失败无变化值也不露内部路径',async state=>{
+  const item={...operation,operationType:'app_config',operationName:'修改小新配置',state};
+  const field='audioConfig.futurePause';
+  vi.mocked(api.listBusinessOperationHistory).mockResolvedValue({items:[item],total:1,page:1,pageSize:20});
+  vi.mocked(api.getBusinessOperationHistoryDetail).mockResolvedValue({operation:item,targets:[{resourceType:'smart_screen',resourceKey:'777:900',state,resultSummary:'配置处理结果',details:{targetName:'办公室屏',configuration:{fields:[field],fieldLabels:{[field]:'扩展停顿时长'},save:state==='succeeded'?'saved':'failed',readback:state==='succeeded'?'succeeded':'not_required',restart:'not_required',changes:state==='succeeded'?[{field,label:'扩展停顿时长',unit:'秒',before:0.6,after:0.8}]:[]}}}]});
+  const wrapper=mount(ScreenSharedHistory,{props:{projectId:'项目A'},global:{stubs:{teleport:true}}});
+  try{await flushPromises();await wrapper.findAll('button').find(button=>button.text().includes('修改小新配置'))!.trigger('click');await flushPromises();expect(wrapper.text()).toContain('扩展停顿时长');expect(wrapper.text()).not.toContain(field);if(state==='succeeded')expect(wrapper.text()).toContain('0.6 秒 → 0.8 秒');}finally{wrapper.unmount();}
+});
 it('配置共享历史同时展示配置与主屏策略回读，不误显示应用版本',async()=>{
   const item={...operation,operationType:'app_config',operationName:'修改小新配置',state:'succeeded'};
   const component='chat.xiaoxin.app/chat.xiaoxin.app.MainActivity';

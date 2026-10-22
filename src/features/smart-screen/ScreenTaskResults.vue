@@ -75,7 +75,11 @@ function configStageClass(target: ScreenTaskTarget, stage: typeof configStages[n
 }
 function failedFields(target: ScreenTaskTarget) {
   const fields = configResult(target)?.failedFields;
-  return Array.isArray(fields) ? fields.filter((field): field is string => typeof field === "string").map(appConfigFieldLabel).join("、") : "";
+  const definitions = configResult(target)?.fieldDefinitions;
+  return Array.isArray(fields) ? fields.filter((field): field is string => typeof field === "string").map(field => {
+    const definition = Array.isArray(definitions) ? definitions.find(value => value && value.key === field && typeof value.label === "string") : undefined;
+    return definition?.label || appConfigFieldLabel(field);
+  }).join("、") : "";
 }
 function deviceResultLabel(target:ScreenTaskTarget){
   if(target.result&&['pending','unknown'].includes(target.result.device)){

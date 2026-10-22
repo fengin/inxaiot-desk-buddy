@@ -124,6 +124,8 @@ impl ScreenSharedResults {
             // 共享记录只保存字段名和处理结果，不复制地址与配置快照。
             summary["configuration"] = serde_json::json!({"fields":config["fields"],"save":config["save"],"savedFields":config["savedFields"],"failedFields":config["failedFields"],"restart":config["restart"],"readback":config["readback"]});
             summary["configuration"]["changes"] = serde_json::json!(crate::domain::smart_screen::app_config::shared_changes(config));
+            let labels = crate::domain::smart_screen::app_config::shared_field_labels(config);
+            if !labels.is_empty() { summary["configuration"]["fieldLabels"] = serde_json::json!(labels); }
         }
         if let Some(package) = result.evidence.get("package") { summary["package"] = package.clone(); }
         if let Some(home) = result.evidence.get("home") {

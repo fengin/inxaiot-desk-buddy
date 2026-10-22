@@ -176,6 +176,14 @@ function configTask(state: ScreenTask["state"], targets: ScreenTargetState[], re
 }
 
 describe("紧凑操作结果与恢复动作", () => {
+  it("语音字段失败时使用本次定义标签，不显示内部字段路径", () => {
+    const field = "audioConfig.futurePause";
+    const wrapper = render(configTask("failed", ["failed"], [{ save: "failed", restart: "not_required", readback: "not_required", failedFields: [field], fieldDefinitions: [{ key: field, label: "扩展停顿时长" }] }]));
+    try {
+      expect(wrapper.text()).toContain("未保存字段：扩展停顿时长");
+      expect(wrapper.text()).not.toContain(field);
+    } finally { wrapper.unmount(); }
+  });
   it.each(["succeeded", "unknown", "failed"] as const)("策略已保存但运行核验 %s 时按实际结果展示", (readback) => {
     const state = readback === "succeeded" ? "succeeded" : readback === "unknown" ? "needs_review" : "failed";
     const value = task(state, [state]);

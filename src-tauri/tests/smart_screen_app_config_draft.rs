@@ -94,3 +94,49 @@ async fn configuration_draft_is_local_project_scoped_and_never_locks_asset() {
     );
     support::close(state).await;
 }
+
+#[tokio::test]
+async fn voice_leaf_draft_survives_reload_without_repeating_schema_or_creating_tasks() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = support::state_at(dir.path(), false).await;
+    let project = Stage75Adapter::new(&state).create_project(support::local_input()).await.unwrap().project.id;
+    let capabilities: serde_json::Value = serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/app-config-schema-v1/schema-capabilities-small.json"))).unwrap();
+    let read: serde_json::Value = serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/app-config-schema-v1/schema-read-small.json"))).unwrap();
+    let edits = json!({"autoStartVoiceEngine":{"mode":"set","value":false},"audioConfig.minSilenceDuration":{"mode":"set","value":0.62},"audioConfig.keywordsScore":{"mode":"keep"}});
+    let draft = json!({"targetIds":["fixture"],"includedIds":["fixture"],"voiceMode":"off","voiceEdits":edits,"rows":[{"screenId":"fixture","capabilities":capabilities["data"],"config":read["data"]}]});
+    app_config::save_draft(&state, &project, Some(draft)).await.unwrap();
+    let saved = app_config::load_draft(&state, &project).await.unwrap().unwrap();
+    assert_eq!(saved["voiceEdits"], edits);
+    assert_eq!(saved["voiceMode"], "off");
+    assert_eq!(saved["rows"][0]["config"]["audioConfig"]["micSampleRate"], 11025);
+    assert!(saved["rows"][0]["capabilities"].get("configSchema").is_none());
+    assert_eq!(saved["rows"][0]["capabilities"]["supportedFields"], capabilities["data"]["supportedFields"]);
+    let malformed = json!({"targetIds":["fixture"],"rows":[],"voiceEdits":{"authCode":{"mode":"set","value":"do-not-store"}}});
+    assert!(app_config::save_draft(&state, &project, Some(malformed)).await.is_err());
+    assert_eq!(app_config::load_draft(&state, &project).await.unwrap().unwrap(), saved);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM local_task").fetch_one(state.local_store.pool()).await.unwrap();
+    assert_eq!(count, 0);
+    support::close(state).await;
+}
+
+#[tokio::test]
+async fn home_activation_is_an_optional_boolean_draft_intent_without_device_or_task_action() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = support::state_at(dir.path(), false).await;
+    let project = Stage75Adapter::new(&state).create_project(support::local_input()).await.unwrap().project.id;
+    let legacy = json!({"targetIds":[],"rows":[],"homeMode":"keep"});
+    app_config::save_draft(&state, &project, Some(legacy)).await.unwrap();
+    assert!(app_config::load_draft(&state, &project).await.unwrap().unwrap().get("homeActivation").is_none());
+    for enabled in [true, false] {
+        app_config::save_draft(&state, &project, Some(json!({"targetIds":[],"rows":[],"homeMode":"keep","homeActivation":enabled}))).await.unwrap();
+        assert_eq!(app_config::load_draft(&state, &project).await.unwrap().unwrap()["homeActivation"], enabled);
+    }
+    let saved = app_config::load_draft(&state, &project).await.unwrap().unwrap();
+    for invalid in [json!(null), json!("true"), json!(1), json!({}), json!([])] {
+        assert!(app_config::save_draft(&state, &project, Some(json!({"targetIds":[],"rows":[],"homeActivation":invalid}))).await.is_err());
+        assert_eq!(app_config::load_draft(&state, &project).await.unwrap().unwrap(), saved);
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM local_task").fetch_one(state.local_store.pool()).await.unwrap();
+    assert_eq!(count, 0);
+    support::close(state).await;
+}

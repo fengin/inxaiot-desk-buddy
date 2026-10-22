@@ -8,7 +8,7 @@ import {
   type ScreenAppConfigRead,
 } from "@/shared/model/screenAppConfig";
 
-type AppConfigValue = string | boolean | null | undefined;
+export type AppConfigValue = string | boolean | number | null | undefined;
 
 export interface AppConfigValueSummary {
   value: AppConfigValue;
@@ -30,13 +30,13 @@ export interface AppConfigDifference {
 
 const editorFields: AppConfigEditorField[] = ["current", "otaUrl", "wsUrl", "h5Url", "h5ReadyCheckEnabled", "autoStartVoiceEngine"];
 
-function normalizeValue(value: AppConfigValue): string | boolean | null {
+function normalizeValue(value: AppConfigValue): string | boolean | number | null {
   return value === "" || value === undefined ? null : value;
 }
 
 /** 代表值只用于表单展示，不能据此为未编辑的字段生成批量修改。 */
 export function summarizeAppConfigValues(values: AppConfigValue[]): AppConfigValueSummary {
-  const counts = new Map<string | boolean | null, number>();
+  const counts = new Map<string | boolean | number | null, number>();
   for (const value of values) {
     const normalized = normalizeValue(value);
     counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
@@ -91,6 +91,7 @@ export function appConfigTextEdit(
   clearable: boolean,
 ): ScreenAppConfigDraft["edits"][string] {
   const trimmed = value.trim();
+  if (baseline.tied && trimmed === "") return { mode: "keep", value };
   if (!baseline.tied && baseline.total > 0 && normalizeValue(trimmed) === baseline.value) {
     return { mode: "keep", value };
   }

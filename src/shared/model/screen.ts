@@ -95,12 +95,17 @@ export function validateScreenApk(apk?: ScreenApkSelection): string[] {
   return errors;
 }
 
-/** 安装批次只允许同一种明确尺寸；尺寸规则不代替 APK 和设备架构兼容性检查。 */
-export function screenInstallSizeWarning(screens: readonly Pick<SmartScreen, "size">[]): string {
+/** 同一操作批次只允许同一种明确尺寸；调用方可提供对应业务的混选提示。 */
+export function screenBatchSizeWarning(screens: readonly Pick<SmartScreen, "size">[], mixedMessage = "一批只能操作同规格尺寸屏"): string {
   const knownSizes = new Set(screens.map((screen) => screen.size).filter((size) => size === "4" || size === "10"));
-  if (knownSizes.size > 1) return "一批只能操作同规格尺寸屏";
+  if (knownSizes.size > 1) return mixedMessage;
   if (screens.some((screen) => screen.size !== "4" && screen.size !== "10")) return "请先确认所选屏尺寸";
   return "";
+}
+
+/** 尺寸规则不代替 APK 和设备架构兼容性检查；保留安装流程原有接口。 */
+export function screenInstallSizeWarning(screens: readonly Pick<SmartScreen, "size">[]): string {
+  return screenBatchSizeWarning(screens);
 }
 
 export interface ScreenOperationInput {

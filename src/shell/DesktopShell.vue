@@ -49,6 +49,22 @@ const preferencesOpen = ref(false);
 const aboutOpen = ref(false);
 const aioExpanded = ref(true);
 const screenExpanded = ref(true);
+// 窄屏的自动/临时折叠不写入持久偏好，返回宽屏时恢复用户原来的选择。
+const navigationMedia = window.matchMedia("(max-width: 1080px)");
+const narrowViewport = ref(navigationMedia.matches);
+const narrowNavigationCollapsed = ref(true);
+const navigationCollapsed = computed(() => narrowViewport.value ? narrowNavigationCollapsed.value : preferences.navigationCollapsed);
+const navigationToggleLabel = computed(() => navigationCollapsed.value ? "展开导航" : "折叠导航");
+const onNavigationMediaChange = (event: MediaQueryListEvent) => {
+  if (narrowViewport.value === event.matches) return;
+  narrowViewport.value = event.matches;
+  narrowNavigationCollapsed.value = true;
+};
+navigationMedia.addEventListener("change", onNavigationMediaChange);
+const toggleNavigation = () => {
+  if (narrowViewport.value) narrowNavigationCollapsed.value = !navigationCollapsed.value;
+  else preferences.toggleNavigation();
+};
 const route = useRoute();
 const exitImpact = ref<ApplicationExitImpact>();
 const exitConfirming = ref(false);
@@ -85,6 +101,7 @@ watch(
   }
 );
 onBeforeUnmount(() => {
+  navigationMedia.removeEventListener("change", onNavigationMediaChange);
   unlistenExitImpact?.();
   if (sessionCheckTimer !== undefined) window.clearInterval(sessionCheckTimer);
 });
@@ -112,12 +129,20 @@ const handleTitlebarMouseDown = (event: MouseEvent) => {
   void getCurrentWindow().startDragging();
 };
 const toggleAioNavigation = () => {
-  if (preferences.navigationCollapsed) {
-    preferences.toggleNavigation();
+  if (navigationCollapsed.value) {
+    toggleNavigation();
     aioExpanded.value = true;
     return;
   }
   aioExpanded.value = !aioExpanded.value;
+};
+const toggleScreenNavigation = () => {
+  if (navigationCollapsed.value) {
+    toggleNavigation();
+    screenExpanded.value = true;
+    return;
+  }
+  screenExpanded.value = !screenExpanded.value;
 };
 const businessRouteBlocked = computed(
   () => Boolean(route.meta.projectAccess) && !projects.allowsAccess(route.meta.projectAccess as ProjectAccess)
@@ -134,7 +159,7 @@ const businessRouteMessage = computed(() => {
 <template>
   <div
     class="desktop-shell"
-    :data-navigation-collapsed="preferences.navigationCollapsed"
+    :data-navigation-collapsed="navigationCollapsed"
     :data-activity-open="activity.panelOpen"
   >
     <header class="application-bar" data-tauri-drag-region @mousedown="handleTitlebarMouseDown" @dblclick="toggleOnDoubleClick">
@@ -158,25 +183,25 @@ const businessRouteMessage = computed(() => {
     </header>
 
     <aside class="business-navigation">
-      <nav class="side-nav" aria-label="产品功能导航">
-        <button class="side-link nav-parent" :class="{ active: route.path.startsWith('/aio') }" type="button" @click="toggleAioNavigation">
+      <nav id="business-navigation-links" class="side-nav" aria-label="产品功能导航">
+        <button class="side-link nav-parent" :class="{ active: route.path.startsWith('/aio') }" type="button" aria-label="一体机管理" :title="navigationCollapsed ? '一体机管理' : undefined" :aria-expanded="aioExpanded && !navigationCollapsed" aria-controls="aio-navigation-links" @click="toggleAioNavigation">
           <Boxes :size="18" /><span>一体机管理</span><ChevronRight class="nav-parent__arrow" :class="{ expanded: aioExpanded }" :size="15" />
         </button>
-        <div v-show="aioExpanded && !preferences.navigationCollapsed" class="sub-nav" :data-disabled="!projects.allowsAccess('platform') && !projects.businessMenuEnabled">
+        <div v-show="aioExpanded && !navigationCollapsed" id="aio-navigation-links" class="sub-nav" :data-disabled="!projects.allowsAccess('platform') && !projects.businessMenuEnabled">
           <router-link to="/aio/nodes" class="sub-link" :aria-disabled="!projects.allowsAccess('platform')" @click="!projects.allowsAccess('platform') && $event.preventDefault()"><span>一体机列表</span></router-link>
           <router-link to="/aio/release" class="sub-link" :aria-disabled="!projects.businessMenuEnabled" @click="!projects.businessMenuEnabled && $event.preventDefault()"><span>发布参数</span></router-link>
           <router-link to="/aio/operations" class="sub-link" :aria-disabled="!projects.businessMenuEnabled" @click="!projects.businessMenuEnabled && $event.preventDefault()"><span>部署升级</span></router-link>
         </div>
-          <button class="side-link nav-parent" :class="{ active: route.path.startsWith('/screen') }" type="button" @click="preferences.navigationCollapsed ? preferences.toggleNavigation() : screenExpanded = !screenExpanded">
+          <button class="side-link nav-parent" :class="{ active: route.path.startsWith('/screen') }" type="button" aria-label="智能屏管理" :title="navigationCollapsed ? '智能屏管理' : undefined" :aria-expanded="screenExpanded && !navigationCollapsed" aria-controls="screen-navigation-links" @click="toggleScreenNavigation">
             <MonitorSmartphone :size="18" /><span>智能屏管理</span><ChevronRight class="nav-parent__arrow" :class="{ expanded: screenExpanded }" :size="15" />
           </button>
-          <div v-show="screenExpanded && !preferences.navigationCollapsed" class="sub-nav">
+          <div v-show="screenExpanded && !navigationCollapsed" id="screen-navigation-links" class="sub-nav">
             <router-link to="/screen/nodes" class="sub-link"><span>智能屏列表</span></router-link>
             <router-link to="/screen/operations" class="sub-link"><span>智能屏操作</span></router-link>
           </div>
-        <button class="side-link planned" type="button" disabled><Cpu :size="18" /><span>网关管理</span><em>规划中</em></button>
+        <button class="side-link planned" type="button" aria-label="网关管理（规划中）" disabled><Cpu :size="18" /><span>网关管理</span><em>规划中</em></button>
       </nav>
-      <button class="navigation-collapse" type="button" @click="preferences.toggleNavigation"><ChevronLeft :size="18" /><span>折叠导航</span></button>
+      <button class="navigation-collapse" type="button" :aria-label="navigationToggleLabel" :title="navigationToggleLabel" :aria-expanded="!navigationCollapsed" aria-controls="business-navigation-links" @click="toggleNavigation"><ChevronLeft :size="18" /><span>{{ navigationToggleLabel }}</span></button>
     </aside>
 
     <main class="workbench-content">

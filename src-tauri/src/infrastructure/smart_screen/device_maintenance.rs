@@ -440,25 +440,46 @@ async fn wait_application_started_with_limit<P: DeviceCommandPort>(
     limit: Duration,
     interval: Duration,
 ) -> AppResult<()> {
+    if application_started_with_limit(device, ip, before_pid, limit, interval).await? {
+        Ok(())
+    } else {
+        Err(AppError::Conflict(
+            "已发送启动请求，但尚未确认小新新进程和主界面；不会重复启动或清空数据".into(),
+        ))
+    }
+}
+
+/// 普通重启与配置后的核实共用只读证据；到期和连接失败分别返回，均不重放启动。
+pub(super) async fn application_started_with_limit<P: DeviceCommandPort>(
+    device: &AdbDevice<P>,
+    ip: &str,
+    before_pid: &str,
+    limit: Duration,
+    interval: Duration,
+) -> AppResult<bool> {
     // 屏幕休眠时 Android 不一定产生 Displayed 事件；只核对进程和 Activity，不唤醒屏幕。
-    tokio::time::timeout(limit, async {
+    let mut reading = false;
+    match tokio::time::timeout(limit, async {
         loop {
+            reading = true;
             let pids = application_pids(device, ip).await?;
             if !pids.is_empty() && pid_text(&pids) != before_pid {
                 let activities = read(device, ip, &["dumpsys", "activity", "activities"]).await?;
                 if main_activity_resumed(&activities) {
-                    return Ok(());
+                    return Ok(true);
                 }
             }
+            reading = false;
             tokio::time::sleep(interval).await;
         }
     })
-    .await
-    .map_err(|_| {
-        AppError::Conflict(
-            "已发送启动请求，但尚未确认小新新进程和主界面；不会重复启动或清空数据".into(),
-        )
-    })?
+    .await {
+        Ok(result) => result,
+        Err(_) if reading => Err(AppError::Conflict(
+            "读取小新进程或主界面超时，运行状态仍待核实；不会重复启动".into(),
+        )),
+        Err(_) => Ok(false),
+    }
 }
 pub(super) async fn wait_boot(device: &AdbDevice, screen: &ScreenAsset, capability: &Value) -> AppResult<()> {
     wait_boot_with_limit(

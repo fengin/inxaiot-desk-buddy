@@ -624,7 +624,7 @@ pub async fn save_shared(
             let audit_id = uuid::Uuid::from_slice(&digest[..16]).map_err(|_|AppError::InvalidConfig("生成配置修改记录失败".into()))?.to_string();
             let config = &original.evidence["config"];
             repository.audit(&audit_id,business,&shared.screen_id,&plan.input.action,&plan.operator,&plan.instance_id,
-                &serde_json::json!({"operationId":id,"fields":config["fields"],"changes":crate::domain::smart_screen::app_config::shared_changes(config),"savedFields":config["savedFields"],"save":config["save"],"restart":config["restart"],"readback":config["readback"],"home":original.evidence.get("home")})).await?;
+                &serde_json::json!({"operationId":id,"fields":config["fields"],"fieldLabels":crate::domain::smart_screen::app_config::shared_field_labels(config),"changes":crate::domain::smart_screen::app_config::shared_changes(config),"savedFields":config["savedFields"],"save":config["save"],"restart":config["restart"],"readback":config["readback"],"home":original.evidence.get("home")})).await?;
         }
         if original.business == ResultState::Succeeded
             && ["install", "version_sync", "status"].contains(&plan.input.action.as_str())

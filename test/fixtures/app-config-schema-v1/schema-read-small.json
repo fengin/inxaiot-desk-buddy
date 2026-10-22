@@ -1,0 +1,56 @@
+{
+  "data": {
+    "customDeviceName": null,
+    "environments": {
+      "current": "pre",
+      "pre": {
+        "h5Url": "https://app.inxvision.com/login",
+        "wsUrl": null,
+        "h5Source": "manual",
+        "effectiveWsUrl": null,
+        "otaUrl": "https://app.inxvision.com/api/device/ota",
+        "wsSource": "none",
+        "otaWsUrl": null,
+        "otaH5Url": null,
+        "h5ReadyCheckEnabled": true,
+        "effectiveH5Url": "https://app.inxvision.com/login"
+      },
+      "prod": {
+        "h5Url": null,
+        "wsUrl": null,
+        "h5Source": "default",
+        "effectiveWsUrl": null,
+        "otaUrl": "https://api.tenclass.net/xiaozhi/ota/",
+        "wsSource": "none",
+        "otaWsUrl": null,
+        "otaH5Url": null,
+        "h5ReadyCheckEnabled": true,
+        "effectiveH5Url": "assets/web/demo.html"
+      },
+      "test": {
+        "h5Url": null,
+        "wsUrl": "ws://192.168.3.100:8091/ws/xiaoxin/v1/",
+        "h5Source": "default",
+        "effectiveWsUrl": "ws://192.168.3.100:8091/ws/xiaoxin/v1/",
+        "otaUrl": "http://192.168.3.100:8091/api/device/ota",
+        "wsSource": "manual",
+        "otaWsUrl": null,
+        "otaH5Url": null,
+        "h5ReadyCheckEnabled": true,
+        "effectiveH5Url": "assets/web/demo.html"
+      }
+    },
+    "autoStartVoiceEngine": false,
+    "audioConfig": {
+      "micSampleRate": 11025,
+      "minSpeechDuration": 0.3,
+      "vadPreCacheDurationMs": 800,
+      "vadWindowSize": 512,
+      "minSilenceDuration": 0.6,
+      "vadThreshold": 0.8,
+      "keywordsScore": 2,
+      "keywordsThreshold": 0.2
+    }
+  },
+  "status": "ok"
+}

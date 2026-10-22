@@ -153,6 +153,12 @@ export class FixtureScreenAdapter implements ScreenAdapter {
         if (validRegistrationMac(previous)) return previous;
         const identityHash = [...screen.id].reduce((value, char) => Math.imul(value ^ char.charCodeAt(0), 16777619) >>> 0, 2166136261);
         return `02:FE:${[24, 16, 8, 0].map((shift) => ((identityHash >>> shift) & 255).toString(16).padStart(2, "0")).join(":")}`.toUpperCase();
+      },
+      collectVersion: (screen) => {
+        if (!screen.adbAvailable) return null;
+        const versions = this.deviceVersions.get(projectId)!;
+        const key = [screen.id, ...screen.aliases].find((id) => id in versions);
+        return key ? versions[key] ?? null : null;
       }
     });
   }
@@ -171,6 +177,7 @@ export class FixtureScreenAdapter implements ScreenAdapter {
     if (!screen || screenRegistrationFingerprint(screen, snapshot.platformDrafts?.[screen.id]) !== record.sourceFingerprint) throw new Error("资料在提交后已变化，请核实，不能继续覆盖");
     if (!getProjectSpacePath(snapshot.spaces, record.after.spaceId)) throw new Error("所选空间已失效，请重新核实");
     if (snapshot.screens.some((other) => other.id !== screen.id && (other.ip === record.after.ip || (validRegistrationMac(record.after.mac) && normalizeScreenMac(effectiveScreenMac(other)) === normalizeScreenMac(record.after.mac))))) throw new Error("出现重复 IP 或 MAC，请先核对候选记录");
+    if (record.proposedAppVersion && screen.source === "platform" && (screen.appVersion?.trim() || null) !== record.platformAppVersion) throw new Error("平台应用版本已变化，请重新预览后再提交");
     const oldId = screen.id;
     if (screen.ip !== record.after.ip) { screen.ping = null; screen.checkedAt = null; screen.observedMac = ""; }
     Object.assign(screen, copy(record.after), screenSpaceFields(snapshot.spaces, record.after.spaceId), { revision: screen.revision + 1 });
@@ -178,9 +185,9 @@ export class FixtureScreenAdapter implements ScreenAdapter {
       screen.id = record.platformId!; screen.source = "platform";
       screen.aliases = [...new Set([...screen.aliases, oldId])];
       screen.observedAppVersion ??= screen.appVersion;
-      screen.appVersion = null;
+      screen.appVersion = record.proposedAppVersion ?? null;
       screen.platformStatus = "online"; // 模拟平台登记默认值，不是本机 Ping 或设备健康观测。
-    }
+    } else if (record.proposedAppVersion) screen.appVersion = record.proposedAppVersion;
     delete snapshot.platformDrafts?.[oldId];
   }
 
@@ -202,6 +209,7 @@ export class FixtureScreenAdapter implements ScreenAdapter {
       const preview = stored.preview.items.find((item) => item.screenId === id), current = currentItems.find((item) => item.screenId === id), screen = state.screens.find((item) => item.id === id);
       if (!preview || preview.state !== "ready") throw new Error("只能提交本次预览中通过检查的目标");
       if (!screen || screenRegistrationFingerprint(screen, state.platformDrafts?.[id]) !== stored.fingerprints[id] || !current || current.state !== "ready" || JSON.stringify(current.after) !== JSON.stringify(preview.after) || this.scenarios.get(projectId) === "status_changed") throw new Error("资料或目标条件已变化，请重新预览，未提交任何注册或更新");
+      if (preview.proposedAppVersion && current.proposedAppVersion !== preview.proposedAppVersion) throw new Error("本次设备版本或身份已变化，请重新预览，未提交任何注册或更新");
       if (preview.requiredMacConfirmation && input.macConfirmations?.[id] !== preview.requiredMacConfirmation) throw new Error(`请逐屏确认 ${preview.after.name} 的 MAC 采集失败处理`);
       if (preview.needsSpaceConfirmation && !input.spaceConfirmations?.includes(id)) throw new Error(`请确认 ${preview.after.name} 的空间变更`);
       return preview;
@@ -216,7 +224,7 @@ export class FixtureScreenAdapter implements ScreenAdapter {
         const spaceChange = item.diffs.find((diff) => diff.field === "spaceId");
         task.logs.push({ time: now(), level: "INFO", message: `${item.after.name} · 已确认空间变更：${spaceChange?.before} → ${spaceChange?.after}` });
       }
-      const record: ScreenRegistrationExecutionRecord = { screenId: item.screenId, mode: item.mode, before: copy(item.before), after: copy(item.after), sourceFingerprint: stored.fingerprints[item.screenId]! };
+      const record: ScreenRegistrationExecutionRecord = { screenId: item.screenId, mode: item.mode, before: copy(item.before), after: copy(item.after), platformAppVersion: item.platformAppVersion, proposedAppVersion: item.proposedAppVersion, sourceFingerprint: stored.fingerprints[item.screenId]! };
       task.registration!.records.push(record);
       const target: ScreenTaskTarget = { screenId: item.screenId, name: item.after.name, ip: item.after.ip, state: "succeeded", progress: 100, message: "" };
       task.targets.push(target);
@@ -228,7 +236,7 @@ export class FixtureScreenAdapter implements ScreenAdapter {
           target.state = "needs_review"; target.message = "模拟提交已受理但回读中断，请先核实；不能重复创建平台记录";
         } else {
           this.applyRegistration(next, record);
-          target.message = item.mode === "create" ? "模拟登记与回读成功；平台在线为登记默认值，非实时检查" : "模拟资料更新与回读成功；在线状态与应用版本未修改";
+          target.message = item.mode === "create" ? "模拟登记与回读成功；平台在线为登记默认值，非实时检查" : item.proposedAppVersion ? "模拟资料与本次读取的小新版本更新并回读成功；在线状态未修改" : "模拟资料更新与回读成功；在线状态与应用版本未修改";
         }
       } catch (cause) { target.state = "failed"; target.message = (cause as Error).message; }
       task.logs.push({ time: now(), level: target.state === "succeeded" ? "INFO" : "WARN", message: `${target.name} · ${target.message}` });

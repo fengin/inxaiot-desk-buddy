@@ -10,9 +10,9 @@ let adapter: FixtureScreenAdapter;
 beforeEach(() => { localStorage.clear(); vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-28T08:00:00Z")); adapter = new FixtureScreenAdapter(localStorage, 10); });
 afterEach(() => { adapter.dispose(); vi.useRealTimers(); });
 const row = (state: ScreenSnapshot, id: string) => state.screens.find((screen) => screen.id === id)!;
-function seed(change: (state: ScreenSnapshot) => void) {
+function seed(change: (state: ScreenSnapshot) => void, deviceVersions?: Record<string, string | null>) {
   const state = createScreenSnapshot(); change(state);
-  localStorage.setItem(SCREEN_STORAGE_PREFIX + project, JSON.stringify({ schemaVersion: 3, ...state }));
+  localStorage.setItem(SCREEN_STORAGE_PREFIX + project, JSON.stringify({ schemaVersion: 3, ...state, ...(deviceVersions ? { fixtureDeviceVersions: deviceVersions } : {}) }));
 }
 function submission(preview: ScreenRegistrationPreview): ScreenRegistrationSubmission {
   return { previewId: preview.id, screenIds: preview.items.filter((item) => item.state === "ready").map((item) => item.screenId),
@@ -270,11 +270,11 @@ describe("注册身份、重复目标与提交恢复", () => {
     await expect(adapter.verify(project, task.id)).rejects.toThrow("没有待核实");
   });
 
-  it("平台注册不携带本机在线观测或小新版本到平台默认字段", async () => {
-    seed((state) => { const screen = row(state, "local-screen-4"); screen.ping = "offline"; screen.appVersion = "9.9.9"; });
+  it("新登记只携带本次独立设备读取的小新版本，不复制本机运行状态或旧版本值", async () => {
+    seed((state) => { const screen = row(state, "local-screen-4"); screen.ping = "offline"; screen.appVersion = "9.9.9"; }, { "local-screen-4": "2.1.3" });
     await taskFor(await adapter.previewPlatformRegistration(project, ["local-screen-4"]));
     const registered = (await adapter.load(project)).screens.find((screen) => screen.aliases.includes("local-screen-4"))!;
-    expect(registered).toMatchObject({ platformStatus: "online", ping: "offline", appVersion: null, observedAppVersion: "9.9.9" });
+    expect(registered).toMatchObject({ platformStatus: "online", ping: "offline", appVersion: "2.1.3", observedAppVersion: "9.9.9" });
   });
 
   it("编辑草稿或完成注册不会让其他正在执行的任务脱离持久化", async () => {
@@ -291,7 +291,159 @@ describe("注册身份、重复目标与提交恢复", () => {
   });
 });
 
+describe("登记资料与本次读取的小新版本共同更新", () => {
+  const id = "platform-screen-2";
+  function versionCandidate(deviceVersion: string | null = "2.1.3", adbAvailable = true) {
+    seed(state => {
+      const screen = row(state, id);
+      Object.assign(screen, { mac: "02:11:22:33:44:55", observedMac: "02:11:22:33:44:55", appVersion: "2.1.1",
+        observedAppVersion: "2.1.2", versionCheckedIp: screen.ip, appInstalled: true, adbAvailable,
+        platformStatus: "offline", version: "h5-style-kept" });
+      state.screens = [screen];
+    }, { [id]: deviceVersion });
+  }
+  function changeDeviceVersion(value: string | null) {
+    const versions = Reflect.get(adapter, "deviceVersions") as Map<string, Record<string, string | null>>;
+    versions.get(project)![id] = value;
+  }
+  function actualScreen() {
+    const snapshots = Reflect.get(adapter, "snapshots") as Map<string, ScreenSnapshot>;
+    return row(snapshots.get(project)!, id);
+  }
+
+  it("只有版本差异也可预览提交，重读模拟设备值而非沿用旧观测，成功后同值跳过", async () => {
+    versionCandidate();
+    const before = await adapter.load(project);
+    const preview = await adapter.previewPlatformRegistration(project, [id]);
+    expect(preview.items[0]).toMatchObject({ state: "ready", mode: "update", platformAppVersion: "2.1.1", proposedAppVersion: "2.1.3",
+      diffs: [{ field: "appVersion", before: "2.1.1", after: "2.1.3" }] });
+    expect((await adapter.load(project)).screens).toEqual(before.screens);
+    expect((await taskFor(preview)).state).toBe("succeeded");
+    expect(row(await adapter.load(project), id)).toMatchObject({ appVersion: "2.1.3", observedAppVersion: "2.1.2", platformStatus: "offline", version: "h5-style-kept" });
+    expect((await adapter.previewPlatformRegistration(project, [id])).items[0]).toMatchObject({ state: "skip", proposedAppVersion: null, diffs: [] });
+  });
+
+  it("资料与版本一并提交，草稿和返回预览中的伪造版本不能进入写入", async () => {
+    versionCandidate();
+    const screen = row(await adapter.load(project), id);
+    await adapter.savePlatformDraft(project, id, { ...screenPlatformFields(screen), name: "正式名称", appVersion: "伪造草稿版本" } as ReturnType<typeof screenPlatformFields>);
+    const preview = await adapter.previewPlatformRegistration(project, [id]);
+    expect(preview.items[0]!.diffs.map(item => item.field)).toEqual(["name", "appVersion"]);
+    expect((await adapter.load(project)).platformDrafts?.[id]?.values).not.toHaveProperty("appVersion");
+    preview.items[0]!.proposedAppVersion = "伪造预览版本";
+    await taskFor(preview);
+    expect(row(await adapter.load(project), id)).toMatchObject({ name: "正式名称", appVersion: "2.1.3", platformStatus: "offline", version: "h5-style-kept" });
+  });
+
+  it.each([true, false])("管理连接可用=%s时本次版本读取失败均明确阻断，不写历史观测", async adbAvailable => {
+    versionCandidate(null, adbAvailable);
+    const preview = await adapter.previewPlatformRegistration(project, [id]);
+    expect(preview.items[0]).toMatchObject({ state: "blocked", platformAppVersion: "2.1.1", proposedAppVersion: null, diffs: [] });
+    expect(preview.items[0]!.versionMessage).toContain("保留平台已有版本");
+    await expect(adapter.submitPlatformRegistration(project, { previewId: preview.id, screenIds: [id] })).rejects.toThrow("通过检查");
+    expect(row(await adapter.load(project), id).appVersion).toBe("2.1.1");
+  });
+
+  it("有普通资料差异时设备离线仍可更新资料，并明确保留平台版本", async () => {
+    versionCandidate(null, false);
+    const screen = row(await adapter.load(project), id);
+    await adapter.savePlatformDraft(project, id, { ...screenPlatformFields(screen), location: "新的详细位置" });
+    const preview = await adapter.previewPlatformRegistration(project, [id]);
+    expect(preview.items[0]).toMatchObject({ state: "ready", proposedAppVersion: null });
+    expect(preview.items[0]!.diffs.map(item => item.field)).toEqual(["location"]);
+    expect(preview.items[0]!.versionMessage).toContain("保留平台已有版本");
+    await taskFor(preview);
+    expect(row(await adapter.load(project), id)).toMatchObject({ location: "新的详细位置", appVersion: "2.1.1", platformStatus: "offline" });
+  });
+
+  it("缓存虽有差异但本次重读已与平台一致时直接跳过版本写入", async () => {
+    versionCandidate("2.1.1");
+    const preview = await adapter.previewPlatformRegistration(project, [id]);
+    expect(preview.items[0]).toMatchObject({ state: "skip", proposedAppVersion: null, diffs: [] });
+    expect(preview.items[0]!.versionMessage).toContain("本次设备版本与平台一致");
+  });
+
+  it("本次没有拟提交版本时，提交资料不夹带随后才出现的版本变化", async () => {
+    versionCandidate("2.1.1");
+    const screen = row(await adapter.load(project), id);
+    await adapter.savePlatformDraft(project, id, { ...screenPlatformFields(screen), name: "只更新名称" });
+    const preview = await adapter.previewPlatformRegistration(project, [id]);
+    expect(preview.items[0]).toMatchObject({ state: "ready", proposedAppVersion: null, diffs: [{ field: "name" }] });
+    changeDeviceVersion("2.1.4");
+    expect((await taskFor(preview)).state).toBe("succeeded");
+    expect(row(await adapter.load(project), id)).toMatchObject({ name: "只更新名称", appVersion: "2.1.1" });
+  });
+
+  it.each(["2.1.4", null])("确认后设备版本变为%s则整次提交拒绝，保留原资料和版本", async nextVersion => {
+    versionCandidate();
+    const screen = row(await adapter.load(project), id);
+    await adapter.savePlatformDraft(project, id, { ...screenPlatformFields(screen), name: "尚未提交" });
+    const preview = await adapter.previewPlatformRegistration(project, [id]);
+    changeDeviceVersion(nextVersion);
+    await expect(adapter.submitPlatformRegistration(project, submission(preview))).rejects.toThrow("已变化");
+    const after = await adapter.load(project);
+    expect(row(after, id)).toMatchObject({ name: screen.name, appVersion: "2.1.1" });
+    expect(after.tasks).toHaveLength(0);
+  });
+
+  it.each(["platform-version", "mac", "ip"])("确认后%s变化时不得沿用版本预览", async field => {
+    versionCandidate();
+    const preview = await adapter.previewPlatformRegistration(project, [id]);
+    const screen = actualScreen();
+    if (field === "platform-version") screen.appVersion = "2.1.5";
+    else if (field === "mac") screen.observedMac = "02:AA:BB:CC:DD:EE";
+    else screen.ip = "192.0.2.222";
+    await expect(adapter.submitPlatformRegistration(project, submission(preview))).rejects.toThrow("已变化");
+    expect((await adapter.load(project)).tasks).toHaveLength(0);
+  });
+
+  it("待核实登记保留原受理版本，重载核实不会把之后的新设备版本混入原结果", async () => {
+    versionCandidate();
+    const preview = await adapter.previewPlatformRegistration(project, [id]);
+    await adapter.setScenario(project, "needs_review");
+    const task = await taskFor(preview);
+    expect(task.registration?.records[0]).toMatchObject({ platformAppVersion: "2.1.1", proposedAppVersion: "2.1.3" });
+    changeDeviceVersion("2.1.4");
+    await adapter.setScenario(project, "normal");
+    adapter.dispose(); adapter = new FixtureScreenAdapter(localStorage, 10);
+    await adapter.verify(project, task.id);
+    const after = await adapter.load(project);
+    expect(after.tasks[0]!.state).toBe("succeeded");
+    expect(row(after, id)).toMatchObject({ appVersion: "2.1.3", platformStatus: "offline", version: "h5-style-kept" });
+    expect(after.tasks).toHaveLength(1);
+  });
+});
+
 describe("纯领域预检", () => {
+  it("没有同地址版本候选的普通资料变更不连接设备，旧IP观测与明确未安装均不触发版本更新", () => {
+    const state = createScreenSnapshot(), screen = row(state, "platform-screen-2");
+    state.screens = [screen]; screen.mac = "02:11:22:33:44:55";
+    const base = screenPlatformFields(screen);
+    state.platformDrafts = { [screen.id]: { screenId: screen.id, baseRevision: screen.revision, base, values: { ...base, name: "离线资料" }, updatedAt: "now" } };
+    const collectMac = vi.fn(() => null), collectVersion = vi.fn(() => "9.9.9");
+    const context = { platformAvailable: true, spacesAvailable: true, collectMac, collectVersion };
+    for (const observation of [
+      { observedAppVersion: undefined, versionCheckedIp: undefined, appInstalled: undefined },
+      { observedAppVersion: "2.1.3", versionCheckedIp: "192.0.2.200", appInstalled: true },
+      { observedAppVersion: "2.1.3", versionCheckedIp: screen.ip, appInstalled: false }
+    ]) {
+      Object.assign(screen, observation);
+      expect(buildScreenRegistrationItems(state, [screen.id], context)[0]).toMatchObject({ state: "ready", proposedAppVersion: null, diffs: [{ field: "name" }] });
+    }
+    expect(collectMac).not.toHaveBeenCalled(); expect(collectVersion).not.toHaveBeenCalled();
+  });
+
+  it("版本重读仍须核对本次MAC，版本候选身份不可信时只允许原有普通资料更新", () => {
+    const state = createScreenSnapshot(), screen = row(state, "platform-screen-2");
+    state.screens = [screen]; screen.mac = "02:11:22:33:44:55";
+    Object.assign(screen, { appVersion: "2.1.1", observedAppVersion: "2.1.2", versionCheckedIp: screen.ip });
+    const context = { platformAvailable: true, spacesAvailable: true, collectMac: () => "02:AA:BB:CC:DD:EE", collectVersion: () => "2.1.3" };
+    expect(buildScreenRegistrationItems(state, [screen.id], context)[0]).toMatchObject({ state: "blocked", proposedAppVersion: null });
+    const base = screenPlatformFields(screen);
+    state.platformDrafts = { [screen.id]: { screenId: screen.id, baseRevision: screen.revision, base, values: { ...base, name: "普通资料" }, updatedAt: "now" } };
+    expect(buildScreenRegistrationItems(state, [screen.id], context)[0]).toMatchObject({ state: "ready", proposedAppVersion: null, diffs: [{ field: "name" }] });
+  });
+
   it("平台MAC空且无草稿时显式预检仍采集，预览本身不改平台和草稿", () => {
     const state = createScreenSnapshot(), screen = row(state, "platform-screen-2");
     state.screens = [screen]; screen.mac = ""; screen.observedMac = "02:11:22:33:44:55";

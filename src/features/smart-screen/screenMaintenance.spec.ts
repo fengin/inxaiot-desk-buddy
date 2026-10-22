@@ -14,24 +14,47 @@ const screen = (snapshot: ScreenSnapshot, id = "platform-screen-2") => snapshot.
 const liveState = () => (adapter as unknown as { snapshots: Map<string, ScreenSnapshot> }).snapshots.get(project)!;
 
 describe("版本同步、离线检查与实际目标", () => {
-  it("先安装的未注册屏登记后可独立读取版本、同步平台且不重复安装", async () => {
+  it("已安装的未注册屏登记时携带本次核对版本，独立版本核对同值跳过且不重复安装", async () => {
     const seed = createScreenSnapshot();
-    screen(seed, "local-screen-4").appVersion = "1.6.2";
-    localStorage.setItem(SCREEN_STORAGE_PREFIX + project, JSON.stringify({ schemaVersion: 3, ...seed }));
+    screen(seed, "local-screen-4").appVersion = "0.9.0";
+    localStorage.setItem(SCREEN_STORAGE_PREFIX + project, JSON.stringify({ schemaVersion: 3, ...seed, fixtureDeviceVersions: { "local-screen-4": "1.6.2" } }));
     const registration = await adapter.previewPlatformRegistration(project, ["local-screen-4"]);
-    await adapter.submitPlatformRegistration(project, { previewId: registration.id, screenIds: ["local-screen-4"] });
+    expect(registration.items[0]).toMatchObject({ state: "ready", platformAppVersion: null, proposedAppVersion: "1.6.2" });
+    expect(registration.items[0]!.diffs).toContainEqual(expect.objectContaining({ field: "appVersion", before: "—", after: "1.6.2" }));
+    const taskId = await adapter.submitPlatformRegistration(project, { previewId: registration.id, screenIds: ["local-screen-4"] });
     const registered = (await adapter.load(project)).screens.find((s) => s.aliases.includes("local-screen-4"))!;
-    expect(registered.appVersion).toBeNull();
+    expect(registered.appVersion).toBe("1.6.2");
     const preview = await adapter.previewVersionSync(project, ["local-screen-4"]);
-    expect(preview.items[0]).toMatchObject({ screenId: registered.id, deviceVersion: "1.6.2", platformVersion: null, state: "ready" });
-    const id = await adapter.submitVersionSync(project, preview.id, [registered.id]);
+    expect(preview.items[0]).toMatchObject({ screenId: registered.id, deviceVersion: "1.6.2", platformVersion: "1.6.2", state: "skip" });
+    await expect(adapter.submitVersionSync(project, preview.id, [registered.id])).rejects.toThrow("只能同步");
     const after = await adapter.load(project);
-    expect(screen(after, registered.id)).toMatchObject({ appVersion: "1.6.2", ip: registered.ip, mac: registered.mac, platformStatus: registered.platformStatus, spaceId: registered.spaceId });
-    expect(after.tasks.find((task) => task.id === id)?.action).toBe("version_sync");
+    expect(after.tasks).toHaveLength(1);
+    expect(after.tasks[0]).toMatchObject({ id: taskId, action: "register", state: "succeeded" });
     expect(after.tasks.some((task) => task.action === "install")).toBe(false);
-    expect(await adapter.submitVersionSync(project, preview.id, [registered.id])).toBe(id);
     adapter.dispose(); adapter = new FixtureScreenAdapter(localStorage, 10);
     expect(screen(await adapter.load(project), registered.id).appVersion).toBe("1.6.2");
+  });
+
+  it.each([
+    { scenario: "遗留平台空版本", platformVersion: null, deviceVersion: "1.6.2" },
+    { scenario: "登记后设备已安装新版本", platformVersion: "1.6.2", deviceVersion: "1.7.0" }
+  ])("独立版本同步仍可处理$scenario，回读和重复提交均不重新安装", async ({ platformVersion, deviceVersion }) => {
+    const seed = createScreenSnapshot(), registered = screen(seed);
+    Object.assign(registered, { appVersion: platformVersion, mac: "02:11:22:33:44:55", observedMac: "02:11:22:33:44:55", aliases: ["legacy-local-screen"] });
+    seed.screens = [registered];
+    localStorage.setItem(SCREEN_STORAGE_PREFIX + project, JSON.stringify({ schemaVersion: 3, ...seed, fixtureDeviceVersions: { [registered.id]: deviceVersion } }));
+    const preview = await adapter.previewVersionSync(project, ["legacy-local-screen"]);
+    expect(preview.items[0]).toMatchObject({ screenId: registered.id, deviceVersion, platformVersion, state: "ready" });
+    const id = await adapter.submitVersionSync(project, preview.id, [registered.id]);
+    const after = await adapter.load(project);
+    expect(screen(after, registered.id)).toMatchObject({ appVersion: deviceVersion, ip: registered.ip, mac: registered.mac, platformStatus: registered.platformStatus, spaceId: registered.spaceId });
+    expect(after.tasks.find((task) => task.id === id)).toMatchObject({ action: "version_sync", state: "succeeded" });
+    expect(after.tasks.some((task) => task.action === "install")).toBe(false);
+    expect(await adapter.submitVersionSync(project, preview.id, [registered.id])).toBe(id);
+    expect((await adapter.load(project)).tasks).toHaveLength(1);
+    adapter.dispose(); adapter = new FixtureScreenAdapter(localStorage, 10);
+    expect(screen(await adapter.load(project), registered.id).appVersion).toBe(deviceVersion);
+    expect((await adapter.previewVersionSync(project, ["legacy-local-screen"])).items[0]).toMatchObject({ screenId: registered.id, platformVersion: deviceVersion, deviceVersion, state: "skip" });
   });
 
   it("重新读取独立设备状态，不把平台旧版本或本机旧观测当成本次读取", async () => {

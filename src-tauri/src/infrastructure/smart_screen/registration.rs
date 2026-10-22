@@ -1,6 +1,6 @@
 use super::{
     assets_service::ScreenAssetsService,
-    device::{AdbDevice, AndroidTools},
+    device::{AdbDevice, AndroidTools, XIAOXIN_PACKAGE},
     leases::HeldScreenLeases,
     platform_write::{self, MutationError, MutationReceipt},
     previews,
@@ -38,7 +38,7 @@ fn success_message(mode: &str) -> &str {
     match mode {
         "create" => "注册成功，平台写入与本机关联已确认",
         "merge" => "资料与本机关联已合并，未安装应用或改变屏端配置",
-        _ => "资料更新成功，未修改状态或应用版本",
+        _ => "已确认的登记信息更新成功，未修改平台状态或屏端应用",
     }
 }
 fn local(state: &FormalAppState) -> ScreenRepository {
@@ -81,6 +81,49 @@ fn historical_mac(
         })
         .max_by_key(|(time, observation)| (*time, observation.id.as_str()))
         .and_then(|(_, observation)| observation.observed_mac.clone())
+}
+
+// 历史观测只触发一次现场复核，绝不能直接成为拟写入的平台版本。
+fn has_version_candidate(snapshot: &ScreenSnapshot, screen: &ScreenAsset, fields: &ScreenFields) -> bool {
+    std::iter::once(&screen.id).chain(screen.aliases.iter())
+        .filter_map(|id| snapshot.observations.get(id)).flatten()
+        .filter(|o| o.observed_ip == fields.ip && o.app_installed.is_some())
+        .filter_map(|o| time::OffsetDateTime::parse(&o.observed_at,
+            &time::format_description::well_known::Rfc3339).ok().map(|at| (at, o)))
+        .max_by_key(|(at, o)| (*at, o.id.as_str()))
+        .is_some_and(|(_, o)| o.app_installed != Some(false)
+            && o.observed_app_version.as_deref().is_some_and(|v| !v.trim().is_empty())
+            && o.observed_app_version.as_deref().map(str::trim)
+                != screen.app_version.as_deref().map(str::trim))
+}
+
+fn confirmed_device_version(target: &ScreenAsset, observation: &ScreenObservation) -> Option<String> {
+    if !super::value_updates::reliable_identity(target, observation)
+        || !valid_mac(&target.fields.mac) || observation.mac_candidates.len() > 1
+        || observation.app_installed != Some(true)
+        || observation.package_id.as_deref() != Some(XIAOXIN_PACKAGE)
+        || observation.app_version_code.is_none() {
+        return None;
+    }
+    observation.observed_app_version.as_deref().map(str::trim)
+        .filter(|v| !v.is_empty() && v.chars().count() <= 32).map(String::from)
+}
+
+fn version_still_matches(target: &ScreenAsset, expected: &RegistrationVersion, current: &ScreenObservation) -> bool {
+    confirmed_device_version(target, current) == expected.change.after
+        && current.app_version_code == expected.observation.app_version_code
+        && current.observed_mac.as_deref().map(normalize_mac)
+            == expected.observation.observed_mac.as_deref().map(normalize_mac)
+}
+
+fn version_diff(change: &VersionChange) -> RegistrationDiff {
+    RegistrationDiff { field: "appVersion".into(), label: "小新版本".into(),
+        before: change.before.clone().unwrap_or_default(), after: change.after.clone().unwrap_or_default() }
+}
+
+fn registration_state(has_before: bool, differences: &[RegistrationDiff], errors: &[String], version_unconfirmed: bool) -> &'static str {
+    if !errors.is_empty() || (has_before && differences.is_empty() && version_unconfirmed) { "blocked" }
+    else if has_before && differences.is_empty() { "skip" } else { "ready" }
 }
 
 #[derive(Debug)]
@@ -230,7 +273,7 @@ pub async fn preview(
         match AndroidTools::discover() {
             Ok(tools) => {
                 AdbDevice::new(tools)
-                    .inspect(&target, "mac", CancellationToken::new())
+                    .inspect(&target, "inspect", CancellationToken::new())
                     .await
             }
             Err(error) => Err(error),
@@ -263,6 +306,7 @@ where
     let mut items = Vec::new();
     let mut originals = BTreeMap::new();
     let mut revisions = BTreeMap::new();
+    let mut registration_versions = BTreeMap::new();
     for screen_id in ids {
         let screen = snapshot
             .screens
@@ -291,9 +335,14 @@ where
             errors.push(error.to_string());
         }
         let mut source = "unchanged".to_string();
-        let mut mac_message = "设备地址与身份未改变，无需连接设备".to_string();
+        let mut mac_message = "设备地址与身份未改变，沿用平台已确认 MAC".to_string();
         let mut confirmation = None;
-        if needs_mac_collection(before.as_ref(), &after)
+        let collect_identity = needs_mac_collection(before.as_ref(), &after);
+        let version_candidate = has_version_candidate(&snapshot, screen, &after);
+        let mut version_message = String::new();
+        let mut proposed_app_version = None;
+        let mut version_unconfirmed = false;
+        if (collect_identity || version_candidate)
             && after.ip.parse::<std::net::Ipv4Addr>().is_ok()
         {
             let mut target = screen.clone();
@@ -303,17 +352,37 @@ where
             if let Ok(observation) = &observed {
                 local(state).append_observation(project, observation).await?;
             }
-            let decision = apply_mac_observation(
+            if collect_identity {
+                let decision = apply_mac_observation(
                 &screen.fields,
                 before.as_ref(),
                 &mut after,
                 previous,
                 observed.as_ref().map_err(ToString::to_string),
             );
-            source = decision.source.into();
-            mac_message = decision.message;
-            confirmation = decision.confirmation.map(String::from);
-            errors.extend(decision.errors);
+                source = decision.source.into();
+                mac_message = decision.message;
+                confirmation = decision.confirmation.map(String::from);
+                errors.extend(decision.errors);
+            }
+            let mut target = screen.clone();
+            target.fields = after.clone();
+            let checked = observed.as_ref().ok().and_then(|o| confirmed_device_version(&target, o));
+            if let Some(version) = checked {
+                if before.is_some() && screen.app_version.as_deref().map(str::trim) == Some(version.as_str()) {
+                    version_message = "本次已读取设备版本，与平台一致，无需更新版本".into();
+                } else {
+                    proposed_app_version = Some(version.clone());
+                    registration_versions.insert(screen.id.clone(), RegistrationVersion {
+                        change: VersionChange { before: before.as_ref().and(screen.app_version.clone()), after: Some(version) },
+                        observation: observed.as_ref().expect("confirmed observation").clone(),
+                    });
+                    version_message = "已核对本次设备身份和小新版本，确认后随资料一起登记；不安装或更改屏端应用".into();
+                }
+            } else {
+                version_unconfirmed = version_candidate;
+                version_message = "本次设备身份、安装状态或版本读取未确认，保留平台原版本；可先提交其他有效资料".into();
+            }
         }
         let needs_space = before
             .as_ref()
@@ -339,18 +408,17 @@ where
         if !duplicates.is_empty() {
             errors.push("IP 或 MAC 存在其他记录，请先核对重复资料".into());
         }
-        let differences = diffs(before.as_ref(), &after, &snapshot.spaces);
-        let state_name = if !errors.is_empty() {
-            "blocked"
-        } else if before.is_some() && differences.is_empty() {
-            "skip"
-        } else {
-            "ready"
-        };
+        let mut differences = diffs(before.as_ref(), &after, &snapshot.spaces);
+        if let Some(version) = registration_versions.get(&screen.id) {
+            differences.push(version_diff(&version.change));
+        }
+        let state_name = registration_state(before.is_some(), &differences, &errors, version_unconfirmed);
         let reason = if !errors.is_empty() {
             errors.join("；")
         } else if state_name == "skip" {
             "平台资料无变化，无需提交".into()
+        } else if state_name == "blocked" {
+            version_message.clone()
         } else if confirmation.is_some() {
             "资料检查通过，提交前需确认 MAC 处理方式".into()
         } else {
@@ -370,6 +438,9 @@ where
             mac_message,
             required_mac_confirmation: confirmation,
             duplicate_ids: duplicates,
+            platform_app_version: (screen.source == "platform").then(|| screen.app_version.clone()).flatten(),
+            proposed_app_version,
+            version_message,
         });
         originals.insert(screen.id.clone(), screen.clone());
     }
@@ -408,6 +479,7 @@ where
             confirmations: None,
             merge_versions: BTreeMap::new(),
             merge_sources: BTreeMap::new(),
+            registration_versions,
         };
         let plan = ScreenPlan {
             project_id: project.into(),
@@ -516,6 +588,24 @@ pub async fn submit(
     plan.detail = serde_json::to_value(data)
         .map_err(|_| AppError::InvalidConfig("保存登记确认失败".into()))?;
     previews::queue(state, &input.preview_id, PREVIEW, &hash, &plan).await
+}
+async fn recheck_registration_version(
+    state: &FormalAppState, project: &str, task: &str,
+    screen: &ScreenAsset, item: &RegistrationItem, expected: Option<&RegistrationVersion>,
+    cancel: CancellationToken,
+) -> AppResult<Option<ScreenObservation>> {
+    let Some(expected) = expected else { return Ok(None) };
+    let mut target = screen.clone();
+    target.fields = item.after.clone();
+    let mut observed = AdbDevice::new(AndroidTools::discover()?)
+        .inspect(&target, "inspect", cancel).await?;
+    observed.operation_type = "registration_version".into();
+    observed.task_id = Some(task.into());
+    local(state).append_observation(project, &observed).await?;
+    if !version_still_matches(&target, expected, &observed) {
+        return Err(AppError::Conflict("设备版本或身份在预览后变化，未提交任何平台修改，请重新检查".into()));
+    }
+    Ok(Some(observed))
 }
 pub fn register(registry: &TaskHandlerRegistry, app: AppHandle) -> AppResult<()> {
     for action in ["register", "merge"] {
@@ -807,13 +897,21 @@ pub async fn run(
         } else {
             false
         };
+        let version_check = if !source_changed && !cancel.is_cancelled() {
+            recheck_registration_version(state, project, id, screen, item,
+                data.registration_versions.get(&screen.id), cancel.clone()).await
+        } else { Ok(None) };
         if source_changed {
             result.business = ResultState::Failed;
             result.message = "原本机资料已经变化，本次未提交平台，请重新检查".into();
         } else if cancel.is_cancelled() {
             result.business = ResultState::Skipped;
             result.message = "未执行的登记已取消".into();
+        } else if let Err(error) = &version_check {
+            result.business = ResultState::Failed;
+            result.message = error.to_string();
         } else {
+            result.observation = version_check?;
             let intent = WriteIntent {
                 request_id: request.clone(),
                 business_project_id: context.business.clone(),
@@ -836,7 +934,8 @@ pub async fn run(
                 .await?;
             let mutation = tokio::time::timeout(Duration::from_secs(30), async {
                 if item.mode == "create" {
-                    platform_write::insert(&context, &held.grants, platform_id, &item.after).await
+                    platform_write::insert_with_version(&context, &held.grants, platform_id, &item.after,
+                        data.version_change(&screen.id).and_then(|v| v.after.as_deref())).await
                 } else {
                     platform_write::update(
                         &context,
@@ -844,8 +943,7 @@ pub async fn run(
                         platform_id,
                         item.before.as_ref().expect("update before"),
                         &item.after,
-                        data.merge_versions
-                            .get(&screen.id)
+                        data.version_change(&screen.id)
                             .map(|v| (v.before.as_deref(), v.after.as_deref())),
                         item.mode == "merge",
                     )
@@ -879,7 +977,7 @@ pub async fn run(
                         Ok(()) => {
                             result.business = ResultState::Succeeded;
                             result.message = success_message(&item.mode).into();
-                            if item.mode == "merge" {
+                            if data.version_change(&screen.id).is_some() {
                                 result.before_app_version =
                                     receipt.before.as_ref().and_then(|s| s.app_version.clone());
                                 result.after_app_version = receipt.after.app_version.clone();
@@ -1014,11 +1112,9 @@ pub fn recover<'a>(
                     result.business = ResultState::Succeeded;
                     result.message = success_message(&item.mode).into();
                     result.evidence = intent.result.clone().unwrap_or_default();
-                    if item.mode == "merge" {
-                        if let Some(change) = data.merge_versions.get(&screen.id) {
+                    if let Some(change) = data.version_change(&screen.id) {
                             result.before_app_version = change.before.clone();
                             result.after_app_version = change.after.clone();
-                        }
                     }
                 }
                 Some(intent) if intent.state == "submitted" => {
@@ -1033,9 +1129,7 @@ pub fn recover<'a>(
                                     .is_some_and(|b| field_values(b)[key] == *value)
                                     || field_values(&record.asset.fields)[key] == *value
                             })
-                            && data
-                                .merge_versions
-                                .get(&screen.id)
+                            && data.version_change(&screen.id)
                                 .is_none_or(|v| v.after == record.asset.app_version)
                         {
                             let receipt = MutationReceipt {
@@ -1068,11 +1162,9 @@ pub fn recover<'a>(
                             result.business = ResultState::Succeeded;
                             result.message = success_message(&item.mode).into();
                             result.evidence = evidence;
-                            if item.mode == "merge" {
-                                if let Some(change) = data.merge_versions.get(&screen.id) {
+                            if let Some(change) = data.version_change(&screen.id) {
                                     result.before_app_version = change.before.clone();
                                     result.after_app_version = change.after.clone();
-                                }
                             }
                         } else {
                             local(state)
@@ -1318,5 +1410,104 @@ mod tests {
         assert_eq!(decision.confirmation, Some("empty"));
         assert!(after.mac.is_empty());
         assert!(decision.message.contains("ADB 连接未确认"));
+    }
+
+    fn version_observation(target: &ScreenAsset, version: &str) -> ScreenObservation {
+        let mut value = observation(&target.fields.ip, &target.fields.mac);
+        value.screen_id = target.id.clone();
+        value.app_installed = Some(true);
+        value.package_id = Some(XIAOXIN_PACKAGE.into());
+        value.observed_app_version = Some(version.into());
+        value.app_version_code = Some(18031);
+        value
+    }
+
+    #[test]
+    fn version_only_change_is_ready_and_preserves_version_name_suffix() {
+        let target = ScreenAsset { id: "screen".into(), fields: fields("02:11:22:33:44:55"), app_version: Some("2.0.10".into()), ..Default::default() };
+        let observed = version_observation(&target, "2.1.3-review-test");
+        assert_eq!(confirmed_device_version(&target, &observed).as_deref(), Some("2.1.3-review-test"));
+        let change = version_diff(&VersionChange { before: target.app_version, after: observed.observed_app_version });
+        assert_eq!(change.field, "appVersion");
+        assert_eq!(change.before, "2.0.10");
+        assert_eq!(change.after, "2.1.3-review-test");
+        assert_eq!(registration_state(true, &[change], &[], false), "ready");
+    }
+
+    #[test]
+    fn version_hint_uses_latest_same_target_observation_and_never_old_draft_ip() {
+        let target = ScreenAsset { id: "screen".into(), fields: fields("02:11:22:33:44:55"), app_version: Some("2.0.10".into()), ..Default::default() };
+        let first = version_observation(&target, "2.1.3-review-test");
+        let mut snapshot = ScreenSnapshot::default();
+        snapshot.observations.insert(target.id.clone(), vec![first.clone()]);
+        assert!(has_version_candidate(&snapshot, &target, &target.fields));
+        let mut moved = target.fields.clone(); moved.ip = "192.0.2.11".into();
+        assert!(!has_version_candidate(&snapshot, &target, &moved));
+        let mut latest = first; latest.observed_at = "2026-10-21T02:00:00Z".into();
+        latest.observed_app_version = target.app_version.clone();
+        snapshot.observations.get_mut(&target.id).unwrap().push(latest);
+        assert!(!has_version_candidate(&snapshot, &target, &target.fields));
+    }
+
+    #[test]
+    fn untrusted_version_hint_requires_fresh_read_and_later_uninstall_hides_old_value() {
+        let target=ScreenAsset { id:"screen".into(), fields:fields("02:11:22:33:44:55"), app_version:Some("2.0.10".into()), ..Default::default() };
+        let mut hint=version_observation(&target,"2.1.3-review-test");
+        hint.observed_mac=None; hint.adb_available=false;
+        let mut snapshot=ScreenSnapshot::default();
+        snapshot.observations.insert(target.id.clone(),vec![hint.clone()]);
+        assert!(has_version_candidate(&snapshot,&target,&target.fields));
+        assert!(confirmed_device_version(&target,&hint).is_none());
+        let mut removed=hint; removed.observed_at="2026-10-21T02:00:00Z".into(); removed.app_installed=Some(false); removed.observed_app_version=None;
+        snapshot.observations.get_mut(&target.id).unwrap().push(removed);
+        assert!(!has_version_candidate(&snapshot,&target,&target.fields));
+        snapshot.observations.get_mut(&target.id).unwrap().last_mut().unwrap().app_installed=Some(true);
+        assert!(!has_version_candidate(&snapshot,&target,&target.fields));
+    }
+
+    #[test]
+    fn proposed_version_requires_confirmed_identity_package_and_complete_version() {
+        let target = ScreenAsset { id: "screen".into(), fields: fields("02:11:22:33:44:55"), ..Default::default() };
+        let valid = version_observation(&target, "2.1.3-review-test");
+        let mut invalid = Vec::new();
+        let mut value=valid.clone(); value.observed_ip="192.0.2.11".into(); invalid.push(value);
+        let mut value=valid.clone(); value.observed_mac=Some("02:11:22:33:44:66".into()); invalid.push(value);
+        let mut value=valid.clone(); value.adb_available=false; invalid.push(value);
+        let mut value=valid.clone(); value.mac_candidates.push("eth1=02:11:22:33:44:66".into()); invalid.push(value);
+        let mut value=valid.clone(); value.package_id=Some("another.app".into()); invalid.push(value);
+        let mut value=valid.clone(); value.app_installed=Some(false); invalid.push(value);
+        let mut value=valid.clone(); value.app_version_code=None; invalid.push(value);
+        let mut value=valid.clone(); value.observed_app_version=Some(" ".into()); invalid.push(value);
+        let mut value=valid.clone(); value.observed_app_version=Some("v".repeat(33)); invalid.push(value);
+        for value in invalid { assert!(confirmed_device_version(&target, &value).is_none()); }
+        let mut empty = target; empty.fields.mac.clear();
+        assert!(confirmed_device_version(&empty, &valid).is_none());
+    }
+
+    #[test]
+    fn version_read_failure_keeps_normal_fields_available_but_does_not_silently_skip() {
+        assert_eq!(registration_state(true, &[], &[], true), "blocked");
+        assert_eq!(registration_state(true, &[], &[], false), "skip");
+        let before=fields("02:11:22:33:44:55"); let mut after=before.clone(); after.name="新名称".into();
+        assert_eq!(registration_state(true, &diffs(Some(&before), &after, &[]), &[], true), "ready");
+        assert_eq!(registration_state(false, &[], &[], true), "ready");
+    }
+
+    #[test]
+    fn version_recheck_rejects_changed_code_even_when_name_is_unchanged() {
+        let target=ScreenAsset { id:"screen".into(), fields:fields("02:11:22:33:44:55"), ..Default::default() };
+        let observed=version_observation(&target,"2.1.3-review-test");
+        let expected=RegistrationVersion { change:VersionChange { before:Some("2.0.10".into()), after:observed.observed_app_version.clone() }, observation:observed.clone() };
+        assert!(version_still_matches(&target,&expected,&observed));
+        let mut changed=observed; changed.app_version_code=Some(19032);
+        assert!(!version_still_matches(&target,&expected,&changed));
+    }
+
+    #[test]
+    fn legacy_registration_plan_has_no_implicit_version_write() {
+        let raw=serde_json::json!({"preview":{"id":"p","projectId":"test","createdAt":"now","items":[]},"originalAssets":{},"draftRevisions":{},"requestIds":{},"platformIds":{},"confirmations":null});
+        let plan:RegistrationPlan=serde_json::from_value(raw).unwrap();
+        assert!(plan.registration_versions.is_empty());
+        assert!(plan.version_change("screen").is_none());
     }
 }

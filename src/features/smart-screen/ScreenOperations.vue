@@ -85,7 +85,7 @@ watch(() => store.operation, (nextOperation, previousOperation) => {
 }, { flush: "sync" });
 // 预览绑定当前资料与目录。普通轮询中的相同快照不会使预览反复失效。
 const registrationFingerprint = computed(() => store.operation === "register" ? JSON.stringify({
-  targets: store.selectedScreens.map((screen) => [screen.id, screen.revision, screen.name, screen.ip, screen.mac, screen.observedMac, screen.size, screen.spaceId, screen.location, store.snapshot.platformDrafts?.[screen.id]]),
+  targets: store.selectedScreens.map((screen) => [screen.id, screen.revision, screen.name, screen.ip, screen.mac, screen.observedMac, screen.size, screen.spaceId, screen.location, screen.appVersion, store.snapshot.platformDrafts?.[screen.id]]),
   identities: store.snapshot.screens.map((screen) => [screen.id, screen.ip, screen.mac]),
   spaces: store.snapshot.spaces, spacesAvailable: store.snapshot.spacesAvailable, platformAvailable: store.platformAvailable
 }) : "");

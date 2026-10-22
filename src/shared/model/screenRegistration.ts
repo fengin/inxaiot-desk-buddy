@@ -2,7 +2,7 @@ import { effectiveScreenMac, normalizeScreenMac, screenTaskActive, validateLocal
 import type { ScreenSize, ScreenSnapshot, SmartScreen } from "./screen";
 import { getProjectSpacePath, projectSpacePath } from "./projectSpace";
 
-/** 平台注册/更新允许提交的资料，不包含在线状态或应用版本。 */
+/** 可人工编辑的登记资料；在线状态和设备读取的小新版本不属于资料草稿。 */
 export interface ScreenPlatformFields {
   name: string;
   ip: string;
@@ -24,8 +24,9 @@ export interface ScreenPlatformDraft {
 
 export type ScreenRegistrationMacConfirmation = "existing" | "empty";
 export type ScreenPlatformField = keyof ScreenPlatformFields;
+export type ScreenRegistrationField = ScreenPlatformField | "appVersion";
 export interface ScreenRegistrationDiff {
-  field: ScreenPlatformField;
+  field: ScreenRegistrationField;
   label: string;
   before: string;
   after: string;
@@ -39,6 +40,10 @@ export interface ScreenRegistrationPreviewItem {
   before: ScreenPlatformFields | null;
   after: ScreenPlatformFields;
   diffs: ScreenRegistrationDiff[];
+  /** 平台当前版本与本次设备核对后的拟提交版本；不能由编辑资料表单指定。 */
+  platformAppVersion?: string | null;
+  proposedAppVersion?: string | null;
+  versionMessage?: string | null;
   expectedRevision: number;
   needsSpaceConfirmation: boolean;
   macSource: "collected" | "unchanged" | "history" | "empty" | "conflict";
@@ -70,6 +75,8 @@ export interface ScreenRegistrationExecutionRecord {
   mode: "create" | "update";
   before: ScreenPlatformFields | null;
   after: ScreenPlatformFields;
+  platformAppVersion?: string | null;
+  proposedAppVersion?: string | null;
   platformId?: string;
   sourceFingerprint: string;
 }
@@ -83,7 +90,7 @@ export const validRegistrationMac = (value: string) => {
   return /^[0-9A-F]{12}$/.test(mac) && !/^(0{12}|F{12})$/.test(mac) && (Number.parseInt(mac.slice(0, 2), 16) & 1) === 0;
 };
 
-/** 只复制平台注册白名单字段，不能连带提交运行状态、版本或空间展示缓存。 */
+/** 只复制可编辑资料；设备读取版本由独立核对结果提交，不能混入草稿。 */
 export function screenPlatformFields(screen: Pick<SmartScreen, "name" | "ip" | "mac" | "size" | "spaceId" | "location">): ScreenPlatformFields {
   return { name: screen.name.trim(), ip: screen.ip.trim(), mac: screen.mac.trim(), size: screen.size, spaceId: screen.spaceId || null, location: screen.location.trim() };
 }
@@ -107,7 +114,7 @@ export function screenPlatformDraftValues(screen: SmartScreen, draft?: ScreenPla
 }
 
 export function screenRegistrationFingerprint(screen: SmartScreen, draft?: ScreenPlatformDraft): string {
-  return JSON.stringify({ id: screen.id, source: screen.source, revision: screen.revision, fields: screenPlatformFields(screen), observedMac: screen.observedMac, adbAvailable: screen.adbAvailable, draft: draft ?? null });
+  return JSON.stringify({ id: screen.id, source: screen.source, revision: screen.revision, fields: screenPlatformFields(screen), appVersion: screen.appVersion, observedAppVersion: screen.observedAppVersion, versionCheckedIp: screen.versionCheckedIp, appInstalled: screen.appInstalled, observedMac: screen.observedMac, adbAvailable: screen.adbAvailable, draft: draft ?? null });
 }
 
 export function screenRegistrationDiffs(before: ScreenPlatformFields | null, after: ScreenPlatformFields, snapshot: ScreenSnapshot): ScreenRegistrationDiff[] {
@@ -123,6 +130,8 @@ export interface RegistrationPreviewContext {
   spacesAvailable: boolean;
   /** 只返回本次目标 IP 的可信现场采集值；未连通或不能确定唯一 MAC 时返回 null，旧观察另走历史确认。 */
   collectMac(screen: SmartScreen, target: ScreenPlatformFields): string | null;
+  /** 仅返回本次目标地址已确认安装的小新版本；缓存和可编辑资料不能充当本次读取结果。 */
+  collectVersion?(screen: SmartScreen, target: ScreenPlatformFields): string | null;
 }
 
 /** 纯规则：预览不改资产、平台草稿或任务，采集由适配器提供。 */
@@ -135,10 +144,12 @@ export function buildScreenRegistrationItems(snapshot: ScreenSnapshot, ids: stri
     const draft = snapshot.platformDrafts?.[screenId];
     const before = screen.source === "platform" ? screenPlatformFields(screen) : null;
     const after = screen.source === "platform" ? screenPlatformDraftValues(screen, draft) : screenPlatformFields(screen);
+    const platformAppVersion = before ? screen.appVersion?.trim() || null : null;
     const item: ScreenRegistrationPreviewItem = {
       screenId, mode: before ? "update" : "create", state: "ready", reason: "资料已通过检查", before, after,
+      platformAppVersion, proposedAppVersion: null, versionMessage: "未要求核对设备版本，保留平台已有版本",
       diffs: [], expectedRevision: screen.revision, needsSpaceConfirmation: Boolean(before && before.spaceId !== after.spaceId),
-      macSource: "unchanged", macMessage: "设备地址与身份未变更，无需连接设备", requiredMacConfirmation: null, duplicateIds: []
+      macSource: "unchanged", macMessage: "设备地址与身份未改变，沿用平台已确认 MAC", requiredMacConfirmation: null, duplicateIds: []
     };
     const errors: string[] = [];
     if (!context.platformAvailable) errors.push("平台不可用，请恢复连接后重新检查");
@@ -155,8 +166,12 @@ export function buildScreenRegistrationItems(snapshot: ScreenSnapshot, ids: stri
     if (after.mac && !validRegistrationMac(after.mac)) errors.push("MAC 无效，不能使用全零、广播、组播或不完整地址");
 
     const changedIdentity = !before || !before.mac || !screenPlatformFieldEqual("ip", before.ip, after.ip) || !screenPlatformFieldEqual("mac", before.mac, after.mac);
+    const observedVersion = screen.observedAppVersion?.trim();
+    const versionCandidate = Boolean(before && observedVersion && screen.appInstalled !== false
+      && screen.versionCheckedIp === after.ip && observedVersion !== platformAppVersion);
+    const readVersion = (changedIdentity || versionCandidate) && context.platformAvailable;
+    const observed = readVersion ? context.collectMac(screen, after) : null;
     if (changedIdentity && context.platformAvailable) {
-      const observed = context.collectMac(screen, after);
       const expected = validRegistrationMac(after.mac) ? after.mac : "";
       const known = screen.source === "platform" && validRegistrationMac(screen.mac) ? screen.mac : screen.ip === after.ip ? screen.observedMac || screen.mac : "";
       if (observed && validRegistrationMac(observed)) {
@@ -189,8 +204,25 @@ export function buildScreenRegistrationItems(snapshot: ScreenSnapshot, ids: stri
     )).map((other) => other.id);
     if (item.duplicateIds.length) errors.push("IP 或 MAC 已有重复候选，请先通过疑似重复合并处理，不能直接登记或覆盖");
     item.diffs = screenRegistrationDiffs(before, after, snapshot);
+    let versionReadFailed = false;
+    if (readVersion) {
+      const currentVersion = context.collectVersion?.(screen, after)?.trim() || null;
+      const trustedIdentity = Boolean(observed && validRegistrationMac(observed) && validRegistrationMac(after.mac)
+        && normalizeScreenMac(observed) === normalizeScreenMac(after.mac) && item.macSource !== "conflict");
+      if (!trustedIdentity || !currentVersion) {
+        versionReadFailed = true;
+        item.versionMessage = !trustedIdentity ? "本次设备身份未核实，保留平台已有版本" : "本次未读到可信的小新应用版本，保留平台已有版本";
+      } else if (currentVersion === platformAppVersion) {
+        item.versionMessage = "本次设备版本与平台一致，无需更新版本";
+      } else {
+        item.proposedAppVersion = currentVersion;
+        item.versionMessage = "将本次读取的小新应用版本与登记资料一并提交";
+        item.diffs.push({ field: "appVersion", label: "小新版本", before: platformAppVersion || "—", after: currentVersion });
+      }
+    }
+    if (versionCandidate && versionReadFailed && !item.diffs.length) errors.push(item.versionMessage!);
     if (errors.length) { item.state = "blocked"; item.reason = [...new Set(errors)].join("；"); }
-    else if (before && !item.diffs.length) { item.state = "skip"; item.reason = "平台资料无变更，无需提交"; }
+    else if (before && !item.diffs.length) { item.state = "skip"; item.reason = "平台资料和应用版本无变更，无需提交"; }
     else if (item.requiredMacConfirmation) item.reason = "资料检查通过，提交前需确认 MAC 采集失败的处理方式";
     return item;
   });

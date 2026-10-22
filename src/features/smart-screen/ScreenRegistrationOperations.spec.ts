@@ -32,6 +32,31 @@ async function render() {
 }
 
 describe("平台注册操作流程", () => {
+  it("版本单独变化可以确认提交，平台版本变化后要求重新检查", async () => {
+    const { wrapper, adapter, store, dispose } = await render();
+    store.selectedIds = [store.selectedIds[0]!];
+    const data = preview(store.projectId, store.selectedScreens), item = data.items[0]!;
+    Object.assign(item, { mode: "update", before: { ...item.after }, platformAppVersion: "2.0.10", proposedAppVersion: "2.1.2",
+      diffs: [{ field: "appVersion", label: "小新版本", before: "2.0.10", after: "2.1.2" }] });
+    vi.spyOn(adapter, "previewPlatformRegistration").mockResolvedValue(data);
+    const submit = vi.spyOn(adapter, "submitPlatformRegistration").mockResolvedValue("version-registration-task");
+    try {
+      await flushPromises();
+      await wrapper.get('[data-testid="screen-operation-first-action"]').trigger("click"); await flushPromises();
+      expect(wrapper.get('[data-testid="screen-operation-submit"]').attributes("disabled")).toBeUndefined();
+      expect(wrapper.get('[data-testid="screen-operation-submit"]').text()).toContain("确认提交 1 台");
+      store.snapshot.screens.find(screen => screen.id === item.screenId)!.appVersion = "2.1.3";
+      await flushPromises();
+      expect(wrapper.findComponent(RegistrationPreview).exists()).toBe(false);
+      expect(wrapper.text()).toContain("设备资料或平台目录已变化");
+      expect(submit).not.toHaveBeenCalled();
+      await wrapper.get('[data-testid="screen-operation-first-action"]').trigger("click"); await flushPromises();
+      await wrapper.get('[data-testid="screen-operation-submit"]').trigger("click"); await flushPromises();
+      expect(submit).toHaveBeenCalledOnce();
+      expect(submit.mock.calls[0]?.[1].screenIds).toEqual([item.screenId]);
+    } finally { dispose(); }
+  });
+
   it("首步保留紧凑选屏布局，编辑资料通过公共编辑事件打开", async () => {
     const { wrapper, store, dispose } = await render();
     try {

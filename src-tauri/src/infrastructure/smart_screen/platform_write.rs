@@ -213,7 +213,20 @@ pub async fn insert(
     id: &str,
     fields: &ScreenFields,
 ) -> Result<MutationReceipt, MutationError> {
+    insert_with_version(context, grants, id, fields, None).await
+}
+
+pub async fn insert_with_version(
+    context: &ScreenWriteContext,
+    grants: &[LeaseGrant],
+    id: &str,
+    fields: &ScreenFields,
+    app_version: Option<&str>,
+) -> Result<MutationReceipt, MutationError> {
     validate_fields(fields, true).map_err(MutationError::Rejected)?;
+    if app_version.is_some_and(|v| v.trim().is_empty() || v.chars().count() > 32) {
+        return Err(MutationError::Rejected(AppError::InvalidConfig("小新版本名称无效".into())));
+    }
     if id
         .parse::<u64>()
         .ok()
@@ -242,8 +255,14 @@ pub async fn insert(
             "IP 或 MAC 已在平台登记，请先核对重复记录".into(),
         )));
     }
-    sqlx::query("INSERT INTO smart_terminal_screen(id,name,ip,mac,size,building_id,install_address,delete_flag) VALUES(?,?,?,?,?,?,?,0)")
-        .bind(id).bind(&fields.name).bind(&fields.ip).bind(&fields.mac).bind(if fields.size=="4"{"4-inch"}else{"10-inch"}).bind(&fields.space_id).bind(&fields.location).execute(&mut *tx).await.map_err(write_error)?;
+    if let Some(version) = app_version {
+        sqlx::query("INSERT INTO smart_terminal_screen(id,name,ip,mac,size,building_id,install_address,app_version,delete_flag) VALUES(?,?,?,?,?,?,?,?,0)")
+            .bind(id).bind(&fields.name).bind(&fields.ip).bind(&fields.mac).bind(if fields.size=="4"{"4-inch"}else{"10-inch"}).bind(&fields.space_id).bind(&fields.location).bind(version).execute(&mut *tx).await.map_err(write_error)?;
+    } else {
+        // 未确认版本时沿用原插入契约，不用 NULL 覆盖平台默认值。
+        sqlx::query("INSERT INTO smart_terminal_screen(id,name,ip,mac,size,building_id,install_address,delete_flag) VALUES(?,?,?,?,?,?,?,0)")
+            .bind(id).bind(&fields.name).bind(&fields.ip).bind(&fields.mac).bind(if fields.size=="4"{"4-inch"}else{"10-inch"}).bind(&fields.space_id).bind(&fields.location).execute(&mut *tx).await.map_err(write_error)?;
+    }
     let row = sqlx::query(SELECT_RECORD)
         .bind(id)
         .fetch_one(&mut *tx)
@@ -350,7 +369,7 @@ pub async fn update(
             && current.asset.app_version.as_deref() != value
         {
             return Err(MutationError::Rejected(AppError::Conflict(
-                "平台小新版本已变化，请重新核对合并来源".into(),
+                "平台小新版本已变化，请重新预览核对".into(),
             )));
         }
         if value.is_some_and(|v| v.chars().count() > 32) {

@@ -236,6 +236,9 @@ pub async fn merge(
             mac_message: "人工确认同一设备并选择资料来源".into(),
             required_mac_confirmation: None,
             duplicate_ids: vec![],
+            platform_app_version: platform.app_version.clone(),
+            proposed_app_version: None,
+            version_message: String::new(),
         }],
     };
     let mut merge_versions = BTreeMap::new();
@@ -258,6 +261,7 @@ pub async fn merge(
         request_ids: BTreeMap::from([(local.id.clone(), request_id)]),
         platform_ids: BTreeMap::from([(local.id.clone(), platform.id.clone())]),
         confirmations: None,
+        registration_versions: BTreeMap::new(),
         merge_versions,
         merge_sources: BTreeMap::from([(
             local.id.clone(),

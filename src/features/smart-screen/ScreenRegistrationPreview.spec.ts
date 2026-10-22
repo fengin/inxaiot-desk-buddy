@@ -30,6 +30,35 @@ function render(data = preview()) {
 }
 
 describe("平台注册逐屏预览", () => {
+  it("只有小新版本变化也显示待更新、版本对比和可提交选择", () => {
+    const data = preview(); data.mode = "real"; data.items = [data.items[0]!];
+    Object.assign(data.items[0]!, { before: { ...data.items[0]!.after }, platformAppVersion: "2.0.10", proposedAppVersion: "2.1.2",
+      diffs: [{ field: "appVersion", label: "小新版本", before: "2.0.10", after: "2.1.2" }],
+      needsSpaceConfirmation: false, requiredMacConfirmation: null, versionMessage: "已读取设备小新版本，确认后更新平台" });
+    const { wrapper } = render(data);
+    try {
+      expect(wrapper.text()).toContain("待更新资料 1");
+      expect(wrapper.text()).toContain("1 台可提交");
+      const row = wrapper.findAll(".screen-registration-inline-comparison tbody tr").find(item => item.get("th").text() === "小新版本")!;
+      expect(row.classes()).toContain("changed");
+      expect(row.text()).toContain("2.0.10"); expect(row.text()).toContain("2.1.2");
+      expect(wrapper.get('.screen-registration-target[data-screen-id="screen-1"]').getComponent(NCheckbox).props("disabled")).toBe(false);
+      expect(wrapper.get('[data-testid="screen-registration-version-message"]').text()).toContain("确认后更新平台");
+    } finally { wrapper.unmount(); }
+  });
+
+  it("版本未核实可保留原版本并说明原因，不标成拟更新值", () => {
+    const data = preview(); data.items = [data.items[0]!];
+    Object.assign(data.items[0]!, { platformAppVersion: "2.0.10", proposedAppVersion: null, versionMessage: "版本读取失败，本次只更新资料，平台版本保持不变" });
+    const { wrapper } = render(data);
+    try {
+      const row = wrapper.findAll(".screen-registration-inline-comparison tbody tr").find(item => item.get("th").text() === "小新版本")!;
+      expect(row.classes()).not.toContain("changed");
+      expect(row.findAll("td").map(cell => cell.text())).toEqual(["2.0.10", "", "2.0.10"]);
+      expect(wrapper.get('[data-testid="screen-registration-version-message"]').text()).toContain("平台版本保持不变");
+    } finally { wrapper.unmount(); }
+  });
+
   it("18台中13台受阻也只表示检查完成，待提交目标不显示注册成功", () => {
     const data = preview(); data.mode = "real";
     data.items = Array.from({ length: 18 }, (_, index) => ({ ...data.items[0]!, screenId: `registration-${index}`, mode: "create" as const, before: null, state: index < 5 ? "ready" as const : "blocked" as const, reason: index < 5 ? "资料检查通过" : "存在未核实任务", after: { ...data.items[0]!.after, name: `屏${index}`, ip: `192.0.2.${index + 1}` } }));

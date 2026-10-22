@@ -49,6 +49,24 @@ it('重新预览发现待提交资料变化，不自动覆盖',async()=>{
   await expect(adapter.submitPlatformRegistration('p',{previewId:'old',screenIds:['900'],macConfirmations:{},spaceConfirmations:[]})).rejects.toThrow('检查结果已变化');
   expect(invoke.mock.calls.filter(([command])=>command==='screen_registration_submit')).toHaveLength(1);
 });
+it.each(['platformAppVersion','proposedAppVersion'] as const)('登记接手后%s变化，即使六项资料未变也必须重新确认',async field=>{
+  let previews=0;
+  invoke.mockImplementation(async(command:string)=>{
+    if(command==='screen_registration_preview'){
+      const data=registration(++previews===1?'old':'new');
+      Object.assign(data.items[0],{platformAppVersion:'2.0.10',proposedAppVersion:'2.1.2'});
+      if(previews===2)data.items[0]![field]='2.1.3';
+      return data;
+    }
+    if(command==='screen_registration_submit')throw locked;
+    if(command==='screen_load')return raw();
+    if(command==='screen_takeover_release')return;
+    throw new Error(command);
+  });
+  const adapter=new RealScreenAdapter();await adapter.previewPlatformRegistration('p',['900']);
+  await expect(adapter.submitPlatformRegistration('p',{previewId:'old',screenIds:['900']})).rejects.toThrow('检查结果已变化');
+  expect(invoke.mock.calls.filter(([command])=>command==='screen_registration_submit')).toHaveLength(1);
+});
 it('版本同步接手后再次读取设备版本，用新检查编号继续',async()=>{
   let reads=0,submits=0;
   invoke.mockImplementation(async(command:string)=>{if(command==='screen_version_preview')return {id:++reads===1?'old':'new',projectId:'p',createdAt:'now',items:[{screenId:'900',ip:'192.0.2.1',state:'ready',deviceVersion:'2.0.9'}]};if(command==='screen_version_submit'){if(++submits===1)throw locked;return 'version-task';}if(command==='screen_load')return raw();if(command==='screen_takeover_release')return;throw new Error(command);});

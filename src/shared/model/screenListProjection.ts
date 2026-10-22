@@ -4,7 +4,7 @@ import { screenPlatformDraftFieldEdited, screenPlatformDraftValues, screenPlatfo
 import type { ScreenPlatformDraft, ScreenPlatformField, ScreenPlatformFields } from "./screenRegistration";
 import type { createScreenSpaceIndex, ScreenSpaceAssignment } from "./screenSpace";
 
-/** 仅供列表展示与查询；不能作为编辑、注册或设备操作的目标。 */
+/** 供列表查询和详情资料展示；不能作为编辑、注册或设备操作的目标。 */
 export interface ScreenListProjection {
   values: ScreenPlatformFields;
   changedFields: ReadonlySet<ScreenPlatformField>;

@@ -1,4 +1,4 @@
-use super::model::{ScreenAsset, ScreenDraft, ScreenFields};
+use super::model::{ScreenAsset, ScreenDraft, ScreenFields, ScreenObservation};
 use super::rules::normalize_mac;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -27,6 +27,12 @@ pub struct RegistrationItem {
     pub mac_message: String,
     pub required_mac_confirmation: Option<String>,
     pub duplicate_ids: Vec<String>,
+    #[serde(default)]
+    pub platform_app_version: Option<String>,
+    #[serde(default)]
+    pub proposed_app_version: Option<String>,
+    #[serde(default)]
+    pub version_message: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +65,20 @@ pub struct RegistrationPlan {
     pub merge_versions: BTreeMap<String, VersionChange>,
     #[serde(default)]
     pub merge_sources: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub registration_versions: BTreeMap<String, RegistrationVersion>,
+}
+impl RegistrationPlan {
+    pub fn version_change(&self, screen_id: &str) -> Option<&VersionChange> {
+        self.registration_versions.get(screen_id).map(|v| &v.change)
+            .or_else(|| self.merge_versions.get(screen_id))
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrationVersion {
+    pub change: VersionChange,
+    pub observation: ScreenObservation,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

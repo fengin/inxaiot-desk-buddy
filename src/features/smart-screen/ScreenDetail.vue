@@ -6,7 +6,7 @@ import { useSmartScreensStore } from "@/stores/smartScreens";
 import { effectiveScreenMac, screenActionLabel, screenActions, screenStateLabel } from "@/shared/model/screen";
 import type { ScreenAction, SmartScreen } from "@/shared/model/screen";
 import { formatDisplayDateTime } from "@/shared/format/dateTime";
-import { screenSpaceLabel } from "@/shared/model/screenSpace";
+import { createScreenListProjection } from "@/shared/model/screenListProjection";
 import { screenNeedsVersionSync } from "@/shared/model/screenMaintenance";
 
 const props = defineProps<{ screen?: SmartScreen }>();
@@ -14,7 +14,10 @@ const emit = defineEmits<{ close: []; edit: [screen: SmartScreen]; operate: [act
 const store = useSmartScreensStore();
 const dialog = useDialog();
 const message = useMessage();
-const spaceLabel = computed(() => props.screen ? screenSpaceLabel(props.screen, store.snapshot.spaces, store.snapshot.spacesAvailable !== false) : "");
+const display = computed(() => props.screen ? createScreenListProjection(
+  props.screen, store.snapshot.platformDrafts?.[props.screen.id], store.spaceIndex,
+  store.snapshot.spacesAvailable !== false, store.platformAvailable
+) : undefined);
 const history = computed(() => store.snapshot.tasks.filter((task) => task.targets.some((t) => props.screen && [props.screen.id, ...props.screen.aliases].includes(t.screenId))));
 const adbLabel = computed(() => props.screen?.adbStatus === 'unauthorized' ? 'ADB 未授权' : props.screen?.adbAvailable == null ? '未检查' : props.screen.adbAvailable ? 'ADB 可用' : 'ADB 无法连接');
 const switchLabel = (value?: boolean | null) => value == null ? '未检查' : value ? '开启' : '关闭';
@@ -33,15 +36,17 @@ function remove() {
 
 <template>
   <n-drawer :show="Boolean(screen)" width="min(var(--inx-detail-drawer-width), 94vw)" class="screen-dialog screen-detail-drawer device-detail-drawer" @update:show="!$event && $emit('close')">
-    <n-drawer-content v-if="screen" :title="screen.name" body-content-class="inx-scroll-area" closable>
-      <div class="screen-detail-tags"><n-tag :bordered="false" :type="screen.source === 'local' ? 'default' : 'info'">{{ screen.source === 'local' ? '平台未注册 · 本机管理' : '平台已注册' }}</n-tag><n-tag :bordered="false">{{ screen.size === 'unknown' ? '尺寸待确认' : `${screen.size} 寸屏` }}</n-tag><n-tag v-if="screen.aliases.length" type="success" :bordered="false">已关联本机历史</n-tag><n-tag v-if="screen.source === 'platform' && !store.platformAvailable" :bordered="false">缓存资料</n-tag></div>
-      <div v-if="store.draftIds.has(screen.id)" class="screen-draft-notice" data-testid="screen-detail-draft"><span>资料有变更，尚未更新平台</span><n-button size="tiny" text type="primary" @click="$emit('operate', 'register')">核对并更新</n-button></div>
+    <n-drawer-content v-if="screen && display" :title="display.values.name" body-content-class="inx-scroll-area" closable>
+      <template #header><span data-detail-field="name" :class="{ 'screen-draft-value': display.changedFields.has('name') }" :title="display.titles.name">{{ display.values.name }}</span></template>
+      <div class="screen-detail-tags"><n-tag :bordered="false" :type="screen.source === 'local' ? 'default' : 'info'">{{ screen.source === 'local' ? '平台未注册 · 本机管理' : '平台已注册' }}</n-tag><n-tag :bordered="false"><span data-detail-field="size" :class="{ 'screen-draft-value': display.changedFields.has('size') }" :title="display.titles.size">{{ display.values.size === 'unknown' ? '尺寸待确认' : `${display.values.size} 寸屏` }}</span></n-tag><n-tag v-if="screen.aliases.length" type="success" :bordered="false">已关联本机历史</n-tag><n-tag v-if="screen.source === 'platform' && !store.platformAvailable" :bordered="false">缓存资料</n-tag></div>
+      <div v-if="display.changedFields.size" class="screen-draft-notice" data-testid="screen-detail-draft"><span>资料有变更，尚未更新平台</span><n-button size="tiny" text type="primary" @click="$emit('operate', 'register')">核对并更新</n-button></div>
       <div v-if="screen.source === 'platform' && !store.platformAvailable" class="screen-secondary">缓存读取时间：{{ store.snapshot.platformReadAt ? formatDisplayDateTime(store.snapshot.platformReadAt) : '未记录' }}，恢复连接后刷新。</div>
+      <div v-if="display.confirmedIpNote" class="screen-secondary" data-testid="screen-detail-confirmed-ip">{{ display.confirmedIpNote }}</div>
       <h3 class="device-detail-section-title">资产信息</h3>
       <dl class="device-detail-facts">
-        <div><dt>设备 IP</dt><dd :title="screen.ip">{{ screen.ip }}</dd></div><div><dt>所在空间</dt><dd :title="spaceLabel">{{ spaceLabel }}</dd></div>
-        <div class="device-detail-full-row"><dt>安装位置</dt><dd :title="screen.location || '未填写'">{{ screen.location || '未填写' }}</dd></div>
-        <div><dt>平台 MAC</dt><dd :title="screen.source === 'local' ? '无平台记录' : screen.mac || '平台未填写'">{{ screen.source === 'local' ? '无平台记录' : screen.mac || '平台未填写' }}</dd></div><div><dt>采集 MAC</dt><dd :title="screen.observedMac || '未采集'">{{ screen.observedMac || '未采集' }}</dd></div>
+        <div><dt>设备 IP</dt><dd data-detail-field="ip" :class="{ 'screen-draft-value': display.changedFields.has('ip') }" :title="display.titles.ip">{{ display.values.ip }}</dd></div><div><dt>所在空间</dt><dd data-detail-field="spaceId" :class="{ 'screen-draft-value': display.changedFields.has('spaceId') }" :title="display.titles.spaceId">{{ display.spaceLabel }}</dd></div>
+        <div class="device-detail-full-row"><dt>安装位置</dt><dd data-detail-field="location" :class="{ 'screen-draft-value': display.changedFields.has('location') }" :title="display.titles.location">{{ display.values.location || '未填写' }}</dd></div>
+        <div><dt>MAC 地址</dt><dd data-detail-field="mac" :class="{ 'screen-draft-value': display.changedFields.has('mac') }" :title="display.titles.mac">{{ display.mac || (display.macExplicitlyEmpty ? 'MAC 未填写' : 'MAC 待采集') }}</dd></div><div><dt>采集 MAC</dt><dd :title="screen.observedMac || '未采集'">{{ screen.observedMac || '未采集' }}</dd></div>
         <div><dt>平台在线状态</dt><dd>{{ screen.source === 'local' ? '无平台记录' : screen.platformStatus === 'online' ? '在线' : screen.platformStatus === 'offline' ? '离线' : '未知' }}</dd></div><div><dt>本机 IP 检查</dt><dd>{{ screen.ping === null ? '未检查' : screen.ping === 'online' ? '可达' : screen.ping === 'offline' ? '不可达' : '结果未知' }}</dd></div>
         <div><dt>MAC 来源</dt><dd>{{ screen.macSource || '未采集' }}</dd></div><div><dt>MAC 采集时间</dt><dd>{{ checkedTime(screen.macCheckedAt) }}</dd></div>
       </dl>
@@ -80,6 +85,7 @@ function remove() {
 </template>
 
 <style scoped>
+.screen-draft-value { color: var(--inx-color-warning); }
 .device-detail-facts {
   grid-template-columns: max-content minmax(0, .85fr) max-content minmax(0, 1.15fr);
   column-gap: 8px;

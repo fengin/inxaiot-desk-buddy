@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { NButton, NCheckbox, NPopover, NTag } from "naive-ui";
 import { ArrowRight, CircleAlert, Pencil } from "lucide-vue-next";
-import type { ScreenRegistrationMacConfirmation, ScreenRegistrationPreview, ScreenRegistrationPreviewItem, ScreenPlatformField } from "@/shared/model/screenRegistration";
+import type { ScreenRegistrationMacConfirmation, ScreenRegistrationPreview, ScreenRegistrationPreviewItem, ScreenRegistrationField } from "@/shared/model/screenRegistration";
 import type { ScreenSpaceNode } from "@/shared/model/screenSpace";
 import { projectSpacePath } from "@/shared/model/projectSpace";
 import { formatDisplayDateTime } from "@/shared/format/dateTime";
@@ -17,9 +17,10 @@ const emit = defineEmits<{ edit: [screenId: string]; merge: [] }>();
 const focusedId = ref("");
 const columns = [{ key: "select", title: "选择", width: "40px" }, { key: "name", title: "智能屏" }, { key: "ip", title: "IP 地址", width: "108px" }, { key: "state", title: "检查结果", width: "76px" }];
 const focused = computed(() => props.preview.items.find((item) => item.screenId === focusedId.value) ?? props.preview.items[0]);
-const fields: { field: ScreenPlatformField; label: string }[] = [
+const fields: { field: ScreenRegistrationField; label: string }[] = [
   { field: "name", label: "名称" }, { field: "ip", label: "IP 地址" }, { field: "mac", label: "MAC 地址" },
-  { field: "size", label: "尺寸" }, { field: "spaceId", label: "所在空间" }, { field: "location", label: "详细位置" }
+  { field: "size", label: "尺寸" }, { field: "spaceId", label: "所在空间" }, { field: "location", label: "详细位置" },
+  { field: "appVersion", label: "小新版本" }
 ];
 const sourceLabels: Record<ScreenRegistrationPreviewItem["macSource"], string> = {
   collected: "本次采集", unchanged: "平台当前记录", history: "历史记录", empty: "暂未获取", conflict: "身份冲突"
@@ -43,12 +44,16 @@ function toggle(item: ScreenRegistrationPreviewItem, checked: boolean) {
   if (props.disabled || item.state !== "ready") return;
   included.value = checked ? [...new Set([...included.value, item.screenId])] : included.value.filter((id) => id !== item.screenId);
 }
-function display(field: ScreenPlatformField, side: "before" | "after") {
+function display(field: ScreenRegistrationField, side: "before" | "after") {
   const item = focused.value;
   if (!item) return "—";
   if (!item[side]) return "未注册";
   const diff = item.diffs.find((value) => value.field === field);
-  if (diff) return diff[side] || "未填写";
+  if (diff) return diff[side] || (field === "appVersion" ? "未记录" : "未填写");
+  if (field === "appVersion") {
+    if (!("platformAppVersion" in item) && !("proposedAppVersion" in item)) return "未读取";
+    return (side === "before" ? item.platformAppVersion : item.proposedAppVersion ?? item.platformAppVersion) || "未记录";
+  }
   const value = item[side]![field];
   if (field === "spaceId") return value ? projectSpacePath(props.spaces, value) || `空间节点 ${value}` : "待定空间";
   if (field === "size") return value === "unknown" ? "待确认" : `${value} 寸`;
@@ -118,7 +123,7 @@ function confirmSpace(checked: boolean) {
             <td><ArrowRight :size="13" aria-label="平台当前到本次拟更新" /></td><td :title="display(field.field, 'after')">{{ display(field.field, 'after') }}</td>
           </tr></tbody>
         </table>
-        <div class="screen-registration-mac"><span>MAC 来源：<b>{{ sourceLabels[focused.macSource] }}</b></span><span class="screen-registration-checked-at" data-testid="screen-registration-checked-at">检查时间：{{ formatDisplayDateTime(preview.createdAt) }}</span><p :title="focused.macMessage">{{ focused.macMessage }}</p></div>
+        <div class="screen-registration-mac"><span>MAC 来源：<b>{{ sourceLabels[focused.macSource] }}</b></span><span class="screen-registration-checked-at" data-testid="screen-registration-checked-at">检查时间：{{ formatDisplayDateTime(preview.createdAt) }}</span><p :title="focused.macMessage">{{ focused.macMessage }}</p><p v-if="focused.versionMessage" data-testid="screen-registration-version-message">{{ focused.versionMessage }}</p></div>
         <n-checkbox v-if="focused.requiredMacConfirmation" :key="`mac-${focused.screenId}`" :checked="macConfirmations[focused.screenId] === focused.requiredMacConfirmation" :disabled="disabled || !selected || focused.state !== 'ready'" class="screen-registration-confirmation" :aria-label="`确认 ${focused.after.name} ${focused.requiredMacConfirmation === 'existing' ? '沿用历史 MAC' : 'MAC 暂空'}`" @update:checked="confirmMac">
           {{ focused.requiredMacConfirmation === 'existing' ? '已核实设备身份，本次沿用历史 MAC；该值不是本次采集结果。' : '本次允许 MAC 暂空登记，后续获取后再补充；不据此判断设备身份。' }}
         </n-checkbox>

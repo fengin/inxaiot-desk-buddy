@@ -170,7 +170,7 @@ export class RealScreenAdapter implements ScreenAdapter {
       const fresh=await this.previewPlatformRegistration(projectId,input.screenIds);assertCurrent();
       for(const id of input.screenIds){
         const before=original?.items.find(item=>item.screenId===id),after=fresh.items.find(item=>item.screenId===id);
-        if(!before||!after||after.state!=='ready'||JSON.stringify(before.after)!==JSON.stringify(after.after)||before.requiredMacConfirmation!==after.requiredMacConfirmation||before.needsSpaceConfirmation!==after.needsSpaceConfirmation){
+        if(!before||!after||after.state!=='ready'||JSON.stringify(before.after)!==JSON.stringify(after.after)||(before.platformAppVersion??null)!==(after.platformAppVersion??null)||(before.proposedAppVersion??null)!==(after.proposedAppVersion??null)||before.requiredMacConfirmation!==after.requiredMacConfirmation||before.needsSpaceConfirmation!==after.needsSpaceConfirmation){
           throw new Error(`重新读取后，${after?.after.name||'屏资料'}的检查结果已变化，请重新检查并确认。${after?.reason||''}`);
         }
       }

@@ -118,12 +118,12 @@ async fn register_update_and_registered_inspection_share_results_without_touchin
         if snapshot.screens.len()!=1||snapshot.screens[0].source!="platform"||!snapshot.screens[0].aliases.contains(&local_id){return Err("登记后不是一条有原本机别名的平台记录".into());}
         let platform_id=snapshot.screens[0].id.clone();
         let actual=sqlx::query(&format!("SELECT app_version,version,mac FROM `{business}`.smart_terminal_screen WHERE id=?")).bind(&platform_id).fetch_one(&admin).await?;
-        if actual.try_get::<Option<String>,_>("app_version")?.is_some()||actual.try_get::<Option<String>,_>("version")?.is_some(){return Err("注册不应填写两个版本字段".into());}
+        if actual.try_get::<Option<String>,_>("app_version")?!=preview.items[0].proposed_app_version||actual.try_get::<Option<String>,_>("version")?.is_some(){return Err("注册版本必须等于本次预览确认值，且不能填写H5版本".into());}
         let history:i64=sqlx::query_scalar("SELECT COUNT(*) FROM operation_record WHERE domain_type='smart_screen'").fetch_one(&ops).await?;
         let audit:i64=sqlx::query_scalar("SELECT COUNT(*) FROM audit_event WHERE domain_type='smart_screen'").fetch_one(&ops).await?;
         if history!=1||audit!=1{return Err(format!("共享历史/审计数量不正确：{history}/{audit}").into());}
 
-        // H5与应用版本不同，普通资料更新必须同时保留。
+        // H5版本始终保留；应用版本仅允许按本次预览确认值更新。
         sqlx::query(&format!("UPDATE `{business}`.smart_terminal_screen SET version='light-h5',app_version='older-app' WHERE id=?")).bind(&platform_id).execute(&admin).await?;
         let fresh=service.snapshot(&project,true).await?;let screen=&fresh.screens[0];let mut fields=screen.fields.clone();fields.name="更新后的屏".into();
         repo.save_draft_checked(&project,&platform_id,&fields,screen.revision,0).await?;
@@ -153,10 +153,11 @@ async fn register_update_and_registered_inspection_share_results_without_touchin
         let refreshed=registration::preview(&state,&project,vec![platform_id.clone()]).await?;
         if refreshed.id==checked.id{return Err("接手后没有重新检查资料".into());}
         let checked=refreshed;drop(source_held);
+        let updated_app_version=checked.items[0].proposed_app_version.clone().unwrap_or_else(||"older-app".into());
         let update=registration::submit(&state,&project,RegistrationSubmission{preview_id:checked.id,screen_ids:vec![platform_id.clone()],mac_confirmations:Default::default(),space_confirmations:vec![]}).await?;
         wait(&state,&update).await?;
         let record=sqlx::query(&format!("SELECT name,app_version,version FROM `{business}`.smart_terminal_screen WHERE id=?")).bind(&platform_id).fetch_one(&admin).await?;
-        if record.get::<String,_>("name")!="更新后的屏"||record.get::<String,_>("app_version")!="older-app"||record.get::<String,_>("version")!="light-h5"{return Err("资料更新越过字段范围或未生效".into());}
+        if record.get::<String,_>("name")!="更新后的屏"||record.get::<String,_>("app_version")!=updated_app_version||record.get::<String,_>("version")!="light-h5"{return Err("资料或确认版本未生效，或误改H5版本".into());}
 
         // 补齐步骤3：已注册屏真实检查只保存实测/共享摘要，不自动更新平台版本。
         let input=ScreenOperationInput{action:"inspect".into(),target_ids:vec![platform_id.clone()],application_id:None,apk:None,app_version:String::new(),abi:"universal".into(),reinstall:false,concurrency:1,retry_of_operation_id: None, expected_targets:Default::default()};
@@ -168,7 +169,7 @@ async fn register_update_and_registered_inspection_share_results_without_touchin
             return Err(format!("已注册屏检查未通过：{summaries}").into());
         }
         let versions:(Option<String>,Option<String>)=sqlx::query_as(&format!("SELECT app_version,version FROM `{business}`.smart_terminal_screen WHERE id=?")).bind(&platform_id).fetch_one(&admin).await?;
-        if versions!=(Some("older-app".into()),Some("light-h5".into())){return Err("只读检查修改了平台版本".into());}
+        if versions!=(Some(updated_app_version.clone()),Some("light-h5".into())){return Err("只读检查修改了平台版本".into());}
         let shared_count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM operation_record WHERE domain_type='smart_screen'").fetch_one(&ops).await?;
         if shared_count!=4{return Err(format!("登记、更新、检查及接手来源应有4条共享结果，实际{shared_count}").into());}
 

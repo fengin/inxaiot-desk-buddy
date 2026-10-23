@@ -1,0 +1,33 @@
+ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)
+Display #0 (activities from top to bottom):
+  Stack #1:
+  isSleeping=false
+    Task id #134
+    * TaskRecord{e4bc801 #134 I=chat.xiaoxin.app/.MainActivity U=0 StackId=1 sz=1}
+      intent={flg=0x10000000 cmp=chat.xiaoxin.app/.MainActivity}
+      autoRemoveRecents=false isPersistable=true numFullscreen=1 taskType=0 mTaskToReturnTo=0
+      * Hist #0: ActivityRecord{3de87c6 u0 chat.xiaoxin.app/.MainActivity t134}
+          app=ProcessRecord{422787b 1338:chat.xiaoxin.app/u0a46}
+          state=RESUMED stopped=false delayedResume=false finishing=false
+          keysPaused=false inHistory=true visible=true sleeping=false idle=true mStartingWindowState=STARTING_WINDOW_SHOWN
+          mActivityType=APPLICATION_ACTIVITY_TYPE
+    Task id #121
+    * TaskRecord{9260951 #121 A=com.android.settings U=0 StackId=1 sz=1}
+      intent={act=android.settings.SETTINGS flg=0x10000000 cmp=com.android.settings/.Settings}
+      autoRemoveRecents=false isPersistable=true numFullscreen=1 taskType=0 mTaskToReturnTo=1
+      * Hist #0: ActivityRecord{abfbb93 u0 com.android.settings/.Settings t121}
+          app=ProcessRecord{1aed5b6 15144:com.android.settings/1000}
+          state=STOPPED stopped=true delayedResume=false finishing=false
+          keysPaused=false inHistory=true visible=false sleeping=false idle=true mStartingWindowState=STARTING_WINDOW_REMOVED
+          mActivityType=APPLICATION_ACTIVITY_TYPE
+    Running activities (most recent first):
+    mResumedActivity: ActivityRecord{3de87c6 u0 chat.xiaoxin.app/.MainActivity t134}
+  Stack #0:
+  isSleeping=false
+  mFocusedStack=ActivityStack{d52a2b7 stackId=1, 2 tasks} mLastFocusedStack=ActivityStack{d52a2b7 stackId=1, 2 tasks}
+  mCurTaskIdForUser={0=134}
+  mUserStackInFront={}
+  KeyguardController:
+    mKeyguardShowing=false
+    mKeyguardGoingAway=false
+    mVisibilityTransactionDepth=0

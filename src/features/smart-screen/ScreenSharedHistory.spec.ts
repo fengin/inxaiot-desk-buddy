@@ -2,11 +2,70 @@ import { flushPromises, mount } from '@vue/test-utils';
 import { afterEach, expect, it, vi } from 'vitest';
 import ScreenSharedHistory from './ScreenSharedHistory.vue';
 import * as api from '@/shared/api/operationHistory';
+import type { OperationHistoryTarget } from '@/shared/model/deploymentWorkflow';
 
 vi.mock('@/shared/api/operationHistory', () => ({listBusinessOperationHistory:vi.fn(),getBusinessOperationHistoryDetail:vi.fn(),previewScreenLocks:vi.fn(),releaseScreenLocks:vi.fn()}));
 afterEach(()=>vi.clearAllMocks());
 const operation={id:'op-a',domainType:'smart_screen',operationType:'reboot',operationName:'重启屏',operatorName:'原操作人',instanceId:'电脑A',state:'running',targetCount:1,successCount:0,failureCount:0,cancelledCount:0,startedAt:'2026-10-03T00:00:00Z'};
 const locks=[{resourceType:'smart_screen',resourceKey:'777:900',ownerInstanceId:'电脑A',ownerUser:'原操作人',fencingToken:4}];
+async function policyHistory(details: OperationHistoryTarget['details'], state='succeeded') {
+  const item={...operation,operationType:'app_config',operationName:'修改小新配置',state};
+  vi.mocked(api.listBusinessOperationHistory).mockResolvedValue({items:[item],total:1,page:1,pageSize:20});
+  vi.mocked(api.getBusinessOperationHistoryDetail).mockResolvedValue({operation:item,targets:[{resourceType:'smart_screen',resourceKey:'777:900',state,resultSummary:'本次配置处理结果',details:{targetName:'办公室屏',...details}}]});
+  const wrapper=mount(ScreenSharedHistory,{props:{projectId:'项目A'},global:{stubs:{teleport:true}}});
+  await flushPromises();await wrapper.findAll('button').find(button=>button.text().includes('修改小新配置'))!.trigger('click');await flushPromises();
+  return wrapper;
+}
+it('仅设置OWNER的共享历史具有修改内容和独立设置、回读阶段',async()=>{
+  const wrapper=await policyHistory({owner:{before:{state:'none'},after:{state:'self'},ensure:'applied',readback:'succeeded'}});
+  try{
+    expect(wrapper.text()).toContain('设备OWNER权限');
+    expect(wrapper.text()).toContain('设备OWNER：未设置 → 小新持有');
+    expect(wrapper.text()).toContain('OWNER设置：已执行 · OWNER回读：已确认');
+    expect(wrapper.text()).not.toContain('应用版本');
+    expect(api.releaseScreenLocks).not.toHaveBeenCalled();
+  }finally{wrapper.unmount();}
+});
+it.each([true,false])('仅锁定目标%s的共享历史保留目标和保存、生效、回读三段',async enabled=>{
+  const wrapper=await policyHistory({kiosk:{targetEnabled:enabled,before:{configured:true,enabled:!enabled,active:!enabled},after:{configured:true,enabled,active:enabled},save:'saved',apply:'applied',readback:'succeeded'}});
+  try{
+    expect(wrapper.text()).toContain(`锁定应用：${enabled?'关闭 → 开启':'开启 → 关闭'}`);
+    expect(wrapper.text()).toContain('锁定保存：已保存 · 锁定生效：已执行 · 锁定回读：已确认');
+    expect(wrapper.text()).not.toContain('应用版本');
+  }finally{wrapper.unmount();}
+});
+it.each([false,true])('共享锁定历史configured=%s区分缺键和已有关闭，不借默认值伪造旧状态',async configured=>{
+  const wrapper=await policyHistory({kiosk:{targetEnabled:true,before:{configured,enabled:false,active:false},after:{configured:true,enabled:true,active:true},save:'verified',apply:'verified',readback:'succeeded'}});
+  try{
+    expect(wrapper.text()).toContain(`锁定应用：${configured?'关闭':'未保存'} → 开启`);
+    expect(wrapper.text()).toContain('锁定保存：已核对保存 · 锁定生效：已核对生效 · 锁定回读：已确认');
+  }finally{wrapper.unmount();}
+});
+it('普通配置和OWNER已完成但锁定未知时，历史保留各段事实而不提供重放',async()=>{
+  const wrapper=await policyHistory({
+    configuration:{fields:['customDeviceName'],save:'saved',restart:'not_required',readback:'succeeded',changes:[{field:'customDeviceName',before:'原名称',after:'新名称'}]},
+    owner:{before:{state:'none'},after:{state:'self'},ensure:'applied',readback:'succeeded'},
+    kiosk:{targetEnabled:true,before:{configured:false},after:{configured:true,enabled:true,active:null},save:'saved',apply:'unknown',readback:'unknown'}
+  },'interrupted');
+  try{
+    expect(wrapper.text()).toContain('设备名、设备OWNER权限、锁定应用');
+    expect(wrapper.text()).toContain('原名称 → 新名称');
+    expect(wrapper.text()).toContain('OWNER设置：已执行 · OWNER回读：已确认');
+    expect(wrapper.text()).toContain('锁定保存：已保存 · 锁定生效：待核实 · 锁定回读：待核实');
+    expect(wrapper.text()).toContain('开启（目标待核实）');
+    expect(wrapper.text()).toContain('结果待核实');
+    expect(wrapper.findAll('button').some(button=>/重试|重新执行|再次设置/.test(button.text()))).toBe(false);
+  }finally{wrapper.unmount();}
+});
+it.each(['pending','unknown'])('历史外层成功但OWNER回读%s时逐屏仍显示待核实',async readback=>{
+  const wrapper=await policyHistory({owner:{before:{state:'none'},ensure:'unknown',readback}});
+  try{
+    expect(wrapper.get('.n-tag').text()).toBe('结果待核实');
+    expect(wrapper.text()).toContain('小新持有（目标待核实）');
+    expect(wrapper.text()).toContain('OWNER设置：待核实');
+    expect(wrapper.text()).not.toContain('undefined');
+  }finally{wrapper.unmount();}
+});
 it.each(['succeeded','failed'])('语音配置%s共享结果使用字段标签，失败无变化值也不露内部路径',async state=>{
   const item={...operation,operationType:'app_config',operationName:'修改小新配置',state};
   const field='audioConfig.futurePause';

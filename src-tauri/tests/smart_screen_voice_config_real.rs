@@ -107,7 +107,7 @@ fn current_environment(config: &Value) -> TestResult<String> {
 }
 
 fn patch(set: Value, home: Option<bool>) -> TestResult<AppConfigPatch> {
-    let patch = AppConfigPatch { set: serde_json::from_value(set)?, clear: Vec::new(), home_enabled: home };
+    let patch = AppConfigPatch { set: serde_json::from_value(set)?, clear: Vec::new(), home_enabled: home, ..Default::default() };
     patch.validate()?;
     Ok(patch)
 }

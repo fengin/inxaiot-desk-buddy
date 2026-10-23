@@ -140,8 +140,23 @@ export interface OperationHistoryItem {
   errorSummary?: string;
 }
 
+export interface ScreenOwnerHistoryEvidence {
+  component?: string;
+  before?: { state?: string; component?: string | null } | null;
+  after?: { state?: string; component?: string | null } | null;
+  ensure?: string;
+  readback?: string;
+}
+export interface ScreenKioskHistoryEvidence {
+  targetEnabled?: boolean;
+  before?: { configured?: boolean | null; enabled?: boolean | null; active?: boolean | null } | null;
+  after?: { configured?: boolean | null; enabled?: boolean | null; active?: boolean | null } | null;
+  save?: string;
+  apply?: string;
+  readback?: string;
+}
 export interface OperationHistoryTarget {
-  details?: { targetName?: string; targetIp?: string; device?: string; business?: string; shared?: string; observedAt?: string; observedIp?: string; appVersionCode?: number; retryOfOperationId?: string; package?: {name?:string;version?:string;versionCode?:number;sha256?:string}; configuration?: {fields?:string[];fieldLabels?:Record<string,string>;save?:string;restart?:string;readback?:string;changes?:{field:string;before:string|boolean|number|null;after:string|boolean|number|null;label?:string;unit?:string}[]}; ntp?: {beforeServer?:string|null;targetServer?:string|null;afterServer?:string|null;autoTime?:boolean|null;save?:string;activation?:string;sync?:string;rebootRequired?:boolean;clockOffsetSeconds?:number|null}; home?: import("./screenHome").ScreenHomeEvidence };
+  details?: { targetName?: string; targetIp?: string; device?: string; business?: string; shared?: string; observedAt?: string; observedIp?: string; appVersionCode?: number; retryOfOperationId?: string; package?: {name?:string;version?:string;versionCode?:number;sha256?:string}; configuration?: {fields?:string[];fieldLabels?:Record<string,string>;save?:string;restart?:string;readback?:string;changes?:{field:string;before:string|boolean|number|null;after:string|boolean|number|null;label?:string;unit?:string}[]}; ntp?: {beforeServer?:string|null;targetServer?:string|null;afterServer?:string|null;autoTime?:boolean|null;save?:string;activation?:string;sync?:string;rebootRequired?:boolean;clockOffsetSeconds?:number|null}; home?: import("./screenHome").ScreenHomeEvidence; owner?: ScreenOwnerHistoryEvidence; kiosk?: ScreenKioskHistoryEvidence };
   resourceType: string;
   resourceKey: string;
   state: string;

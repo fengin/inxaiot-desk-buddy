@@ -153,6 +153,17 @@ async fn preflight_with_settings(
     app_config: Option<BTreeMap<String, crate::domain::smart_screen::app_config::AppConfigPatch>>,
     ntp: Option<BTreeMap<String, crate::domain::smart_screen::ntp::NtpPatch>>,
 ) -> AppResult<ScreenPreflight> {
+    preflight_with_device_factory(state,project,input,app_config,ntp,
+        ||Ok(AdbDevice::new(AndroidTools::discover()?))).await
+}
+
+/// 正式预检与回归共用所有门禁；工厂仅在整批资料与平台条件确认后调用。
+#[doc(hidden)]
+pub async fn preflight_with_device_factory<P:super::device::DeviceCommandPort,F:FnOnce()->AppResult<AdbDevice<P>> + Send>(
+    state:&FormalAppState,project:&str,input:ScreenOperationInput,
+    app_config:Option<BTreeMap<String,crate::domain::smart_screen::app_config::AppConfigPatch>>,
+    ntp:Option<BTreeMap<String,crate::domain::smart_screen::ntp::NtpPatch>>,device_factory:F,
+)->AppResult<ScreenPreflight> {
     crate::application::smart_screen::operations::validate_input(&input)?;
     if input.action == "ntp" {
         let patches = ntp.as_ref().ok_or_else(||AppError::InvalidConfig("请先读取屏的 NTP 设置并填写服务器地址".into()))?;
@@ -240,136 +251,33 @@ async fn preflight_with_settings(
     if let Some(Err(error)) = &context {
         return Err(AppError::Conflict(format!("本批次包含平台注册屏，平台连接、登录或共享记录不可用，整批未执行：{error}。如仅处理本机未注册屏，请单独选择这些屏后重新操作。")));
     }
-    let tools = AndroidTools::discover()?;
-    let device = AdbDevice::new(tools);
+    let device = device_factory()?;
+    let check = |screen| preflight_screen(state, project, &input, &snapshot, &parsed, &context, &app_config, &device, screen);
+    let checks = if input.action == "app_config" {
+        super::configuration_reads::try_ordered(selected, input.concurrency.clamp(1, 3) as usize, check).await?
+    } else {
+        // 其他维护操作仍按原顺序逐屏检查；致命错误立即停止，不派发后续屏。
+        let mut checks = Vec::new();
+        for screen in selected {
+            let result = check(screen).await?;
+            if let Some(observation) = &result.observation {
+                local(state).append_observation(project, observation).await?;
+            }
+            checks.push(result);
+        }
+        checks
+    };
     let mut items = Vec::new();
     let mut targets = Vec::new();
     let mut observations = BTreeMap::new();
-    for screen in selected {
-        let mut reason = None;
-        if let Err(error) = local(state).require_idle(project, &screen.id).await {
-            reason = Some(error.to_string());
+    // 汇合后按输入顺序保存观察、组合预览与计划，不让完成先后改变ID对应关系。
+    for check in checks {
+        if let Some(observation) = check.observation {
+            if input.action == "app_config" { local(state).append_observation(project, &observation).await?; }
+            observations.insert(check.item.screen_id.clone(), observation);
         }
-        if let Err(error) = device_idle(state, &screen.fields.ip, None).await {
-            reason = Some(error.to_string());
-        }
-        if critical_draft(&snapshot, &screen) {
-            reason = Some("IP、MAC 或尺寸有待提交修改，请先处理".into());
-        }
-        if snapshot.screens.iter().any(|other| {
-            other.id != screen.id
-                && (other.fields.ip == screen.fields.ip
-                    || (valid_mac(&screen.fields.mac)
-                        && normalize_mac(&other.fields.mac) == normalize_mac(&screen.fields.mac)))
-        }) {
-            reason = Some("当前项目有相同 IP 或 MAC 的记录，请先核对合并，避免重复操作".into());
-        }
-        if screen.source == "platform" {
-            match context.as_ref().expect("platform context") {
-                Err(error) => reason = Some(format!("平台写操作条件不可用：{error}")),
-                Ok(ctx) => match platform_write::record(&ctx.read, &screen.id).await? {
-                    Some(record)
-                        if record.business.as_deref() == Some(&ctx.business)
-                            && crate::application::smart_screen::operations::same_target(
-                                &screen,
-                                &record.asset,
-                            ) => {}
-                    _ => reason = Some("平台地址或设备身份已变化，请刷新后重新检查".into()),
-                },
-            }
-        }
-        let mut skip = false;
-        if reason.is_none() {
-            let inspected = device
-                .inspect(&screen, "inspect", CancellationToken::new())
-                .await;
-            match inspected {
-                Err(error) => reason = Some(error.to_string()),
-                Ok(observation) => {
-                    local(state)
-                        .append_observation(project, &observation)
-                        .await?;
-                    if !reliable_identity(&screen, &observation) {
-                        reason = Some("未取得可靠的设备身份，不能执行设备写操作".into());
-                    } else if let Some(apk) = &parsed {
-                        match compatibility(apk, &observation, input.reinstall) {
-                            Err(error) => reason = Some(error.to_string()),
-                            Ok(same) => skip = same,
-                        }
-                    }
-                    if reason.is_none() && input.action == "app_config" {
-                        let patch = &app_config.as_ref().expect("checked config")[&screen.id];
-                        match super::app_config::read_device(&device, &screen.fields.ip, Some(patch)).await {
-                            Err(error) => reason = Some(error.to_string()),
-                            Ok((capabilities, before)) if patch.restart_required_with_capabilities(&before, &capabilities) => {
-                                if let Err(error) = super::device_maintenance::capability(&device, &screen, &observation, "restart").await {
-                                    reason = Some(error.to_string());
-                                }
-                            }
-                            _ => {}
-                        }
-                        if reason.is_none() && patch.home_enabled.is_some() {
-                            if let Err(error) = super::home::query(&device, &screen.fields.ip).await {
-                                reason = Some(error.to_string());
-                            }
-                        }
-                        if reason.is_none() && patch.home_enabled == Some(true) {
-                            if let Err(error) = super::home::query_runtime(&device, &screen.fields.ip, CancellationToken::new()).await {
-                                reason = Some(error.to_string());
-                            }
-                        }
-                    }
-                    if reason.is_none() && input.action == "ntp" {
-                        let checked = async {
-                            super::ntp::read_device(&device, &screen.fields.ip).await?;
-                            super::ntp::capability(&device, &screen, &observation).await?;
-                            super::ntp::check_status(&device, &screen.fields.ip).await?;
-                            Ok::<(), AppError>(())
-                        }.await;
-                        if let Err(error) = checked { reason = Some(error.to_string()); }
-                    }
-                    if reason.is_none() && parsed.is_none() && !["app_config", "ntp"].contains(&input.action.as_str()) {
-                        if let Err(error) = super::device_maintenance::capability(
-                            &device,
-                            &screen,
-                            &observation,
-                            &input.action,
-                        )
-                        .await
-                        {
-                            reason = Some(error.to_string());
-                        }
-                    }
-                    observations.insert(screen.id.clone(), observation);
-                }
-            }
-        }
-        let state_name = if reason.is_some() {
-            "blocked"
-        } else if skip {
-            "skip"
-        } else {
-            "ready"
-        };
-        items.push(ScreenPreflightItem {
-            observation: observations.get(&screen.id).cloned(),
-            screen_id: screen.id.clone(),
-            name: screen.fields.name.clone(),
-            ip: screen.fields.ip.clone(),
-            state: state_name.into(),
-            reason: reason.unwrap_or_else(|| {
-                if skip {
-                    "已经是目标数字版本，无需重复安装".into()
-                } else if parsed.is_some() {
-                    "设备身份、安装包、系统及签名已通过检查".into()
-                } else {
-                    "设备身份和本次维护所需条件已通过检查".into()
-                }
-            }),
-        });
-        if state_name == "ready" {
-            targets.push(screen);
-        }
+        items.push(check.item);
+        if let Some(target) = check.target { targets.push(target); }
     }
     if !targets.is_empty() {
         let scope = local(state).scope(project).await?;
@@ -397,6 +305,139 @@ async fn preflight_with_settings(
     }
     Ok(ScreenPreflight { id, items })
 }
+struct ScreenPreflightCheck {
+    item: ScreenPreflightItem,
+    observation: Option<ScreenObservation>,
+    target: Option<ScreenAsset>,
+}
+
+async fn preflight_screen<P: super::device::DeviceCommandPort>(
+    state: &FormalAppState, project: &str, input: &ScreenOperationInput,
+    snapshot: &ScreenSnapshot, parsed: &Option<ApkInfo>,
+    context: &Option<AppResult<write_context::ScreenWriteContext>>,
+    app_config: &Option<BTreeMap<String, crate::domain::smart_screen::app_config::AppConfigPatch>>,
+    device: &AdbDevice<P>, screen: ScreenAsset,
+) -> AppResult<ScreenPreflightCheck> {
+    let mut reason = None;
+    let mut observation_result = None;
+    if let Err(error) = local(state).require_idle(project, &screen.id).await {
+        reason = Some(error.to_string());
+    }
+    if let Err(error) = device_idle(state, &screen.fields.ip, None).await {
+        reason = Some(error.to_string());
+    }
+    if critical_draft(&snapshot, &screen) {
+        reason = Some("IP、MAC 或尺寸有待提交修改，请先处理".into());
+    }
+    if snapshot.screens.iter().any(|other| {
+        other.id != screen.id
+            && (other.fields.ip == screen.fields.ip
+                || (valid_mac(&screen.fields.mac)
+                    && normalize_mac(&other.fields.mac) == normalize_mac(&screen.fields.mac)))
+    }) {
+        reason = Some("当前项目有相同 IP 或 MAC 的记录，请先核对合并，避免重复操作".into());
+    }
+    if screen.source == "platform" {
+        match context.as_ref().expect("platform context") {
+            Err(error) => reason = Some(format!("平台写操作条件不可用：{error}")),
+            Ok(ctx) => match platform_write::record(&ctx.read, &screen.id).await? {
+                Some(record)
+                    if record.business.as_deref() == Some(&ctx.business)
+                        && crate::application::smart_screen::operations::same_target(
+                            &screen,
+                            &record.asset,
+                        ) => {}
+                _ => reason = Some("平台地址或设备身份已变化，请刷新后重新检查".into()),
+            },
+        }
+    }
+    let mut skip = false;
+    if reason.is_none() {
+        let inspected = device
+            .inspect(&screen, "inspect", CancellationToken::new())
+            .await;
+        match inspected {
+            Err(error) => reason = Some(error.to_string()),
+            Ok(observation) => {
+                if !reliable_identity(&screen, &observation) {
+                    reason = Some("未取得可靠的设备身份，不能执行设备写操作".into());
+                } else if let Some(apk) = &parsed {
+                    match compatibility(apk, &observation, input.reinstall) {
+                        Err(error) => reason = Some(error.to_string()),
+                        Ok(same) => skip = same,
+                    }
+                }
+                if reason.is_none() && input.action == "app_config" {
+                    let patch = &app_config.as_ref().expect("checked config")[&screen.id];
+                    let mut restart = false;
+                    match super::app_config::read_device(&device, &screen.fields.ip, Some(patch)).await {
+                        Err(error) => reason = Some(error.to_string()),
+                        Ok((capabilities, before)) if patch.restart_required_with_capabilities(&before, &capabilities) => {
+                            restart = true;
+                            if let Err(error) = super::device_maintenance::capability(&device, &screen, &observation, "restart").await {
+                                reason = Some(error.to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                    if reason.is_none() {
+                        if let Err(error) = super::app_config::preflight_controls(&device, &screen.fields.ip, patch, restart).await {
+                            reason = Some(error.to_string());
+                        }
+                    }
+                }
+                if reason.is_none() && input.action == "ntp" {
+                    let checked = async {
+                        super::ntp::read_device(&device, &screen.fields.ip).await?;
+                        super::ntp::capability(&device, &screen, &observation).await?;
+                        super::ntp::check_status(&device, &screen.fields.ip).await?;
+                        Ok::<(), AppError>(())
+                    }.await;
+                    if let Err(error) = checked { reason = Some(error.to_string()); }
+                }
+                if reason.is_none() && parsed.is_none() && !["app_config", "ntp"].contains(&input.action.as_str()) {
+                    if let Err(error) = super::device_maintenance::capability(
+                        &device,
+                        &screen,
+                        &observation,
+                        &input.action,
+                    )
+                    .await
+                    {
+                        reason = Some(error.to_string());
+                    }
+                }
+                observation_result = Some(observation);
+            }
+        }
+    }
+    let state_name = if reason.is_some() {
+        "blocked"
+    } else if skip {
+        "skip"
+    } else {
+        "ready"
+    };
+    let item = ScreenPreflightItem {
+        observation: observation_result.clone(),
+        screen_id: screen.id.clone(),
+        name: screen.fields.name.clone(),
+        ip: screen.fields.ip.clone(),
+        state: state_name.into(),
+        reason: reason.unwrap_or_else(|| {
+            if skip {
+                "已经是目标数字版本，无需重复安装".into()
+            } else if parsed.is_some() {
+                "设备身份、安装包、系统及签名已通过检查".into()
+            } else {
+                "设备身份和本次维护所需条件已通过检查".into()
+            }
+        }),
+    };
+    Ok(ScreenPreflightCheck { item, observation: observation_result,
+        target: (state_name == "ready").then_some(screen) })
+}
+
 pub async fn submit(
     state: &FormalAppState,
     project: &str,

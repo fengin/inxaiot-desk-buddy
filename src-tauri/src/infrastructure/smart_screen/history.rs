@@ -12,6 +12,17 @@ use crate::infrastructure::{
 };
 use sqlx::Row;
 use std::collections::BTreeMap;
+
+// 共享结果已在写入处按业务范围收敛；读取保留全部阶段证据，不另做字段投影。
+fn parse_shared_detail(value: Option<&str>) -> AppResult<Option<serde_json::Value>> {
+    value
+        .map(|text| {
+            serde_json::from_str(text)
+                .map_err(|_| AppError::Conflict("共享结果格式无效".into()))
+        })
+        .transpose()
+}
+
 async fn context(state: &FormalAppState, project: &str) -> AppResult<(sqlx::MySqlPool, String)> {
     Stage75Adapter::new(state)
         .require_project_access(project, ProjectAccessRequirement::ActiveSession)
@@ -79,15 +90,7 @@ pub async fn detail(
         let value: Option<String> = row
             .try_get("detail")
             .map_err(|e| AppError::database("读取共享结果", &e))?;
-        details.insert(
-            key,
-            value
-                .map(|v| {
-                    serde_json::from_str(&v)
-                        .map_err(|_| AppError::Conflict("共享结果格式无效".into()))
-                })
-                .transpose()?,
-        );
+        details.insert(key, parse_shared_detail(value.as_deref())?);
     }
     Ok(OperationHistoryDetail {
         operation: map_history(operation),
@@ -104,4 +107,47 @@ pub async fn detail(
             })
             .collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_shared_detail;
+    use serde_json::json;
+
+    #[test]
+    fn shared_history_preserves_owner_kiosk_and_existing_stage_evidence() {
+        let evidence = json!({
+            "config": {"save": "saved", "readback": "succeeded"},
+            "home": {"targetEnabled": true, "readback": "succeeded"},
+            "owner": {
+                "ensure": "applied", "readback": "succeeded",
+                "before": {"state": "none"}, "after": {"state": "self"}
+            },
+            "kiosk": {
+                "targetEnabled": true, "save": "saved", "apply": "applied", "readback": "succeeded",
+                "before": {"enabled": false, "active": false},
+                "after": {"enabled": true, "active": true, "lockTaskMode": "locked"}
+            },
+            "retryOfOperationId": "previous-operation"
+        });
+        let decoded = parse_shared_detail(Some(&evidence.to_string())).unwrap().unwrap();
+        assert_eq!(decoded, evidence);
+        assert_eq!(decoded["owner"]["after"]["state"], "self");
+        assert_eq!(decoded["kiosk"]["apply"], "applied");
+    }
+
+    #[test]
+    fn old_shared_history_does_not_invent_owner_or_kiosk_results() {
+        let old = json!({"config": {"save": "saved"}, "home": {"readback": "succeeded"}});
+        let decoded = parse_shared_detail(Some(&old.to_string())).unwrap().unwrap();
+        assert_eq!(decoded, old);
+        assert!(decoded.get("owner").is_none());
+        assert!(decoded.get("kiosk").is_none());
+        assert_eq!(parse_shared_detail(None).unwrap(), None);
+    }
+
+    #[test]
+    fn invalid_shared_history_is_rejected_without_partial_stage_results() {
+        assert!(parse_shared_detail(Some("{\"owner\":")).is_err());
+    }
 }

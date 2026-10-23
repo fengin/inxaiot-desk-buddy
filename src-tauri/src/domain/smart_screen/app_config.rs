@@ -25,15 +25,23 @@ pub struct AppConfigPatch {
     pub clear: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ensure_device_owner: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kiosk_enabled: Option<bool>,
 }
 impl AppConfigPatch {
     pub fn is_empty(&self) -> bool {
         self.set.is_empty() && self.clear.is_empty() && self.home_enabled.is_none()
+            && self.ensure_device_owner.is_none() && self.kiosk_enabled.is_none()
     }
     pub fn fields(&self) -> Vec<String> {
         self.set.keys().chain(self.clear.iter()).cloned().collect()
     }
     pub fn validate(&self) -> AppResult<()> {
+        if self.ensure_device_owner == Some(false) {
+            return Err(AppError::InvalidConfig("设备所有者只允许明确设置，不提供撤销操作".into()));
+        }
         let invalid = || AppError::InvalidConfig("小新配置字段或内容无效，请重新检查".into());
         if self.clear.iter().collect::<BTreeSet<_>>().len() != self.clear.len()
             || self.clear.iter().any(|key| self.set.contains_key(key))
@@ -227,6 +235,30 @@ pub struct AppConfigRead {
     pub capabilities: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub home: Option<AppHomeRead>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<AppOwnerRead>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kiosk: Option<AppKioskRead>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppOwnerRead {
+    pub state: String,
+    pub component: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppKioskRead {
+    pub supported: bool,
+    pub configured: Option<bool>,
+    pub enabled: Option<bool>,
+    pub active: Option<bool>,
+    pub activity_ready: Option<bool>,
+    pub lock_task_mode: Option<String>,
     pub message: String,
 }
 
@@ -245,6 +277,25 @@ pub struct AppHomeRead {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn owner_is_one_way_intent_and_kiosk_is_separate_from_configuration_fields() {
+        for value in [json!({"ensureDeviceOwner":true}), json!({"kioskEnabled":true}), json!({"kioskEnabled":false})] {
+            let patch: AppConfigPatch = serde_json::from_value(value).unwrap();
+            assert!(patch.validate().is_ok());
+            assert!(!patch.is_empty());
+            assert!(patch.fields().is_empty());
+            assert!(patch.matches(&json!({})));
+        }
+        let patch: AppConfigPatch = serde_json::from_value(json!({"ensureDeviceOwner":false})).unwrap();
+        assert!(patch.validate().is_err());
+        let old: AppConfigPatch = serde_json::from_value(json!({"homeEnabled":true})).unwrap();
+        assert_eq!(old.ensure_device_owner, None);
+        assert_eq!(old.kiosk_enabled, None);
+        assert!(old.validate().is_ok());
+        for invalid in [json!({"set":{"kioskEnabled":true}}), json!({"clear":["ensureDeviceOwner"]})] {
+            assert!(serde_json::from_value::<AppConfigPatch>(invalid).unwrap().validate().is_err());
+        }
+    }
     #[test]
     fn configuration_batch_accepts_only_one_known_size_independent_of_app_version() {
         for sizes in [vec!["4"], vec!["10"], vec!["4", "4"], vec!["10", "10", "10"]] {

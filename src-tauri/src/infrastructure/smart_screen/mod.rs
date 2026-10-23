@@ -1,7 +1,12 @@
 pub mod assets_service;
 pub mod app_config;
+mod configuration_reads;
+mod management_snapshot;
 pub mod ntp;
 pub mod home;
+pub mod home_activation;
+pub mod device_owner;
+pub mod kiosk;
 pub mod device;
 pub mod leases;
 pub mod lock_release;

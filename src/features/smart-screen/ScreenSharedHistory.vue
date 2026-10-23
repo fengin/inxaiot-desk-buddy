@@ -22,14 +22,37 @@ watch(targetPageSize,()=>{targetPage.value=1;});
 function changeSummary(target:OperationHistoryTarget){return [...(target.details?.configuration?.changes?.map(change=>{
   const display=(value:typeof change.before)=>`${appConfigDisplay(value,change.field==='environments.current')}${typeof value==='number'&&change.unit?` ${change.unit}`:''}`;
   return `${change.label||appConfigFieldLabel(change.field)}：${display(change.before)} → ${display(change.after)}`;
-})??[]),...(target.details?.home?[screenHomeSummary(target.details.home)]:[])].join('；');}
-function changeFields(target:OperationHistoryTarget){const config=target.details?.configuration;return [...(config?.fields?.map(field=>config.fieldLabels?.[field]||config.changes?.find(change=>change.field===field)?.label||appConfigFieldLabel(field))??[]),...(target.details?.home?['固定小新为主屏']:[])].join('、')||'未记录';}
+})??[]),...(target.details?.owner?[ownerChangeSummary(target)]:[]),...(target.details?.home?[screenHomeSummary(target.details.home)]:[]),...(target.details?.kiosk?[kioskChangeSummary(target)]:[])].join('；');}
+function changeFields(target:OperationHistoryTarget){const config=target.details?.configuration;return [...new Set([...(config?.fields?.map(field=>config.fieldLabels?.[field]||config.changes?.find(change=>change.field===field)?.label||appConfigFieldLabel(field))??[]),...(target.details?.owner?['设备OWNER权限']:[]),...(target.details?.home?['固定小新为主屏']:[]),...(target.details?.kiosk?['锁定应用']:[])])].join('、')||'未记录';}
 function configSummary(target:OperationHistoryTarget){const config=target.details?.configuration;return config?`保存：${config.save==='not_required'?'无需执行':configLabels[config.save??'pending']} · 重启：${configLabels[config.restart??'pending']} · 回读：${config.readback==='not_required'?'无需执行':configLabels[config.readback??'pending']}`:'';}
 function ntpSummary(target:OperationHistoryTarget){const ntp=target.details?.ntp;return ntp?`保存：${ntpStageLabel(ntp.save)} · 生效：${ntpStageLabel(ntp.activation)} · 授时：${ntpStageLabel(ntp.sync)}`:'';}
 function ntpAddressSummary(target:OperationHistoryTarget){const ntp=target.details?.ntp;return ntp?`${ntp.beforeServer == null ? '未读取' : ntpServerDisplay(ntp.beforeServer)} → ${ntp.targetServer == null ? '未记录' : ntpServerDisplay(ntp.targetServer)}`:'未记录';}
 function homeStagesSummary(target:OperationHistoryTarget){const home=target.details?.home;return home?screenHomeStagesSummary(home):'';}
-function configAndHomeSummary(target:OperationHistoryTarget){return [configSummary(target),homeStagesSummary(target)].filter(Boolean).join(' · ');}
-function targetSummary(target:OperationHistoryTarget){return [target.resultSummary||target.errorSummary||'—',target.details?`设备：${labels[target.details.device??'not_required']} · 平台数据：${labels[target.details.business??'not_required']}`:'',configSummary(target),ntpSummary(target),homeStagesSummary(target),target.details?.observedAt?`实测时间：${formatDisplayDateTime(target.details.observedAt)}`:''].filter(Boolean).join('\n');}
+function managementStage(value: string | undefined, stage: 'ensure'|'save'|'apply'|'readback') {
+  return ({pending:'等待处理',unknown:'待核实',applied:'已执行',saved:'已保存',unchanged:stage==='ensure'?'已具备':'已相同',verified:stage==='apply'?'已核对生效':'已核对保存',succeeded:'已确认',different:'与目标不同',not_required:'无需执行'} as Record<string,string>)[value??'pending']??'未确认';
+}
+function ownerChangeSummary(target:OperationHistoryTarget) {
+  const owner=target.details?.owner;
+  if(!owner)return '';
+  const before=({self:'小新持有',none:'未设置',other:'其他应用持有',unknown:'未确认'} as Record<string,string>)[owner.before?.state??'']??'未读取';
+  return `设备OWNER：${before} → 小新持有${owner.readback==='succeeded'?'':'（目标待核实）'}`;
+}
+function kioskChangeSummary(target:OperationHistoryTarget) {
+  const kiosk=target.details?.kiosk;
+  if(!kiosk)return '';
+  const before=kiosk.before?.configured===false?'未保存':typeof kiosk.before?.enabled==='boolean'?appConfigDisplay(kiosk.before.enabled):'未读取';
+  const after=typeof kiosk.targetEnabled==='boolean'?appConfigDisplay(kiosk.targetEnabled):'目标未记录';
+  return `锁定应用：${before} → ${after}${kiosk.readback==='succeeded'?'':'（目标待核实）'}`;
+}
+function ownerStagesSummary(target:OperationHistoryTarget){const owner=target.details?.owner;return owner?`OWNER设置：${managementStage(owner.ensure,'ensure')} · OWNER回读：${managementStage(owner.readback,'readback')}`:'';}
+function kioskStagesSummary(target:OperationHistoryTarget){const kiosk=target.details?.kiosk;return kiosk?`锁定保存：${managementStage(kiosk.save,'save')} · 锁定生效：${managementStage(kiosk.apply,'apply')} · 锁定回读：${managementStage(kiosk.readback,'readback')}`:'';}
+function configAndManagementSummary(target:OperationHistoryTarget){return [configSummary(target),ownerStagesSummary(target),homeStagesSummary(target),kioskStagesSummary(target)].filter(Boolean).join(' · ');}
+function targetStateLabel(target:OperationHistoryTarget) {
+  const policies=[target.details?.owner,target.details?.kiosk].filter(Boolean);
+  if(target.state==='succeeded'&&policies.some(value=>value?.readback!=='succeeded'))return '结果待核实';
+  return labels[target.state]??target.state;
+}
+function targetSummary(target:OperationHistoryTarget){return [target.resultSummary||target.errorSummary||'—',target.details?`设备：${labels[target.details.device??'not_required']} · 平台数据：${labels[target.details.business??'not_required']}`:'',configAndManagementSummary(target),ntpSummary(target),target.details?.observedAt?`实测时间：${formatDisplayDateTime(target.details.observedAt)}`:''].filter(Boolean).join('\n');}
 const releaseBusy=ref(false),notice=ref("");
 const releasePreview=ref<{project:string;operation:string;locks:ScreenOperationLock[]}>();
 async function prepareRelease(){
@@ -83,11 +106,11 @@ onBeforeUnmount(()=>{++request;++detailRequest;});
             <tr v-for="target in visibleTargets" :key="target.resourceKey">
               <td :title="target.details?.targetName||target.resourceKey">{{target.details?.targetName||target.resourceKey}}</td>
               <td :title="target.details?.targetIp||target.details?.observedIp">{{target.details?.targetIp||target.details?.observedIp||'—'}}</td>
-              <td><n-tag size="small" :bordered="false">{{labels[target.state]??target.state}}</n-tag></td>
+              <td><n-tag size="small" :bordered="false">{{targetStateLabel(target)}}</n-tag></td>
               <td v-if="detail.operation.operationType==='app_config'" :title="`${changeFields(target)}\n${changeSummary(target)}`">{{changeFields(target)}}<small>{{changeSummary(target)}}</small></td>
               <td v-else-if="detail.operation.operationType==='ntp'" :title="`${ntpAddressSummary(target)}\n${ntpSummary(target)}`">{{ntpAddressSummary(target)}}<small>{{target.details?.ntp?.clockOffsetSeconds == null ? '未取得时间偏差' : `时间偏差 ${target.details.ntp.clockOffsetSeconds} 秒`}}</small></td>
               <td v-else :title="`${target.beforeVersion||'未记录'} → ${target.afterVersion||'未更新'}`">{{target.beforeVersion||'未记录'}} → {{target.afterVersion||'未更新'}}</td>
-              <td :title="targetSummary(target)">{{target.resultSummary||target.errorSummary||'—'}}<small v-if="target.details?.configuration || target.details?.home">{{configAndHomeSummary(target)}}</small><small v-else-if="target.details?.ntp">{{ntpSummary(target)}}</small><small v-else-if="target.details">设备：{{labels[target.details.device??'not_required']}} · 平台数据：{{labels[target.details.business??'not_required']}}</small></td>
+              <td :title="targetSummary(target)">{{target.resultSummary||target.errorSummary||'—'}}<small v-if="target.details?.configuration || target.details?.home || target.details?.owner || target.details?.kiosk">{{configAndManagementSummary(target)}}</small><small v-else-if="target.details?.ntp">{{ntpSummary(target)}}</small><small v-else-if="target.details">设备：{{labels[target.details.device??'not_required']}} · 平台数据：{{labels[target.details.business??'not_required']}}</small></td>
             </tr>
             <tr v-if="!detail.targets.length"><td :colspan="targetColumns.length" class="screen-muted">暂无逐台结果</td></tr>
           </compact-operation-table>

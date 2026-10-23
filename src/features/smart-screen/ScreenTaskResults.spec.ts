@@ -41,6 +41,76 @@ function registrationTask(state: ScreenTask["state"], modes: ("create" | "update
   return value;
 }
 
+describe("OWNER和应用锁定的独立执行结果", () => {
+  function configTask(state: ScreenTask['state'], evidence: Record<string, unknown>) {
+    const value=task(state,[state === 'needs_review' ? 'needs_review' : state === 'succeeded' ? 'succeeded' : 'failed']);
+    value.action='app_config';value.mode='real';value.input!.action='app_config';
+    value.targets[0]!.result={device:state==='succeeded'?'succeeded':'unknown',business:'not_required',shared:'succeeded',evidence:{config:{save:'not_required',restart:'not_required',readback:'not_required',restartRequired:false},...evidence}};
+    return value;
+  }
+  it('仅锁定任务分别显示保存、生效、回读，不把无需普通配置误作未执行',()=>{
+    const wrapper=render(configTask('succeeded',{kiosk:{targetEnabled:true,save:'saved',apply:'applied',readback:'succeeded'}}));
+    try{
+      expect(wrapper.get('[data-kiosk-stage="save"]').text()).toBe('保存：已保存');
+      expect(wrapper.get('[data-kiosk-stage="apply"]').text()).toBe('生效：已执行');
+      expect(wrapper.get('[data-kiosk-stage="readback"]').text()).toBe('回读：已确认');
+      expect(wrapper.find('[data-testid="screen-owner-result"]').exists()).toBe(false);
+      expect(wrapper.get('.screen-result-header .n-tag').text()).toBe(screenStateLabel.succeeded);
+      expect(wrapper.text()).not.toContain('只重启小新');
+    }finally{wrapper.unmount();}
+  });
+  it('OWNER成功但锁定回读未知时保留分段事实，只提供核实不提供重试或重启',()=>{
+    const wrapper=render(configTask('needs_review',{
+      config:{save:'saved',restartRequired:true,restart:'not_started',readback:'succeeded'},
+      owner:{ensure:'applied',readback:'succeeded'},kiosk:{targetEnabled:true,save:'saved',apply:'unknown',readback:'unknown'}
+    }));
+    try{
+      expect(wrapper.get('[data-owner-stage="ensure"]').text()).toBe('设置：已执行');
+      expect(wrapper.get('[data-owner-stage="readback"]').text()).toBe('回读：已确认');
+      expect(wrapper.get('[data-kiosk-stage="save"]').text()).toBe('保存：已保存');
+      expect(wrapper.get('[data-kiosk-stage="apply"]').text()).toBe('生效：待核实');
+      const buttons=wrapper.findAll('button').map(button=>button.text());
+      expect(buttons).toContain('继续核实结果');expect(buttons.some(text=>text.startsWith('重试')||text.startsWith('只重启小新'))).toBe(false);
+    }finally{wrapper.unmount();}
+  });
+  it.each(['pending','unknown'])('外层成功但锁定回读%s时不能显示绿色全部成功',readback=>{
+    const wrapper=render(configTask('succeeded',{kiosk:{targetEnabled:false,save:'saved',apply:'applied',readback}}));
+    try{
+      expect(wrapper.get('.screen-result-header .n-tag').text()).toBe('结果待核实');
+      expect(wrapper.get('tbody .n-tag').text()).toBe('结果待核实');
+      expect(wrapper.text()).toContain('继续核实结果');
+      expect(wrapper.findAllComponents(NTag).every(tag=>tag.props('type')!=='success')).toBe(true);
+    }finally{wrapper.unmount();}
+  });
+  it('OWNER执行未知不会因普通配置无需执行而提供可重放动作',()=>{
+    const wrapper=render(configTask('failed',{owner:{ensure:'unknown',readback:'unknown'}}));
+    try{
+      expect(wrapper.get('[data-owner-stage="ensure"]').text()).toBe('设置：待核实');
+      expect(wrapper.get('tbody .n-tag').text()).toBe('结果待核实');
+      expect(wrapper.text()).toContain('继续核实结果');
+      expect(wrapper.findAll('button').some(button=>button.text().startsWith('重试'))).toBe(false);
+    }finally{wrapper.unmount();}
+  });
+  it('锁定回读明确不同可转入重新读取流程，不能只重启替代锁定修复',async()=>{
+    const wrapper=render(configTask('failed',{kiosk:{targetEnabled:true,save:'saved',apply:'applied',readback:'different'}}));
+    try{
+      expect(wrapper.get('[data-kiosk-stage="readback"]').text()).toBe('回读：与目标不同');
+      expect(wrapper.get('[data-kiosk-stage="readback"]').classes()).toContain('screen-danger');
+      expect(wrapper.text()).not.toContain('只重启小新');
+      await wrapper.findAll('button').find(button=>button.text().startsWith('重试'))!.trigger('click');
+      expect(wrapper.getComponent(ScreenTaskResults).emitted('retry')).toEqual([[['screen-0']]]);
+    }finally{wrapper.unmount();}
+  });
+  it('只读核实后的锁定保存和生效分别显示已核对，不表示重放过动作',()=>{
+    const wrapper=render(configTask('succeeded',{kiosk:{targetEnabled:true,save:'verified',apply:'verified',readback:'succeeded'}}));
+    try{
+      expect(wrapper.get('[data-kiosk-stage="save"]').text()).toBe('保存：已核对保存');
+      expect(wrapper.get('[data-kiosk-stage="apply"]').text()).toBe('生效：已核对生效');
+      expect(wrapper.get('[data-kiosk-stage="readback"]').text()).toBe('回读：已确认');
+    }finally{wrapper.unmount();}
+  });
+});
+
 describe("注册结果仅依据已确认的平台写入", () => {
   it.each([ ["create", "注册成功"], ["update", "更新成功"] ] as const)("%s确认写入后准确显示%s", (mode, label) => {
     const wrapper = render(registrationTask("succeeded", [mode]));

@@ -418,7 +418,7 @@ fn parse_response(text: &str) -> AppResult<Value> {
         return Err(malformed());
     }
     let response: Value = serde_json::from_slice(&bytes).map_err(|_| malformed())?;
-    if !matches!(response["status"].as_str(), Some("ok" | "failed")) {
+    if !matches!(response["status"].as_str(), Some("ok" | "failed" | "prepared" | "pending")) {
         return Err(malformed());
     }
     Ok(response)
@@ -429,10 +429,23 @@ async fn call<P: DeviceCommandPort>(
     ip: &str,
     method: &str,
 ) -> AppResult<Value> {
+    call_with_payload(device,ip,method,None).await
+}
+
+pub(super) async fn call_with_payload<P:DeviceCommandPort>(device:&AdbDevice<P>,ip:&str,method:&str,request:Option<&Value>)->AppResult<Value> {
+    if !["readHome","setHome","clearHome","prepareHomeActivation"].contains(&method)
+        || (method=="prepareHomeActivation")!=request.is_some() {return Err(AppError::InvalidConfig("主屏管理调用参数无效".into()))}
+    let mut args=vec!["shell","content","call","--uri",URI,"--method",method];
+    let payload;
+    if let Some(request)=request {
+        let bytes=serde_json::to_vec(request).map_err(|_|AppError::InvalidConfig("主屏准备参数无法编码".into()))?;
+        if bytes.len()>1024 {return Err(AppError::InvalidConfig("主屏准备参数过长".into()))}
+        payload=format!("payload:s:{}",STANDARD.encode(bytes));args.extend(["--extra",&payload]);
+    }
     let output = device
         .adb(
             ip,
-            &["shell", "content", "call", "--uri", URI, "--method", method],
+            &args,
             Duration::from_secs(20),
             CancellationToken::new(),
         )
@@ -671,9 +684,22 @@ pub fn has_persistent_home(text: &str) -> AppResult<bool> {
 }
 
 pub async fn query<P: DeviceCommandPort>(device: &AdbDevice<P>, ip: &str) -> AppResult<HomeStatus> {
+    query_impl(device, ip, true).await
+}
+
+/// 尚未设置 Owner 时也可检查现有策略和协议；设置动作仍使用严格 query。
+pub async fn query_for_owner_setup<P: DeviceCommandPort>(device: &AdbDevice<P>, ip: &str) -> AppResult<HomeStatus> {
+    query_impl(device, ip, false).await
+}
+
+async fn query_impl<P: DeviceCommandPort>(device: &AdbDevice<P>, ip: &str, require_owner: bool) -> AppResult<HomeStatus> {
     let response = call(device, ip, "readHome").await?;
-    let (owner, reported) = read_data(&response)?;
-    if !owner {
+    query_response(device,ip,&response,require_owner).await
+}
+
+pub(super) async fn query_response<P:DeviceCommandPort>(device:&AdbDevice<P>,ip:&str,response:&Value,require_owner:bool)->AppResult<HomeStatus> {
+    let (owner, reported) = read_data(response)?;
+    if require_owner && !owner {
         return Err(AppError::Conflict(
             response_error(Some("NOT_DEVICE_OWNER")).into(),
         ));
@@ -1454,6 +1480,18 @@ mod tests {
                     .all(|arg| !["su", "setHome", "set-home-activity"].contains(&arg.as_str()))
             );
         }
+    }
+
+    #[tokio::test]
+    async fn owner_setup_can_read_policy_without_claiming_owner_or_setting_it() {
+        let mut replies=status_replies(EMPTY_POLICY);
+        replies[0]=Ok(read_response(false,Some(COMPONENT)));
+        let (device,commands)=device(replies);
+        let status=query_for_owner_setup(&device,"192.0.2.1").await.unwrap();
+        assert!(!status.device_owner);
+        assert!(!status.persistent_preferred);
+        assert!(!status.verified());
+        assert!(commands.calls.lock().unwrap().iter().all(|args| !args.iter().any(|arg|arg=="dpm" || arg=="setHome" || arg=="clearHome")));
     }
     #[tokio::test]
     async fn query_blocks_missing_owner_old_app_and_zero_exit_error() {

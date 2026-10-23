@@ -5,7 +5,7 @@ import { useScreenAdapter } from "@/shared/api/screenAdapter";
 import { useSmartScreensStore } from "@/stores/smartScreens";
 import { screenMaintenanceFingerprint } from "@/shared/model/screenMaintenance";
 import { screenBatchSizeWarning, type ScreenOperationInput, type ScreenPreflightItem } from "@/shared/model/screen";
-import { appConfigChanges, appConfigDisplay, appConfigRestartRequired, appConfigEffectiveAfter, appConfigReadTime, appConfigSources, appEnvironments, appHomeDisplay, appConfigVoiceSupported, appConfigVoiceDisplay, appConfigValue } from "@/shared/model/screenAppConfig";
+import { appConfigChanges, appConfigDisplay, appConfigRestartRequired, appConfigEffectiveAfter, appConfigReadTime, appConfigSources, appEnvironments, appHomeDisplay, appConfigVoiceSupported, appConfigVoiceDisplay, appConfigValue, appOwnerDisplay, appOwnerAllowsDependent, appKioskConfigurationKnown, appKioskTarget, appKioskDisplay } from "@/shared/model/screenAppConfig";
 import type { AppEnvironment, AppConfigScalar, AppConfigVoiceEdit, ScreenAppConfigPatch, ScreenAppConfigRead, ScreenAppConfigDraft } from "@/shared/model/screenAppConfig";
 import { appConfigDifferences, appConfigTextEdit, summarizeAppConfigs, summarizeAppConfigValues } from "@/shared/model/screenAppConfigEditor";
 import { appConfigCurrentValueKnown, appConfigDefinition, appConfigDefinitions, appConfigFieldIssue, appConfigSchema, appConfigVoiceEdit, appConfigVoiceFields, nextAppConfigBooleanMode, safeAppConfigFieldKey } from "@/shared/model/screenAppConfigSchema";
@@ -23,11 +23,14 @@ const edits = reactive<Record<string, Edit>>({ otaUrl: { mode: "keep", value: ""
 const readyMode = ref<"keep" | "on" | "off">("keep");
 const homeMode = ref<"keep" | "on" | "off">("keep");
 const homeActivation = ref(false);
+const ensureDeviceOwner = ref(false);
+const kioskMode = ref<"keep" | "on" | "off">("keep");
 const voiceEdits = reactive<Record<string, AppConfigVoiceEdit>>({});
 const voiceMode = computed(() => voiceEdits.autoStartVoiceEngine?.mode === "set" ? voiceEdits.autoStartVoiceEngine.value === true ? "on" : "off" : "keep");
 const names = reactive<Record<string, Edit>>({});
 const rows = ref<ScreenAppConfigRead[]>([]), included = ref<string[]>([]), checks = ref<ScreenPreflightItem[]>([]);
-const busy = ref(false), error = ref(""), readingId = ref("");
+const busy = ref(false), error = ref(""), readingIds = ref<string[]>([]);
+const readingId = computed(() => readingIds.value[0] ?? "");
 const prepared = ref<ScreenOperationInput>();
 const preparedBatchKey = ref("");
 const savedDraft = ref<ScreenAppConfigDraft|null>(null), freshRead = ref(false);
@@ -73,11 +76,19 @@ function definitionEditable(key: string) {
 const displayFields = computed(() => fields.map(field => ({ ...field, label: definition(`environments.${environment.value}.${field.key}`)?.label ?? field.label })));
 const environmentOptions = computed(() => definition("environments.current")?.options?.filter(option => ["test", "pre", "prod"].includes(String(option.value))).map(option => ({ label: option.label, value: String(option.value) })) ?? appEnvironments);
 const summaries = computed(() => summarizeAppConfigs(selected.value, environment.value));
+const ownerSelfCount = computed(() => selected.value.filter(row => row.owner?.state === "self").length);
+const ownerAllSelf = computed(() => freshRead.value && selected.value.length > 0 && ownerSelfCount.value === selected.value.length);
+const ownerEditable = computed(() => freshRead.value && selected.value.length > 0 && selected.value.every(row => ["self", "none"].includes(row.owner?.state || "")) && selected.value.some(row => row.owner?.state === "none"));
+const ownerDirty = computed(() => ownerEditable.value && ensureDeviceOwner.value);
+const dependentOwnerReady = computed(() => freshRead.value && selected.value.length > 0 && selected.value.every(row => appOwnerAllowsDependent(row, ownerDirty.value)));
+const ownerHint = computed(() => !freshRead.value ? "请先读取设备OWNER状态；选择只加入本次设置意图，不会立即执行。"
+  : selected.value.filter(row => !["self", "none"].includes(row.owner?.state || "")).map(row => `${name(row.screenId)}：${row.owner?.message || appOwnerDisplay(row.owner)}`).join("；")
+    || (ownerAllSelf.value ? "小新已具备设备OWNER权限，此处不提供取消或解除。" : "勾选后加入本次设置意图；后台先确认OWNER成功，才执行主屏和锁定动作。取消勾选只撤销未提交意图，不解除已有OWNER。"));
 const homeSummary = computed(() => summarizeAppConfigValues(selected.value.flatMap(row => row.home?.supported && typeof row.home.enabled === "boolean" ? [row.home.enabled] : [])));
-const homeEditable = computed(() => freshRead.value && selected.value.length > 0 && homeSummary.value.total === selected.value.length);
+const homeEditable = computed(() => dependentOwnerReady.value && homeSummary.value.total === selected.value.length);
 const homeValue = computed(() => homeMode.value === "keep" ? homeSummary.value.value !== false : homeMode.value === "on");
 const homeIndeterminate = computed(() => homeMode.value === "keep" && (homeSummary.value.mixed || (freshRead.value && selected.value.length > homeSummary.value.total)));
-const homeUnavailable = computed(() => freshRead.value && selected.value.some(row => !row.home?.supported || typeof row.home.enabled !== "boolean"));
+const homeUnavailable = computed(() => freshRead.value && (!dependentOwnerReady.value || selected.value.some(row => !row.home?.supported || typeof row.home.enabled !== "boolean")));
 const homeNeedsActivation = computed(() => homeEditable.value && selected.value.some(row => row.home?.enabled && row.home.active !== true));
 const canActivateHome = computed(() => homeNeedsActivation.value && !homeSummary.value.mixed && homeSummary.value.value === true && homeMode.value !== "off");
 const homeDirty = computed(() => homeEditable.value && homeMode.value !== "keep" && selected.value.some(row => row.home?.enabled !== (homeMode.value === "on")));
@@ -85,8 +96,26 @@ const homeActivationDirty = computed(() => canActivateHome.value && homeActivati
 const readyDirty = computed(() => freshRead.value && readyMode.value !== "keep" && selected.value.some(row => row.config!.environments[environment.value].h5ReadyCheckEnabled !== (readyMode.value === "on")));
 const homeHint = computed(() => {
   if (!freshRead.value) return "读取配置后确认实际主屏状态；未修改时保留原设置。";
+  if (!dependentOwnerReady.value) return `${ownerHint.value}。主屏设置需要设备OWNER权限；其他配置可继续修改。`;
   if (homeUnavailable.value) return `${selected.value.filter(row => !row.home?.supported || typeof row.home.enabled !== "boolean").map(row => `${name(row.screenId)}：${row.home?.message || '当前版本不支持或主屏状态未确认'}`).join('；')}。本批次保留主屏设置，其他配置可继续修改。`;
   return `${homeNeedsActivation.value ? "已固定但当前未切到小新主屏，可勾选“切到小新主屏”后保存。" : ""}首次固定并保存后切到小新主屏；取消固定不切换当前桌面。${homeSummary.value.mixed ? "半选时保留各屏原设置，点击依次选择全部固定、全部取消、保留原设置。" : "改回原值即取消修改。"}`;
+});
+const kioskSummary = computed(() => summarizeAppConfigValues(selected.value.flatMap(row => appKioskConfigurationKnown(row) ? [row.kiosk!.configured === false ? true : row.kiosk!.enabled!] : [])));
+const kioskEditable = computed(() => dependentOwnerReady.value && selected.value.every(row => appKioskConfigurationKnown(row) && typeof row.kiosk?.active === "boolean"));
+const kioskValue = computed(() => kioskMode.value === "keep" ? freshRead.value && kioskSummary.value.value === true : kioskMode.value === "on");
+const kioskIndeterminate = computed(() => kioskMode.value === "keep" && ((!freshRead.value && selected.value.length > 0) || kioskSummary.value.mixed || (freshRead.value && selected.value.length > kioskSummary.value.total)));
+function kioskTarget(row: ScreenAppConfigRead) {
+  if (!kioskEditable.value) return undefined;
+  const target = appKioskTarget(row, kioskMode.value);
+  return typeof target === "boolean" && (row.kiosk?.configured === false || row.kiosk?.enabled !== target || row.kiosk?.active !== target) ? target : undefined;
+}
+const kioskDirty = computed(() => selected.value.some(row => kioskTarget(row) !== undefined));
+const kioskHint = computed(() => {
+  if (!freshRead.value) return "请先读取锁定配置及运行状态，不根据未读取的数据设置默认值。";
+  if (!dependentOwnerReady.value) return `${ownerHint.value}。锁定应用需要设备OWNER权限；其他配置可继续修改。`;
+  const unavailable = selected.value.filter(row => !appKioskConfigurationKnown(row) || typeof row.kiosk?.active !== "boolean");
+  if (unavailable.length) return unavailable.map(row => `${name(row.screenId)}：${!row.kiosk?.supported ? row.kiosk?.message || '当前小新不支持应用锁定，请升级后重新读取' : '锁定配置或运行状态未确认，请重新读取'}`).join("；");
+  return "尚未保存锁定设置时默认提出开启目标；已保存值照实显示，保存值与运行状态不同时确认后使其一致。只改锁定不重启应用。半选时保留各屏目标，点击依次选择全部开启、全部关闭、保留原设置。";
 });
 const patches = computed(() => Object.fromEntries(selected.value.map(row => {
   const patch: ScreenAppConfigPatch = { set: {}, clear: [] };
@@ -97,8 +126,11 @@ const patches = computed(() => Object.fromEntries(selected.value.map(row => {
     else if (edit.mode === "clear") patch.clear.push(field);
   }
   if (readyMode.value !== "keep") patch.set[`environments.${environment.value}.h5ReadyCheckEnabled`] = readyMode.value === "on";
+  if (ownerDirty.value && row.owner?.state === "none") patch.ensureDeviceOwner = true;
   if (homeEditable.value && homeMode.value !== "keep" && row.home?.enabled !== (homeMode.value === "on")) patch.homeEnabled = homeMode.value === "on";
   else if (homeActivationDirty.value && row.home?.enabled && row.home.active !== true) patch.homeEnabled = true;
+  const kiosk = kioskTarget(row);
+  if (typeof kiosk === "boolean") patch.kioskEnabled = kiosk;
   if (freshRead.value) for (const field of voiceFields.value) {
     const edit = voiceEdits[field.definition.key];
     if (field.editable && edit?.mode === "set" && edit.value !== null && !appConfigFieldIssue(field.definition, edit.value)) patch.set[field.definition.key] = edit.value;
@@ -112,7 +144,21 @@ const patches = computed(() => Object.fromEntries(selected.value.map(row => {
   if (patch.homeEnabled === row.home?.enabled && (!patch.homeEnabled || row.home?.active === true)) delete patch.homeEnabled;
   return [row.screenId, patch];
 })));
-const changedRows = computed(() => selected.value.filter(row => appConfigChanges(row.config!, patches.value[row.screenId], row.home, appConfigDefinitions(row)).length));
+const changedRows = computed(() => selected.value.filter(row => appConfigChanges(row.config!, patches.value[row.screenId], row.home, appConfigDefinitions(row), row.owner, row.kiosk).length));
+const homeActivationMayReopen = computed(() => freshRead.value && selected.value.some(row => {
+  const patch = patches.value[row.screenId];
+  return patch?.homeEnabled === true
+    && (row.home?.active !== true || appConfigRestartRequired(row.config!, patch, appConfigDefinitions(row)));
+}));
+const homeNeedsUnlock = computed(() => selected.value.filter(row => {
+  const patch = patches.value[row.screenId];
+  return patch?.homeEnabled === true && patch.kioskEnabled !== false
+    && (row.home?.active !== true || appConfigRestartRequired(row.config!, patch, appConfigDefinitions(row)))
+    && (row.kiosk?.enabled === true || row.kiosk?.active === true || ["locked", "pinned"].includes(row.kiosk?.lockTaskMode || ""));
+}));
+const homeUnlockHint = computed(() => homeNeedsUnlock.value.some(row => typeof row.kiosk?.active !== "boolean")
+  ? "锁定运行状态未确认，请先重新读取核实，再选择关闭锁定并激活主屏。"
+  : "固定或激活主屏前需要关闭应用锁定，请在本次明确选择关闭；后台会先解锁再激活主屏。");
 const restartCount = computed(() => changedRows.value.filter(row => appConfigRestartRequired(row.config!, patches.value[row.screenId], appConfigDefinitions(row))).length);
 const voiceDirtyKeys = computed(() => freshRead.value ? voiceFields.value.filter(field => {
   const edit = voiceEdits[field.definition.key];
@@ -157,6 +203,11 @@ function editHome(value: boolean) {
   homeActivation.value = false;
   homeMode.value = nextAppConfigBooleanMode(homeMode.value, value, typeof homeSummary.value.value === "boolean" ? homeSummary.value.value : undefined, homeSummary.value.mixed);
 }
+function editOwner(value: boolean) { if (!busy.value && ownerEditable.value) ensureDeviceOwner.value = value; }
+function editKiosk(value: boolean) {
+  if (busy.value || !kioskEditable.value) return;
+  kioskMode.value = nextAppConfigBooleanMode(kioskMode.value, value, typeof kioskSummary.value.value === "boolean" ? kioskSummary.value.value : undefined, kioskSummary.value.mixed);
+}
 function editVoice(key: string, value: AppConfigScalar | null) {
   const field = voiceFields.value.find(field => field.definition.key === key);
   if (busy.value || !freshRead.value || !field?.editable) return;
@@ -191,7 +242,7 @@ const listRows = computed(() => {
     const patch = patches.value[id] ?? emptyPatch;
     return { screenId: id, read: row, check: checksById.get(id),
       differences: row?.config ? [...appConfigDifferences(row.config, summaries.value, environment.value, appConfigVoiceSupported(row)), ...audioDifferences(row)] : [],
-      changes: row?.config ? appConfigChanges(row.config, patch, row.home, appConfigDefinitions(row)) : [] };
+      changes: row?.config ? appConfigChanges(row.config, patch, row.home, appConfigDefinitions(row), row.owner, row.kiosk) : [] };
   });
 });
 const visibleRows = computed(() => listRows.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value));
@@ -203,7 +254,7 @@ function detailValue(key: string, current: string) {
 }
 const detailShow = computed({ get: () => Boolean(detailId.value), set: (value: boolean) => { if (!value) detailId.value = ""; } });
 function readStatus(row: typeof listRows.value[number]) {
-  if (!row.read) return readingId.value === row.screenId ? "正在读取" : busy.value ? "等待读取" : "未完成读取";
+  if (!row.read) return readingIds.value.includes(row.screenId) ? "正在读取" : busy.value ? "等待读取" : "未完成读取";
   if (!row.read.config) return "读取失败";
   if (row.check) return row.check.state === "blocked" ? "检查未通过" : row.check.state === "ready" ? "检查通过" : "无需修改";
   return freshRead.value || busy.value ? "读取成功" : "待重新读取";
@@ -224,7 +275,7 @@ watch(selectionSizeKey, () => {
     error.value = selectionSizeWarning.value || "所选屏尺寸或范围已变化，请重新读取配置后再检查提交。";
   } else if (step.value === 0 && ["4 寸屏和 10 寸屏不能同时修改配置，请分批选择。", "请先确认所选屏尺寸"].includes(error.value)) error.value = "";
 }, { flush: "sync" });
-watch([environment, switchEnvironment, readyMode, homeMode, homeActivation, () => JSON.stringify(voiceEdits), concurrency, () => JSON.stringify(edits), () => JSON.stringify(names), () => included.value.join("|")], invalidate);
+watch([environment, switchEnvironment, readyMode, homeMode, homeActivation, ensureDeviceOwner, kioskMode, () => JSON.stringify(voiceEdits), concurrency, () => JSON.stringify(edits), () => JSON.stringify(names), () => included.value.join("|")], invalidate);
 watch(canActivateHome, value => { if (freshRead.value && !busy.value && !restoring && !value) homeActivation.value = false; });
 watch(environment, () => { if(restoring)return;for (const edit of Object.values(edits)) Object.assign(edit, { mode: "keep", value: "" }); readyMode.value = "keep"; switchEnvironment.value = false; },{flush:'sync'});
 watch(busy, value => emit("busy", value), { flush: "sync" });
@@ -242,9 +293,9 @@ function flushDraft(){
 }
 // 读取快照只在实际读回变化时复制；编辑参数不反复序列化每台屏的整份schema。
 const draftRowsSnapshot = computed(() => JSON.parse(JSON.stringify(rows.value.map(row => ({ ...row, capabilities: row.capabilities ? { ...row.capabilities, configSchema: undefined } : null })))) as ScreenAppConfigRead[]);
-watch([busy,()=>JSON.stringify({environment:environment.value,switchEnvironment:switchEnvironment.value,edits,readyMode:readyMode.value,homeMode:homeMode.value,homeActivation:homeActivation.value,voiceEdits,names,includedIds:included.value,targetIds:store.selectedIds}),()=>rows.value],()=>{
+watch([busy,()=>JSON.stringify({environment:environment.value,switchEnvironment:switchEnvironment.value,edits,readyMode:readyMode.value,homeMode:homeMode.value,homeActivation:homeActivation.value,ensureDeviceOwner:ensureDeviceOwner.value,kioskMode:kioskMode.value,voiceEdits,names,includedIds:included.value,targetIds:store.selectedIds}),()=>rows.value],()=>{
   if(busy.value||restoring||step.value!==1||!rows.value.length||!useScreenAdapter().saveAppConfigDraft)return;
-  queuedDraft={project:store.projectId,value:{...JSON.parse(JSON.stringify({environment:environment.value,switchEnvironment:switchEnvironment.value,edits,readyMode:readyMode.value,homeMode:homeMode.value,homeActivation:homeActivation.value,voiceMode:voiceMode.value,voiceEdits,names,includedIds:included.value,targetIds:store.selectedIds})),rows:draftRowsSnapshot.value} as ScreenAppConfigDraft};
+  queuedDraft={project:store.projectId,value:{...JSON.parse(JSON.stringify({environment:environment.value,switchEnvironment:switchEnvironment.value,edits,readyMode:readyMode.value,homeMode:homeMode.value,homeActivation:homeActivation.value,ensureDeviceOwner:ensureDeviceOwner.value?true:undefined,kioskMode:kioskMode.value,voiceMode:voiceMode.value,voiceEdits,names,includedIds:included.value,targetIds:store.selectedIds})),rows:draftRowsSnapshot.value} as ScreenAppConfigDraft};
   if(draftTimer)clearTimeout(draftTimer);draftTimer=setTimeout(()=>void flushDraft(),400);
 });
 function restoreDraft(){
@@ -254,11 +305,12 @@ function restoreDraft(){
   const warning=batchSizeWarning(ids);
   if(warning){error.value=warning === "请先确认所选屏尺寸" ? "此草稿包含尺寸未确认的屏，不能继续本批配置；请先确认所选屏尺寸。" : "此草稿包含不同尺寸的屏，不能继续本批配置；请按尺寸重新选择。";return;}
   restoring=true;environment.value=draft.environment;switchEnvironment.value=draft.switchEnvironment;readyMode.value=draft.readyMode;homeMode.value=draft.homeMode??"keep";homeActivation.value=draft.homeActivation===true;restoreVoiceEdits(draft);
+  ensureDeviceOwner.value=draft.ensureDeviceOwner===true;kioskMode.value=["on","off"].includes(draft.kioskMode||"")?draft.kioskMode!:"keep";
   Object.assign(edits,draft.edits);Object.assign(names,draft.names);store.selectedIds=ids;rows.value=draft.rows.filter(row=>ids.includes(row.screenId));included.value=draft.includedIds.filter(id=>ids.includes(id));
   freshRead.value=false;invalidate();step.value=1;restoring=false;
 }
-function reset() { ++generation; rows.value = []; included.value = []; invalidate(); freshRead.value=false;busy.value = false; error.value = ""; step.value = 0; store.openedTaskId = ""; page.value=1;detailId.value="";for(const key of Object.keys(names))delete names[key];for(const field of fields)keepAddress(field.key);readyMode.value="keep";homeMode.value="keep";homeActivation.value=false;resetVoiceEdits();switchEnvironment.value=false; }
-async function selectAgain() { await flushDraft(); freshRead.value = false; invalidate(); error.value = ""; step.value = 0; }
+function reset() { ++generation; rows.value = []; included.value = []; readingIds.value = []; invalidate(); freshRead.value=false;busy.value = false; error.value = ""; step.value = 0; store.openedTaskId = ""; page.value=1;detailId.value="";for(const key of Object.keys(names))delete names[key];for(const field of fields)keepAddress(field.key);readyMode.value="keep";homeMode.value="keep";homeActivation.value=false;ensureDeviceOwner.value=false;kioskMode.value="keep";resetVoiceEdits();switchEnvironment.value=false; }
+async function selectAgain() { const request = ++generation; freshRead.value = false; invalidate(); readingIds.value = []; busy.value = false; await flushDraft(); if (request !== generation) return; error.value = ""; step.value = 0; }
 async function read() {
   if(busy.value)return;
   const ids = [...store.selectedIds], warning = batchSizeWarning(ids);
@@ -275,22 +327,42 @@ async function read() {
   };
   const continuing = step.value === 1, previousIncluded = new Set(included.value), previousRows = new Set(rows.value.map(row => row.screenId));
   page.value = 1; detailId.value = "";
-  if (!continuing) { for (const field of fields) keepAddress(field.key); readyMode.value = "keep"; homeMode.value = "keep"; homeActivation.value = false; resetVoiceEdits(); switchEnvironment.value = false; for (const id of Object.keys(names)) delete names[id]; }
-  rows.value = []; included.value = []; invalidate(); freshRead.value=false;error.value = ""; busy.value = true; step.value = 1;
+  if (!continuing) { for (const field of fields) keepAddress(field.key); readyMode.value = "keep"; homeMode.value = "keep"; homeActivation.value = false; ensureDeviceOwner.value=false;kioskMode.value="keep"; resetVoiceEdits(); switchEnvironment.value = false; for (const id of Object.keys(names)) delete names[id]; }
+  rows.value = []; included.value = []; readingIds.value = []; invalidate(); freshRead.value=false;error.value = ""; busy.value = true; step.value = 1;
   try {
-    for (const id of ids) {
-      if (!readBatchCurrent()) return;
-      readingId.value = id;
-      const result = await adapter.readAppConfig(project, [id]);
-      if (!readBatchCurrent()) return;
-      rows.value.push(...result);
-      for (const row of result) { names[row.screenId] ??= { mode: "keep", value: "" }; if (row.config && (!continuing || !previousRows.has(row.screenId) || previousIncluded.has(row.screenId))) included.value.push(row.screenId); }
-    }
+    const completed = new Map<string, ScreenAppConfigRead>(), acceptedIds = new Set<string>();
+    let next = 0;
+    const worker = async () => {
+      while (readBatchCurrent() && next < ids.length) {
+        const id = ids[next++]!;
+        readingIds.value.push(id);
+        let row: ScreenAppConfigRead;
+        try {
+          // 每个 worker 只请求一台；后端全局许可再限制跨页面的设备读取总量。
+          const result = await adapter.readAppConfig!(project, [id]);
+          if (!Array.isArray(result) || result.length !== 1 || result[0]?.screenId !== id) throw new Error("读取结果与目标屏不一致，请重新读取");
+          row = result[0];
+        } catch (cause) {
+          row = { screenId: id, readAt: new Date().toISOString(), config: null, capabilities: null, message: cause instanceof Error ? cause.message : "读取配置失败，请重新读取" };
+        }
+        if (!readBatchCurrent()) return;
+        readingIds.value = readingIds.value.filter(activeId => activeId !== id);
+        completed.set(id, row);
+        rows.value = ids.flatMap(screenId => completed.has(screenId) ? [completed.get(screenId)!] : []);
+        names[id] ??= { mode: "keep", value: "" };
+        if (row.config && (!continuing || !previousRows.has(id) || previousIncluded.has(id))) acceptedIds.add(id);
+        included.value = ids.filter(screenId => acceptedIds.has(screenId));
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, ids.length) }, worker));
+    if (!readBatchCurrent()) return;
     if (!continuing) {
       const current = summaries.value.current.value;
       if (current === "test" || current === "pre" || current === "prod") environment.value = current;
     }
     freshRead.value=true;
+    if (!ownerEditable.value) ensureDeviceOwner.value = false;
+    if (kioskMode.value !== "keep" && kioskEditable.value && !kioskDirty.value) kioskMode.value = "keep";
     if (!canActivateHome.value) homeActivation.value = false;
     if (homeMode.value !== "keep" && !homeDirty.value) homeMode.value = "keep";
     if (readyMode.value !== "keep" && !readyDirty.value) readyMode.value = "keep";
@@ -301,13 +373,14 @@ async function read() {
       if (field.editable && edit?.mode === "set" && includedRows.value.every(row => row.config && appConfigValue(row.config, field.definition.key) === edit.value)) voiceEdits[field.definition.key] = { mode: "keep", value: null };
     }
   } catch (cause) { if (generation === request) error.value = (cause as Error).message; }
-  finally { if (generation === request) { busy.value = false; readingId.value = ""; } }
+  finally { if (generation === request) { busy.value = false; readingIds.value = []; } }
 }
 async function prepare() {
   if(busy.value)return;
   const warning = batchSizeWarning(included.value);
   if (warning) { error.value = warning; invalidate(); return; }
   if(!freshRead.value){error.value='请先重新读取屏端当前配置，再检查修改内容';return;}
+  if (homeNeedsUnlock.value.length) { error.value=homeUnlockHint.value; invalidate(); return; }
   if (voiceValidationErrors.value.length) { error.value = voiceValidationErrors.value.join("；"); return; }
   if (!changedRows.value.length) { error.value = "请至少选择一项需要修改的配置"; return; }
   const adapter = useScreenAdapter();
@@ -399,10 +472,18 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
             <div class="screen-config-check-control" :class="{ 'is-edited': readyDirty }">
               <n-checkbox :checked="readyValue" :indeterminate="readyMode === 'keep' && summaries.h5ReadyCheckEnabled.mixed" :disabled="busy || !definitionEditable(`environments.${environment}.h5ReadyCheckEnabled`)" size="small" aria-label="H5检测" :title="summaries.h5ReadyCheckEnabled.mixed ? '半选时保留各屏原设置，点击依次选择全部开启、全部关闭、保留原设置。' : undefined" @update:checked="editReady">{{ definition(`environments.${environment}.h5ReadyCheckEnabled`)?.label || '检查H5地址' }}</n-checkbox>
             </div>
+            <div class="screen-config-check-control" :class="{ 'is-edited': ownerDirty }" :title="ownerHint" data-testid="screen-config-owner">
+              <span v-if="ownerAllSelf" class="screen-config-owner-state">✓ 已具备设备OWNER权限</span>
+              <template v-else><n-checkbox :checked="ensureDeviceOwner" :indeterminate="!ensureDeviceOwner && ownerSelfCount > 0" :disabled="busy || !ownerEditable" size="small" aria-label="设置小新为设备OWNER" @update:checked="editOwner">设置小新为设备OWNER</n-checkbox><small v-if="freshRead && !ownerEditable" class="screen-warning">不可改</small></template>
+            </div>
             <div class="screen-config-check-control screen-config-home-control" :title="homeHint" data-testid="screen-config-home">
               <span class="screen-config-check-control" :class="{ 'is-edited': homeDirty }"><n-checkbox :checked="homeValue" :indeterminate="homeIndeterminate" :disabled="busy || !homeEditable" size="small" aria-label="固定小新为主屏" @update:checked="editHome">固定小新为主屏</n-checkbox></span>
               <span v-if="canActivateHome" class="screen-config-check-control screen-config-home-activation" :class="{ 'is-edited': homeActivationDirty }">(<n-checkbox v-model:checked="homeActivation" :disabled="busy" size="small" aria-label="切到小新主屏">切到小新主屏</n-checkbox>)</span>
               <small v-else-if="homeUnavailable" class="screen-warning">不可改</small>
+            </div>
+            <div class="screen-config-check-control" :class="{ 'is-edited': kioskDirty }" :title="kioskHint" data-testid="screen-config-kiosk">
+              <n-checkbox :checked="kioskValue" :indeterminate="kioskIndeterminate" :disabled="busy || !kioskEditable" size="small" aria-label="锁定应用" @update:checked="editKiosk">锁定应用</n-checkbox>
+              <small v-if="freshRead && !kioskEditable" class="screen-warning">不可改</small>
             </div>
             <div class="screen-config-check-control" :class="{ 'is-edited': voiceDirtyKeys.length > 0 }" data-testid="screen-config-voice">
               <screen-voice-config :fields="voiceFields" :edits="voiceEdits" :dirty-keys="voiceDirtyKeys" :ready="freshRead" :busy="busy" :selected-count="included.length" :schema-errors="voiceSchemaErrors" :screen-name="name" @edit="editVoice" />
@@ -410,7 +491,7 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
           </div>
           <div class="screen-config-reread">
             <n-button size="small" :loading="Boolean(readingId)" :disabled="busy || Boolean(selectionSizeWarning) || !store.selectedIds.length" @click="read">重新读取配置</n-button>
-            <span v-if="readingId" class="screen-config-read-progress" :title="`正在读取 ${name(readingId)} · ${rows.length}/${store.selectedIds.length} 台`"><span>正在读取 {{ name(readingId) }}</span><span>{{ rows.length }}/{{ store.selectedIds.length }} 台</span></span>
+            <span v-if="readingId" class="screen-config-read-progress" :title="`正在读取 ${readingIds.map(name).join('、')} · 已完成 ${rows.length}/${store.selectedIds.length} 台`"><span>{{ readingIds.length > 1 ? `正在读取 ${readingIds.length} 台` : `正在读取 ${name(readingId)}` }}</span><span>已完成 {{ rows.length }}/{{ store.selectedIds.length }} 台</span></span>
             <span v-else class="screen-muted" title="未修改项各自保留；有差异时展示多数值。">未修改项各自保留；有差异时展示多数值。</span>
           </div>
         </div>
@@ -443,7 +524,9 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
       </section>
       <div class="screen-config-pagination"><span class="screen-muted">共 {{ listRows.length }} 台 · 已选 {{ selected.length }} 台<span v-if="rows.some(row => !row.config)" class="screen-warning"> · {{ rows.filter(row => !row.config).length }} 台读取失败</span></span><n-pagination v-model:page="page" v-model:page-size="pageSize" :item-count="listRows.length" :page-sizes="[20, 50, 100]" :page-slot="5" size="small" show-size-picker /></div>
       <p v-if="voiceValidationErrors.length" class="screen-config-validation screen-warning">{{ voiceValidationErrors.join('；') }}</p>
-      <div class="screen-config-submit"><span>本次修改 {{ changedRows.length }} 台 · 预计重启 {{ restartCount }} 台</span><label>并发台数<n-input-number v-model:value="concurrency" :min="1" :max="3" :disabled="busy" size="small" /></label><n-button v-if="!prepared" size="small" type="primary" :loading="busy && !readingId" :disabled="busy || Boolean(includedSizeWarning) || !changedRows.length || !freshRead || voiceValidationErrors.length > 0" @click="prepare">检查修改内容</n-button><n-button v-else size="small" type="success" :loading="busy" :disabled="busy || Boolean(includedSizeWarning) || !freshRead || !readyIds.length" @click="submit">确认修改 {{ readyIds.length }} 台</n-button></div>
+      <p v-if="homeNeedsUnlock.length" class="screen-config-validation screen-warning" data-testid="screen-config-unlock-required">{{ homeUnlockHint }}</p>
+      <p v-if="homeActivationMayReopen" class="screen-config-validation screen-muted" data-testid="screen-config-home-impact">切到小新主屏可能重新打开页面，当前语音对话会结束。</p>
+      <div class="screen-config-submit"><span>本次修改 {{ changedRows.length }} 台 · 预计重启 {{ restartCount }} 台</span><label>并发台数<n-input-number v-model:value="concurrency" :min="1" :max="3" :disabled="busy" size="small" /></label><n-button v-if="!prepared" size="small" type="primary" :loading="busy && !readingId" :disabled="busy || Boolean(includedSizeWarning) || !changedRows.length || !freshRead || voiceValidationErrors.length > 0 || homeNeedsUnlock.length > 0" @click="prepare">检查修改内容</n-button><n-button v-else size="small" type="success" :loading="busy" :disabled="busy || Boolean(includedSizeWarning) || !freshRead || !readyIds.length || homeNeedsUnlock.length > 0" @click="submit">确认修改 {{ readyIds.length }} 台</n-button></div>
     </div>
     <div v-else class="screen-config-results"><screen-task-results v-if="task" :task="task" @retry="retry" @restart="restart" /><p v-else>正在读取任务结果…</p><footer class="screen-config-result-footer"><n-button size="small" :disabled="busy || !task || Boolean(running)" @click="reset">新的配置操作</n-button></footer></div>
     <n-modal v-model:show="detailShow" preset="card" :aria-label="`${name(detailId)} · 配置详情`" class="screen-config-detail-modal" :style="{ width: 'min(760px, 94vw)' }" :bordered="false" :auto-focus="false">
@@ -457,7 +540,10 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
             <dt>当前运行：</dt><dd :class="{ 'is-edited': detailChanges.has('environments.current') }" data-config-field="environments.current">{{ detailValue('environments.current', appConfigDisplay(detail.read.config.environments.current, true)) }}<span class="screen-muted"> · 查看{{ appConfigDisplay(environment, true) }}配置</span></dd>
             <template v-for="field in fields" :key="field.key"><dt>{{ field.label }}：</dt><dd :class="{ 'is-edited': detailChanges.has(`environments.${environment}.${field.key}`) }" :data-config-field="`environments.${environment}.${field.key}`">{{ detailValue(`environments.${environment}.${field.key}`, detail.read.config.environments[environment][field.key] || '未设置') }}</dd></template>
             <dt>H5检测：</dt><dd :class="{ 'is-edited': detailChanges.has(`environments.${environment}.h5ReadyCheckEnabled`) }" :data-config-field="`environments.${environment}.h5ReadyCheckEnabled`">{{ detailValue(`environments.${environment}.h5ReadyCheckEnabled`, appConfigDisplay(detail.read.config.environments[environment].h5ReadyCheckEnabled)) }}</dd>
+            <dt>设备OWNER权限：</dt><dd :class="{ 'is-edited': detailChanges.has('ensureDeviceOwner') }" data-config-field="ensureDeviceOwner">{{ detailValue('ensureDeviceOwner', appOwnerDisplay(detail.read.owner)) }}</dd>
             <dt>固定小新为主屏：</dt><dd :class="{ 'is-edited': detailChanges.has('homeEnabled') }" data-config-field="homeEnabled">{{ detailValue('homeEnabled', appHomeDisplay(detail.read.home)) }}</dd>
+            <dt>锁定应用：</dt><dd :class="{ 'is-edited': detailChanges.has('kioskEnabled') }" data-config-field="kioskEnabled">{{ detailValue('kioskEnabled', appKioskDisplay(detail.read.kiosk)) }}</dd>
+            <dt>锁定运行状态：</dt><dd data-config-field="kioskActive">{{ detail.read.kiosk?.active === true ? '当前已锁定' : detail.read.kiosk?.active === false ? '当前未锁定' : '未确认，请重新读取核实' }}</dd>
             <dt>语音引擎随应用启动：</dt><dd :class="{ 'is-edited': detailChanges.has('autoStartVoiceEngine') }" data-config-field="autoStartVoiceEngine">{{ detailValue('autoStartVoiceEngine', appConfigVoiceDisplay(detail.read)) }}</dd>
             <dt>语音使用值（{{ appConfigSources[detail.read.config.environments[environment].wsSource] }}）：</dt><dd>{{ detail.read.config.environments[environment].effectiveWsUrl || '未设置' }}</dd>
             <dt>网页使用值（{{ appConfigSources[detail.read.config.environments[environment].h5Source] }}）：</dt><dd>{{ detail.read.config.environments[environment].effectiveH5Url }}</dd>

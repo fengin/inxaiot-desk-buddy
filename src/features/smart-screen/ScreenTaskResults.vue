@@ -24,7 +24,7 @@ const isNtp = computed(() => props.task.action === "ntp");
 const isPing = computed(() => props.task.action === "ping");
 const isRegistration = computed(() => props.task.action === "register");
 const registrationConfirmed = computed(() => props.task.targets.length > 0 && props.task.targets.every(target => target.result?.business === "succeeded"));
-const headerConfirmed = computed(() => props.task.state === "succeeded" && (!isRegistration.value || (props.task.mode === "real" && registrationConfirmed.value)));
+const headerConfirmed = computed(() => props.task.state === "succeeded" && (!isRegistration.value || (props.task.mode === "real" && registrationConfirmed.value)) && (!isConfig.value || props.task.targets.every(managementConfirmed)));
 const showScreenDetail = computed(() => ["ping", "inspect", "mac"].includes(props.task.action));
 const visibleTargets = computed(() => props.task.targets.slice((page.value - 1) * pageSize.value, page.value * pageSize.value));
 const columns = computed(() => [
@@ -40,12 +40,44 @@ watch(() => props.task.targets.length, count => { page.value = Math.min(page.val
 watch([page, pageSize], () => { if (resultBody.value) resultBody.value.scrollTop = 0; });
 const diagnosticText=ref(""),diagnosticOpen=ref(false),diagnosticBusy=ref(false);
 async function diagnostics(exportFile=false){diagnosticBusy.value=true;try{const adapter=useScreenAdapter();if(exportFile){const path=await adapter.exportDiagnostics?.(props.task.projectId,props.task.id);if(path)message.success(`诊断已导出：${path}`);}else{diagnosticText.value=await adapter.readDiagnostics?.(props.task.projectId,props.task.id)??"";diagnosticOpen.value=true;}}catch(cause){message.error((cause as Error).message);}finally{diagnosticBusy.value=false;}}
-const retryIds = computed(() => props.task.targets.filter((t) => ["failed", "cancelled"].includes(t.state) && !(props.task.action === "install" && (t.result?.device === "succeeded" || ["installed", "verified"].includes(String(t.result?.evidence?.phase)))) && !(props.task.action==='app_config'&&['saved','verified','unchanged','not_required'].includes(String(configResult(t)?.save))&&!homeNeedsRetry(t))).map((t) => t.screenId));
+const retryIds = computed(() => props.task.targets.filter((t) => ["failed", "cancelled"].includes(t.state) && !managementUncertain(t) && !(props.task.action === "install" && (t.result?.device === "succeeded" || ["installed", "verified"].includes(String(t.result?.evidence?.phase)))) && !(props.task.action==='app_config'&&['saved','verified','unchanged','not_required'].includes(String(configResult(t)?.save))&&!homeNeedsRetry(t)&&!managementNeedsRetry(t))).map((t) => t.screenId));
 const resultLabels: Record<string,string> = { not_required:"无需更新",pending:"待保存",succeeded:"已完成",failed:"未完成",unknown:"待核实",skipped:"无需执行",cancelled:"已取消" };
 function configResult(target:ScreenTaskTarget){return target.result?.evidence?.config as Record<string,unknown>|undefined;}
 function ntpResult(target: ScreenTaskTarget) { return target.result?.evidence?.ntp as ScreenNtpEvidence | undefined; }
 function homeResult(target: ScreenTaskTarget) { return target.result?.evidence?.home as ScreenHomeEvidence | undefined; }
 function homeNeedsRetry(target: ScreenTaskTarget) { const home = homeResult(target); return home?.save === "rejected" || home?.save === "pending" || home?.readback === "failed" || (home?.targetEnabled && (home.activation === "pending" || home.runtimeReadback === "failed")); }
+function managementResult(target: ScreenTaskTarget, kind: "owner" | "kiosk") {
+  const value = target.result?.evidence?.[kind];
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+function managementConfirmed(target: ScreenTaskTarget) {
+  return (["owner", "kiosk"] as const).every(kind => !managementResult(target, kind) || managementResult(target, kind)?.readback === "succeeded");
+}
+function managementUncertain(target: ScreenTaskTarget) {
+  return (["owner", "kiosk"] as const).some(kind => {
+    const value = managementResult(target, kind);
+    if (!value) return false;
+    return [value.ensure, value.save, value.apply, value.readback].includes("unknown")
+      || (value.readback === "pending" && [value.ensure, value.save, value.apply].some(stage => ["applied", "saved", "verified", "unchanged"].includes(String(stage))));
+  });
+}
+function managementNeedsRetry(target: ScreenTaskTarget) {
+  return !managementUncertain(target) && (["owner", "kiosk"] as const).some(kind => {
+    const value = managementResult(target, kind);
+    return value && value.readback !== "succeeded";
+  });
+}
+const ownerStages = [{ key: "ensure", label: "设置" }, { key: "readback", label: "回读" }];
+const kioskStages = [{ key: "save", label: "保存" }, { key: "apply", label: "生效" }, { key: "readback", label: "回读" }];
+function managementStageLabel(target: ScreenTaskTarget, kind: "owner" | "kiosk", stage: string) {
+  const value = String(managementResult(target, kind)?.[stage] ?? "pending");
+  return ({ pending: "等待处理", unknown: "待核实", applied: "已执行", saved: "已保存", unchanged: kind === "owner" ? "已具备" : "已相同", verified: stage === "apply" ? "已核对生效" : "已核对保存", succeeded: "已确认", different: "与目标不同", not_required: "无需执行" } as Record<string, string>)[value] ?? "未确认";
+}
+function managementStageClass(target: ScreenTaskTarget, kind: "owner" | "kiosk", stage: string) {
+  const value = managementResult(target, kind)?.[stage];
+  return value === "different" ? "screen-danger" : value === "unknown" || value === "pending" ? "screen-warning" : "";
+}
+const managementVerificationNeeded = computed(() => props.task.targets.some(managementUncertain));
 const ntpStages = ["save", "activation", "sync"] as const;
 function ntpResultLabel(target: ScreenTaskTarget, stage: typeof ntpStages[number]) {
   const value = ntpResult(target)?.[stage];
@@ -59,7 +91,7 @@ function ntpSummary(target: ScreenTaskTarget) {
   return [`服务器：${ntpServerDisplay(value.before?.server)} → ${ntpServerDisplay(value.targetServer)}`, value.after ? `自动校时：${value.after.autoTime ? "开启" : "关闭"}` : "", confirmed ? `已确认授时源：${source}${value.syncEvidence!.clockOffsetSeconds == null ? '' : ` · 偏差 ${value.syncEvidence!.clockOffsetSeconds} 秒`}` : "尚未取得授时证据"].filter(Boolean).join(" · ");
 }
 const configRestartIds=computed(()=>props.task.action==='app_config'?props.task.targets.filter(target=>{
-  const result=configResult(target);return target.state!=='needs_review'&&result&&['saved','verified'].includes(String(result.save))&&result.restartRequired===true&&result.restart!=='succeeded';
+  const result=configResult(target);return target.state!=='needs_review'&&managementConfirmed(target)&&result&&['saved','verified'].includes(String(result.save))&&result.restartRequired===true&&result.restart!=='succeeded';
 }).map(target=>target.screenId):[]);
 const configLabels:Record<string,string>={pending:'等待处理',unknown:'待核实',saved:'已保存',verified:'已回读确认',partial:'部分保存',failed:'未完成',unchanged:'值已相同',not_required:'无需重启',not_started:'未重启',not_confirmed:'未确认重启',succeeded:'已完成',different:'与本次设置不同'};
 const configStages = ["save", "restart", "readback"] as const;
@@ -95,6 +127,7 @@ function pingResult(target: ScreenTaskTarget) {
   return observation.ping === "online" || observation.ping === "offline" ? observation.ping : null;
 }
 function targetStateLabel(target: ScreenTaskTarget) {
+  if (isConfig.value && !["queued", "running"].includes(target.state) && (managementUncertain(target) || (target.state === "succeeded" && !managementConfirmed(target)))) return "结果待核实";
   if (isRegistration.value) {
     if (props.task.mode !== "real") return target.state === "succeeded" ? "演示完成" : displayState(target.state);
     if (target.result?.business === "succeeded") return registrationSuccessLabel(target);
@@ -109,6 +142,7 @@ function targetStateLabel(target: ScreenTaskTarget) {
   return "未知";
 }
 function targetStateType(target: ScreenTaskTarget): "success" | "error" | "info" | "warning" | "default" {
+  if (isConfig.value && !["queued", "running"].includes(target.state) && (managementUncertain(target) || (target.state === "succeeded" && !managementConfirmed(target)))) return "warning";
   if (isRegistration.value) {
     if (props.task.mode !== "real") return "info";
     if (target.result?.business === "succeeded") return "success";
@@ -151,6 +185,7 @@ function registrationSuccessLabel(target: ScreenTaskTarget) {
   return "平台写入已确认";
 }
 function displayState(state: keyof typeof screenStateLabel) {
+  if (isConfig.value && state === "succeeded" && !props.task.targets.every(managementConfirmed)) return "结果待核实";
   if (isRegistration.value) {
     if (props.task.mode !== "real") return state === "succeeded" ? "演示完成" : screenStateLabel[state];
     if (state === "succeeded") {
@@ -188,7 +223,7 @@ async function openGlobalLogs() {
     <div class="screen-task-progress"><n-progress type="line" :percentage="progress" :show-indicator="false" :status="task.state === 'failed' ? 'error' : headerConfirmed ? 'success' : 'default'" /><b>{{ progress }}%</b><span>{{ completed }} / {{ task.targets.length }} 台已处理</span></div>
     <div class="screen-inline-actions screen-result-actions">
       <n-button v-if="running" size="small" :disabled="task.state === 'cancelling'" @click="cancel">{{ task.state === 'cancelling' ? '正在停止后续操作' : '取消后续执行' }}</n-button>
-      <n-button v-if="task.state === 'needs_review'" size="small" type="warning" @click="verify">继续核实结果</n-button>
+      <n-button v-if="task.state === 'needs_review' || (!running && managementVerificationNeeded)" size="small" type="warning" @click="verify">继续核实结果</n-button>
       <n-button v-if="!running&&configRestartIds.length" size="small" @click="$emit('restart',configRestartIds)">只重启小新 {{configRestartIds.length}} 台</n-button>
       <n-button v-if="!running && retryIds.length && !['status','version_sync','merge'].includes(task.action)" size="small" @click="$emit('retry', retryIds)"><template #icon><RefreshCw :size="14" /></template>重试 {{ retryIds.length }} 台失败 / 未执行设备</n-button>
       <n-button v-if="!running && ['install', 'register', 'inspect', 'version_sync'].includes(task.action)" size="small" type="primary" secondary :disabled="task.state === 'needs_review'" @click="$emit('versions', task.targets.map(target => target.screenId))">核对版本并同步平台</n-button>
@@ -204,7 +239,7 @@ async function openGlobalLogs() {
         <td><n-tag size="small" :bordered="false" :type="targetStateType(target)">{{ targetStateLabel(target) }}</n-tag></td>
         <template v-if="isConfig"><td v-for="stage in configStages" :key="stage" :class="configStageClass(target, stage)" :title="configStageLabel(target, stage)">{{ configStageLabel(target, stage) }}</td></template>
         <template v-if="isNtp"><td v-for="stage in ntpStages" :key="stage" :class="ntpResult(target)?.[stage] === 'failed' ? 'screen-danger' : ntpResult(target)?.[stage] === 'unknown' ? 'screen-warning' : ''" :title="ntpResultLabel(target, stage)">{{ ntpResultLabel(target, stage) }}</td></template>
-        <td><div class="screen-result-message" :title="targetMessage(target)">{{ targetMessage(target) }}</div><div v-if="isNtp" class="screen-secondary" :title="ntpSummary(target)">{{ ntpSummary(target) }}</div><div v-if="isConfig && failedFields(target)" class="screen-result-message screen-warning" :title="`未保存字段：${failedFields(target)}`">未保存字段：{{ failedFields(target) }}</div><div v-if="target.result" class="screen-secondary" :title="resultSummary(target)">{{ resultSummary(target) }}</div></td>
+        <td><div class="screen-result-message" :title="targetMessage(target)">{{ targetMessage(target) }}</div><div v-if="isConfig && managementResult(target, 'owner')" class="screen-management-stages" data-testid="screen-owner-result"><b>OWNER</b><span v-for="stage in ownerStages" :key="stage.key" :class="managementStageClass(target, 'owner', stage.key)" :data-owner-stage="stage.key">{{ stage.label }}：{{ managementStageLabel(target, 'owner', stage.key) }}</span></div><div v-if="isConfig && managementResult(target, 'kiosk')" class="screen-management-stages" data-testid="screen-kiosk-result"><b>应用锁定</b><span v-for="stage in kioskStages" :key="stage.key" :class="managementStageClass(target, 'kiosk', stage.key)" :data-kiosk-stage="stage.key">{{ stage.label }}：{{ managementStageLabel(target, 'kiosk', stage.key) }}</span></div><div v-if="isNtp" class="screen-secondary" :title="ntpSummary(target)">{{ ntpSummary(target) }}</div><div v-if="isConfig && failedFields(target)" class="screen-result-message screen-warning" :title="`未保存字段：${failedFields(target)}`">未保存字段：{{ failedFields(target) }}</div><div v-if="target.result" class="screen-secondary" :title="resultSummary(target)">{{ resultSummary(target) }}</div></td>
         <td v-if="showScreenDetail"><n-button size="tiny" text type="primary" title="查看本机保存的最新屏详情" @click="emit('detail', target.screenId)">查看屏详情</n-button></td>
       </tr><tr v-if="!task.targets.length"><td :colspan="columns.length" class="screen-muted">暂无设备结果</td></tr></tbody></table></div>
     </div>
@@ -231,5 +266,6 @@ async function openGlobalLogs() {
 .screen-result-table td{height:var(--inx-table-row-height);padding:4px 8px;line-height:20px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;vertical-align:middle}
 .screen-result-table .screen-secondary{margin-top:1px;max-width:none;font-size:10px;line-height:15px}
 .screen-result-message{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.screen-result-message.screen-warning{font-size:11px;line-height:16px}
+.screen-management-stages{display:flex;flex-wrap:wrap;gap:2px 8px;font-size:10px;line-height:16px;white-space:normal}.screen-management-stages b{font-weight:500}
 .screen-result-pagination{display:flex;flex:none;align-items:center;justify-content:space-between;gap:8px;min-height:28px;font-size:11px}
 </style>

@@ -1,0 +1,37 @@
+ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)
+Display #0 (activities from top to bottom):
+  Stack #43: type=standard mode=fullscreen
+  isSleeping=false
+    Task id #88
+    * TaskRecord{96a2728 #88 I=chat.xiaoxin.app/.MainActivity U=0 StackId=43 sz=1}
+      intent={flg=0x10000000 cmp=chat.xiaoxin.app/.MainActivity}
+      autoRemoveRecents=false isPersistable=true numFullscreen=1 activityType=1
+      * Hist #0: ActivityRecord{2686a6d u0 chat.xiaoxin.app/.MainActivity t88}
+          app=ProcessRecord{b110c41 17304:chat.xiaoxin.app/u0a106}
+          state=RESUMED stopped=false delayedResume=false finishing=false
+          keysPaused=false inHistory=true visible=true sleeping=false idle=true mStartingWindowState=STARTING_WINDOW_NOT_SHOWN
+          mActivityType=standard
+    Running activities (most recent first):
+    mResumedActivity: ActivityRecord{2686a6d u0 chat.xiaoxin.app/.MainActivity t88}
+  Stack #0: type=home mode=fullscreen
+  isSleeping=false
+  Stack #40: type=standard mode=fullscreen
+  isSleeping=false
+    Task id #85
+    * TaskRecord{d8a11b7 #85 A=com.android.settings U=0 StackId=40 sz=1}
+      intent={act=android.settings.SETTINGS flg=0x10000000 cmp=com.android.settings/.homepage.SettingsHomepageActivity}
+      autoRemoveRecents=false isPersistable=true numFullscreen=1 activityType=1
+      * Hist #0: ActivityRecord{30ebcb9 u0 com.android.settings/.homepage.SettingsHomepageActivity t85}
+          app=ProcessRecord{60547cf 2409:com.android.settings/1000}
+          state=STOPPED stopped=true delayedResume=false finishing=false
+          keysPaused=false inHistory=true visible=false sleeping=false idle=true mStartingWindowState=STARTING_WINDOW_NOT_SHOWN
+          mActivityType=standard
+    Running activities (most recent first):
+ActivityStackSupervisor state:
+  topDisplayFocusedStack=ActivityStack{34435e6 stackId=43 type=standard mode=fullscreen visible=true translucent=false, 1 tasks}
+  mCurTaskIdForUser={0=88}
+  mUserStackInFront={}
+  isHomeRecentsComponent=false  KeyguardController:
+    mKeyguardShowing=false
+    mKeyguardGoingAway=false
+    mVisibilityTransactionDepth=0

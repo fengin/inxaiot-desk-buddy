@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeSet, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-const URI: &str = "content://chat.xiaoxin.app.workbench.config";
+pub(super) const URI: &str = "content://chat.xiaoxin.app.workbench.config";
 
 /// 配置草稿与资产草稿分开，复用本机任务 JSON 表；草稿不创建操作锁。
 pub async fn load_draft(state: &FormalAppState, project: &str) -> AppResult<Option<Value>> {
@@ -56,6 +56,8 @@ pub async fn save_draft(
             "readyMode",
             "homeMode",
             "homeActivation",
+            "ensureDeviceOwner",
+            "kioskMode",
             "voiceMode",
             "voiceEdits",
             "names",
@@ -85,6 +87,10 @@ pub async fn save_draft(
     }
     if draft.get("homeActivation").is_some_and(|value| !value.is_boolean()) {
         return Err(AppError::InvalidConfig("切到小新主屏草稿无效，请重新选择".into()));
+    }
+    if draft.get("ensureDeviceOwner").is_some_and(|value| !value.is_boolean())
+        || draft.get("kioskMode").is_some_and(|mode| !matches!(mode.as_str(), Some("keep" | "on" | "off"))) {
+        return Err(AppError::InvalidConfig("设备所有者或锁定草稿无效，请重新读取".into()));
     }
     validate_voice_draft(draft.get("voiceEdits"))?;
     // 字段定义来自设备；草稿恢复必须重新读取，避免为每台重复持久化同一schema。
@@ -144,7 +150,7 @@ pub async fn call<P: DeviceCommandPort>(
     method: &str,
     request: Option<&Value>,
 ) -> AppResult<Value> {
-    if !["getCapabilities", "readConfig", "saveConfig"].contains(&method) {
+    if !["getCapabilities", "readConfig", "saveConfig", "readKiosk", "saveKiosk", "applyKiosk"].contains(&method) {
         return Err(AppError::InvalidConfig("不支持的小新配置调用".into()));
     }
     let mut args = vec!["shell", "content", "call", "--uri", URI, "--method", method];
@@ -196,7 +202,7 @@ pub fn parse_response(text: &str) -> AppResult<Value> {
     let value: Value = serde_json::from_slice(&bytes).map_err(|_| malformed())?;
     if !matches!(
         value["status"].as_str(),
-        Some("ok" | "saved" | "partial" | "failed" | "unchanged")
+        Some("ok" | "saved" | "partial" | "failed" | "unchanged" | "applied" | "pending")
     ) {
         return Err(malformed());
     }
@@ -264,8 +270,14 @@ pub async fn read_device<P: DeviceCommandPort>(
     if let Some(patch) = patch { patch.validate()?; }
     device.connect(ip, CancellationToken::new()).await?;
     let received_cap = accepted(call(device, ip, "getCapabilities", None).await?)?;
+    let (cap, schema) = parse_capabilities(received_cap, patch)?;
+    let config = accepted(call(device, ip, "readConfig", None).await?)?;
+    project_configuration(cap, schema, config, patch)
+}
+
+fn parse_capabilities(received_cap:Value,patch:Option<&AppConfigPatch>)->AppResult<(Value,Option<ConfigSchema>)> {
     let mut cap = json!({});
-    for key in ["packageName", "appVersionName", "appVersionCode", "protocolVersion", "ready", "supportedFields", "configSchema"] {
+    for key in ["packageName", "appVersionName", "appVersionCode", "protocolVersion", "ready", "supportedFields", "configSchema", "kioskManagement", "homeManagement"] {
         if let Some(value) = received_cap.get(key) { cap[key] = value.clone(); }
     }
     if cap["protocolVersion"] != 1 || cap["packageName"] != "chat.xiaoxin.app" {
@@ -306,7 +318,10 @@ pub async fn read_device<P: DeviceCommandPort>(
             ));
         }
     }
-    let config = accepted(call(device, ip, "readConfig", None).await?)?;
+    Ok((cap,schema))
+}
+
+fn project_configuration(mut cap:Value,schema:Option<ConfigSchema>,config:Value,patch:Option<&AppConfigPatch>)->AppResult<(Value,Value)> {
     // 不保存设备返回的任意私有字段。
     if config.get("customDeviceName").is_none()
         || !["test", "pre", "prod"]
@@ -364,11 +379,36 @@ pub async fn read_device<P: DeviceCommandPort>(
     }
     Ok((cap, safe))
 }
+
+fn project_management_configuration(capabilities:&Value,configuration:&Value)->(Option<Value>,Option<Value>,String) {
+    let (mut cap,schema)=match accepted(capabilities.clone()).and_then(|cap|parse_capabilities(cap,None)) {
+        Ok(value)=>value,Err(error)=>return (None,None,error.to_string()),
+    };
+    // 即使配置段失败，也只保留已经校验并规范投影的能力段，不携带原始私有定义。
+    if let Some(schema)=&schema {
+        match serde_json::to_value(schema) {
+            Ok(value)=>cap["configSchema"]=value,
+            Err(_)=>return (None,None,"小新字段定义无法读取".into()),
+        }
+    }
+    match accepted(configuration.clone()).and_then(|config|project_configuration(cap.clone(),schema,config,None)) {
+        Ok((cap,config))=>(Some(config),Some(cap),"已从当前屏读取".into()),
+        Err(error)=>(None,Some(cap),error.to_string()),
+    }
+}
 pub async fn read(
     state: &FormalAppState,
     project: &str,
     ids: &[String],
 ) -> AppResult<Vec<AppConfigRead>> {
+    read_with_device_factory(state,project,ids,||Ok(AdbDevice::new(AndroidTools::discover()?))).await
+}
+
+/// 与正式读取共用整批门禁及调度；允许回归注入只计数或模拟的设备端口。
+#[doc(hidden)]
+pub async fn read_with_device_factory<P:DeviceCommandPort,F:FnOnce()->AppResult<AdbDevice<P>> + Send>(
+    state:&FormalAppState,project:&str,ids:&[String],device_factory:F,
+)->AppResult<Vec<AppConfigRead>> {
     if ids.is_empty() || ids.len() > 1000 || ids.iter().collect::<BTreeSet<_>>().len() != ids.len()
     {
         return Err(AppError::InvalidConfig("请选择不同的智能屏".into()));
@@ -380,9 +420,27 @@ pub async fn read(
         .ok_or_else(|| AppError::NotFound("该屏不在当前项目中".into())))
         .collect::<AppResult<Vec<_>>>()?;
     crate::domain::smart_screen::app_config::validate_batch_sizes(selected.iter().map(|screen| screen.fields.size.as_str()))?;
-    let device = AdbDevice::new(AndroidTools::discover()?);
-    let mut rows = Vec::new();
-    for screen in selected {
+    let device = device_factory()?;
+    Ok(super::configuration_reads::ordered(selected,super::configuration_reads::LIMIT,
+        |screen| read_screen(&device,screen)).await)
+}
+
+async fn read_screen<P:DeviceCommandPort>(device:&AdbDevice<P>,screen:&ScreenAsset)->AppConfigRead {
+    match super::management_snapshot::read(device,&screen.fields.ip).await {
+        Ok(super::management_snapshot::Snapshot::Unsupported)=>read_legacy_screen(device,screen).await,
+        Ok(super::management_snapshot::Snapshot::Data(sections))=>{
+            let (config,capabilities,message)=project_management_configuration(&sections.capabilities,&sections.config);
+            // 聚合只替代四个Provider读取；系统持久规则、解析、运行态和Owner仍独立核验。
+            let home=Some(read_home_response(device,&screen.fields.ip,&sections.home).await);
+            let owner=Some(super::device_owner::read(device,&screen.fields.ip).await);
+            let kiosk=Some(super::kiosk::read_response(&sections.kiosk));
+            AppConfigRead {screen_id:screen.id.clone(),read_at:now(),config,capabilities,home,owner,kiosk,message}
+        }
+        Err(error)=>AppConfigRead {screen_id:screen.id.clone(),read_at:now(),config:None,capabilities:None,home:None,owner:None,kiosk:None,message:error.to_string()},
+    }
+}
+
+async fn read_legacy_screen<P:DeviceCommandPort>(device:&AdbDevice<P>,screen:&ScreenAsset)->AppConfigRead {
         let result = read_device(&device, &screen.fields.ip, None).await;
         let (config, capabilities, message) = match result {
             Ok((cap, data)) => (Some(data), Some(cap), "已从当前屏读取".into()),
@@ -394,20 +452,31 @@ pub async fn read(
         } else {
             None
         };
-        rows.push(AppConfigRead {
+        let (owner, kiosk) = if config.is_some() {
+            (Some(super::device_owner::read(&device, &screen.fields.ip).await), Some(super::kiosk::read(&device, &screen.fields.ip).await))
+        } else { (None, None) };
+        AppConfigRead {
             screen_id: screen.id.clone(),
             read_at: now(),
             config,
             capabilities,
             home,
+            owner,
+            kiosk,
             message,
-        });
-    }
-    Ok(rows)
+        }
 }
 
 pub async fn read_home<P: DeviceCommandPort>(device: &AdbDevice<P>, ip: &str) -> AppHomeRead {
-    match super::home::query(device, ip).await {
+    read_home_status(device,ip,super::home::query_for_owner_setup(device,ip).await).await
+}
+
+pub(super) async fn read_home_response<P:DeviceCommandPort>(device:&AdbDevice<P>,ip:&str,response:&Value)->AppHomeRead {
+    read_home_status(device,ip,super::home::query_response(device,ip,response,false).await).await
+}
+
+async fn read_home_status<P:DeviceCommandPort>(device:&AdbDevice<P>,ip:&str,status:AppResult<super::home::HomeStatus>)->AppHomeRead {
+    match status {
         Ok(status) => {
             let runtime = super::home::query_runtime(device, ip, CancellationToken::new()).await;
             let active = runtime.as_ref().ok().map(|runtime| runtime.verified());
@@ -465,6 +534,164 @@ async fn checkpoint(
     result: &ScreenTargetResult,
 ) -> AppResult<()> {
     task_data::save_target(state.local_store.pool(), &plan.project_id, id, result).await
+}
+
+fn home_requires_prior_unlock(patch: &AppConfigPatch, kiosk: &super::kiosk::KioskStatus, home_active: bool, restart: bool) -> bool {
+    patch.home_enabled == Some(true) && patch.kiosk_enabled != Some(false)
+        && (!home_active || restart) && (kiosk.enabled || kiosk.active || kiosk.lock_task_mode != "none")
+}
+
+pub(super) async fn preflight_controls<P: DeviceCommandPort>(device: &AdbDevice<P>, ip: &str, patch: &AppConfigPatch, restart: bool) -> AppResult<()> {
+    if patch.ensure_device_owner.is_none() && patch.home_enabled.is_none() && patch.kiosk_enabled.is_none() { return Ok(()) }
+    let owner = super::device_owner::read(device, ip).await;
+    super::device_owner::require(&owner, patch.ensure_device_owner == Some(true))?;
+    if patch.home_enabled.is_some() {
+        super::home::query_for_owner_setup(device, ip).await?;
+    }
+    if patch.kiosk_enabled.is_some() || patch.home_enabled == Some(true) {
+        let kiosk = super::kiosk::query(device, ip).await?;
+        if patch.home_enabled == Some(true) {
+            if restart { super::home_activation::require_capability(device,ip).await?; }
+            let runtime = super::home::query_runtime(device, ip, CancellationToken::new()).await?;
+            if !runtime.verified() {
+                let activation=super::home_activation::query(device,ip,CancellationToken::new()).await?;
+                if activation.kind=="standard" { super::home_activation::require_capability(device,ip).await?; }
+            }
+            if home_requires_prior_unlock(patch, &kiosk, runtime.verified(), restart) {
+                return Err(AppError::Conflict("锁定已开启或会随应用恢复，主屏需要重新激活；请先关闭锁定，或在本次明确选择关闭锁定后再设置主屏".into()));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn control_identity(
+    state: &FormalAppState, plan: &ScreenPlan, screen: &ScreenAsset,
+    original: &crate::domain::smart_screen::model::ScreenObservation,
+    held: Option<&HeldScreenLeases>, device: &AdbDevice, cancel: &CancellationToken,
+) -> AppResult<()> {
+    if cancel.is_cancelled() { return Err(AppError::Cancelled) }
+    authorize(state, plan, held).await?;
+    let repo = ScreenRepository::new(state.local_store.pool().clone());
+    let current = repo.asset(&plan.project_id, &screen.id).await?;
+    let observed = device.inspect(screen, "inspect", cancel.clone()).await?;
+    if !crate::application::smart_screen::operations::same_target(screen, &current)
+        || super::value_updates::critical_draft(&repo.snapshot(&plan.project_id).await?, &current)
+        || !reliable_identity(screen, &observed) || observed.observed_mac != original.observed_mac {
+        return Err(AppError::Conflict("设备身份或资料已变化，未继续设备所有者或锁定操作".into()));
+    }
+    Ok(())
+}
+
+async fn ensure_owner(
+    state: &FormalAppState, id: &str, plan: &ScreenPlan, screen: &ScreenAsset,
+    original: &crate::domain::smart_screen::model::ScreenObservation, held: Option<&HeldScreenLeases>,
+    result: &mut ScreenTargetResult, device: &AdbDevice, cancel: &CancellationToken,
+) -> AppResult<()> {
+    control_identity(state, plan, screen, original, held, device, cancel).await?;
+    let before = super::device_owner::read(device, &screen.fields.ip).await;
+    super::device_owner::require(&before, true)?;
+    result.evidence["owner"] = json!({"component":super::device_owner::ADMIN,"before":before,"ensure":"pending","readback":"pending"});
+    if before.state == "self" {
+        result.evidence["owner"]["ensure"] = json!("unchanged");
+        result.evidence["owner"]["readback"] = json!("succeeded");
+        result.evidence["owner"]["after"] = json!(before);
+        return checkpoint(state, id, plan, result).await;
+    }
+    result.device = ResultState::Unknown;
+    result.evidence["phase"] = json!("config_owner_requested");
+    result.evidence["owner"]["ensure"] = json!("unknown");
+    checkpoint(state, id, plan, result).await?;
+    if cancel.is_cancelled() { return Err(AppError::Cancelled) }
+    authorize(state, plan, held).await?;
+    super::device_owner::ensure(device, &screen.fields.ip).await?;
+    let after = super::device_owner::read(device, &screen.fields.ip).await;
+    result.evidence["owner"]["after"] = json!(after);
+    result.evidence["owner"]["readback"] = json!(if after.state == "self" { "succeeded" } else if after.state == "unknown" { "unknown" } else { "different" });
+    if after.state != "self" {
+        if after.state != "unknown" { result.device = ResultState::Failed; }
+        checkpoint(state, id, plan, result).await?;
+        return Err(AppError::Conflict("未确认小新成为设备所有者；未继续主屏或锁定操作，核实不会重发设置".into()));
+    }
+    result.evidence["owner"]["ensure"] = json!("applied");
+    checkpoint(state, id, plan, result).await
+}
+
+async fn apply_kiosk(
+    state: &FormalAppState, id: &str, plan: &ScreenPlan, screen: &ScreenAsset,
+    original: &crate::domain::smart_screen::model::ScreenObservation, held: Option<&HeldScreenLeases>,
+    result: &mut ScreenTargetResult, device: &AdbDevice, enabled: bool, home_enabled: Option<bool>, cancel: &CancellationToken,
+) -> AppResult<()> {
+    control_identity(state, plan, screen, original, held, device, cancel).await?;
+    super::device_owner::require(&super::device_owner::read(device, &screen.fields.ip).await, false)?;
+    if enabled && home_enabled == Some(true) {
+        let runtime = super::home::wait_runtime_verified(device, &screen.fields.ip, Duration::from_secs(20), cancel.clone()).await?;
+        result.evidence["home"]["runtimeAfter"] = json!(runtime);
+        result.evidence["home"]["runtimeReadback"] = json!(if runtime.verified() { "succeeded" } else { "failed" });
+        if !runtime.verified() {
+            result.device = ResultState::Failed;
+            checkpoint(state, id, plan, result).await?;
+            return Err(AppError::Conflict("主屏激活尚未确认，未开启应用锁定".into()));
+        }
+    }
+    let (before, matched) = super::kiosk::verify(device, &screen.fields.ip, enabled).await?;
+    if !result.evidence["kiosk"].is_object() {
+        result.evidence["kiosk"] = json!({"targetEnabled":enabled,"before":before,"save":"pending","apply":"pending","readback":"pending"});
+    }
+    if matched {
+        result.evidence["kiosk"]["save"] = json!("unchanged");
+        result.evidence["kiosk"]["apply"] = json!("unchanged");
+        result.evidence["kiosk"]["readback"] = json!("succeeded");
+        result.evidence["kiosk"]["after"] = json!(before);
+        return checkpoint(state, id, plan, result).await;
+    }
+    result.device = ResultState::Unknown;
+    if !before.configured || before.enabled != enabled {
+        result.evidence["phase"] = json!("config_kiosk_save_requested");
+        result.evidence["kiosk"]["save"] = json!("unknown");
+        checkpoint(state, id, plan, result).await?;
+        authorize(state, plan, held).await?;
+        if cancel.is_cancelled() { return Err(AppError::Cancelled) }
+        result.evidence["kiosk"]["save"] = json!(super::kiosk::save(device, &screen.fields.ip, enabled).await?);
+        checkpoint(state, id, plan, result).await?;
+    } else { result.evidence["kiosk"]["save"] = json!("unchanged"); }
+    let current = super::kiosk::query(device, &screen.fields.ip).await?;
+    if current.enabled != enabled || !current.configured {
+        return Err(AppError::Conflict("锁定目标已被其他操作改变，未继续应用，请重新读取".into()));
+    }
+    if enabled && !current.activity_ready {
+        authorize(state, plan, held).await?;
+        if cancel.is_cancelled() { return Err(AppError::Cancelled) }
+        result.evidence["kiosk"]["wakeRequested"] = json!(true);
+        result.evidence["phase"] = json!("config_kiosk_wake_requested");
+        checkpoint(state, id, plan, result).await?;
+        super::kiosk::wake(device, &screen.fields.ip, cancel.clone()).await?;
+        authorize(state, plan, held).await?;
+        if cancel.is_cancelled() { return Err(AppError::Cancelled) }
+        result.evidence["kiosk"]["startRequested"] = json!(true);
+        result.evidence["phase"] = json!("config_kiosk_start_requested");
+        checkpoint(state, id, plan, result).await?;
+        device_maintenance::start_application(device, &screen.fields.ip).await?;
+        if !device_maintenance::application_started_with_limit(device, &screen.fields.ip, "", Duration::from_secs(15), Duration::from_millis(250)).await? {
+            return Err(AppError::Conflict("锁定目标已保存，但小新主界面尚未确认；请核实结果，不重复启动".into()));
+        }
+    }
+    authorize(state, plan, held).await?;
+    if cancel.is_cancelled() { return Err(AppError::Cancelled) }
+    result.evidence["phase"] = json!("config_kiosk_apply_requested");
+    result.evidence["kiosk"]["apply"] = json!("unknown");
+    checkpoint(state, id, plan, result).await?;
+    result.evidence["kiosk"]["apply"] = json!(super::kiosk::apply(device, &screen.fields.ip, enabled).await?);
+    checkpoint(state, id, plan, result).await?;
+    let (after, matched) = super::kiosk::wait_verified(device, &screen.fields.ip, enabled).await?;
+    result.evidence["kiosk"]["after"] = json!(after);
+    result.evidence["kiosk"]["readback"] = json!(if matched { "succeeded" } else { "different" });
+    if !matched {
+        result.device = ResultState::Failed;
+        checkpoint(state, id, plan, result).await?;
+        return Err(AppError::Conflict("锁定设置已保存，但实际锁定状态未达到目标；未重复应用".into()));
+    }
+    checkpoint(state, id, plan, result).await
 }
 
 async fn apply_home(
@@ -599,6 +826,46 @@ async fn activate_home(
         result.evidence["home"]["runtimeReadback"] = json!("succeeded");
         return checkpoint(state, id, plan, result).await;
     }
+    if super::kiosk::query(device, &screen.fields.ip).await?.lock_task_mode != "none" {
+        result.device = ResultState::Failed;
+        return Err(AppError::Conflict("应用已锁定且主屏尚未激活，请先单独解锁；未发送 HOME 动作".into()));
+    }
+    let activation_plan=super::home_activation::query(device,&screen.fields.ip,cancel.clone()).await?;
+    result.evidence["home"]["taskBefore"]=json!(activation_plan);
+    if activation_plan.kind=="standard" {
+        super::home_activation::require_capability(device,&screen.fields.ip).await?;
+        // 显式 HOME 操作可唤醒屏，但不解除系统锁屏、不用普通启动来制造另一个任务。
+        control_identity(state,plan,screen,original,held,device,cancel).await?;
+        result.evidence["home"]["wakeRequested"]=json!(true);
+        checkpoint(state,id,plan,result).await?;
+        super::kiosk::wake(device,&screen.fields.ip,cancel.clone()).await?;
+        let task_id=activation_plan.task_id.ok_or_else(||AppError::Conflict("小新普通任务编号未确认".into()))?;
+        let fresh=super::home_activation::query(device,&screen.fields.ip,cancel.clone()).await?;
+        if fresh!=activation_plan { return Err(AppError::Conflict("小新任务在准备前已变化，请重新读取；未退出任务".into())) }
+        control_identity(state,plan,screen,original,held,device,cancel).await?;
+        let request_id=uuid::Uuid::now_v7().to_string();
+        result.device=ResultState::Unknown;
+        result.evidence["phase"]=json!("config_home_prepare_requested");
+        result.evidence["home"]["prepareTaskId"]=json!(task_id);
+        result.evidence["home"]["prepareRequestId"]=json!(request_id);
+        result.evidence["home"]["preparation"]=json!("unknown");
+        result.evidence["home"]["taskRemovalReadback"]=json!("unknown");
+        checkpoint(state,id,plan,result).await?;
+        super::home_activation::prepare(device,&screen.fields.ip,task_id,&request_id).await?;
+        result.evidence["home"]["preparation"]=json!("requested");
+        checkpoint(state,id,plan,result).await?;
+        let removed=super::home_activation::wait_removed(device,&screen.fields.ip,task_id,Duration::from_secs(15),cancel.clone()).await?;
+        result.evidence["home"]["taskRemovalReadback"]=json!(if removed {"succeeded"} else {"different"});
+        if !removed {
+            result.device=ResultState::Failed;
+            checkpoint(state,id,plan,result).await?;
+            return Err(AppError::Conflict("尚未确认小新原普通任务退出，未发送系统 HOME；核实不会重放退出动作".into()));
+        }
+        result.evidence["home"]["preparation"]=json!("verified");
+        checkpoint(state,id,plan,result).await?;
+    } else {
+        result.evidence["home"]["preparation"]=json!("not_required");
+    }
     // 运行状态与策略读取可能耗时，副作用前重新确认当前资产、设备身份及写租约。
     authorize(state, plan, held).await?;
     let repo = ScreenRepository::new(state.local_store.pool().clone());
@@ -701,8 +968,9 @@ pub async fn execute(
         ));
     }
     let (capabilities, before) = read_device(&device, &screen.fields.ip, Some(patch)).await?;
+    preflight_controls(&device, &screen.fields.ip, patch, patch.restart_required_with_capabilities(&before, &capabilities)).await?;
     let home_before = if patch.home_enabled.is_some() {
-        Some(super::home::query(&device, &screen.fields.ip).await?)
+        Some(super::home::query_for_owner_setup(&device, &screen.fields.ip).await?)
     } else {
         None
     };
@@ -719,6 +987,16 @@ pub async fn execute(
     }
     if let Some(enabled) = patch.home_enabled {
         result.evidence["home"] = json!({"component":super::home::COMPONENT,"targetEnabled":enabled,"before":home_before,"save":"pending","readback":"pending","activation":if enabled { "pending" } else { "not_required" },"runtimeReadback":if enabled { "pending" } else { "not_required" },"runtimeBefore":runtime_before});
+    }
+    if let Some(enabled) = patch.kiosk_enabled {
+        result.evidence["kiosk"] = json!({"targetEnabled":enabled,"before":super::kiosk::query(&device,&screen.fields.ip).await?,"save":"pending","apply":"pending","readback":"pending"});
+    }
+    if patch.ensure_device_owner == Some(true) {
+        ensure_owner(state,id,plan,screen,original,held,result,&device,&cancel).await?;
+    }
+    // 明确关闭先完成解锁；开启必须留在配置、重启和 HOME 核验之后。
+    if patch.kiosk_enabled == Some(false) {
+        apply_kiosk(state,id,plan,screen,original,held,result,&device,false,patch.home_enabled,&cancel).await?;
     }
     if patch.matches(&before) {
         let no_fields = patch.fields().is_empty();
@@ -764,6 +1042,9 @@ pub async fn execute(
                 &cancel,
             )
             .await?;
+            if patch.kiosk_enabled == Some(true) {
+                apply_kiosk(state,id,plan,screen,original,held,result,&device,true,patch.home_enabled,&cancel).await?;
+            }
             return verify(state, id, plan, data, screen, result).await;
         }
         if home_before.is_some() {
@@ -775,6 +1056,12 @@ pub async fn execute(
                 result.evidence["home"]["runtimeReadback"] = json!("succeeded");
                 result.evidence["home"]["runtimeAfter"] = json!(runtime_before);
             }
+        }
+        if patch.kiosk_enabled == Some(true) {
+            apply_kiosk(state,id,plan,screen,original,held,result,&device,true,patch.home_enabled,&cancel).await?;
+        }
+        if patch.ensure_device_owner.is_some() || patch.kiosk_enabled.is_some() {
+            return verify(state, id, plan, data, screen, result).await;
         }
         result.device = ResultState::Skipped;
         result.message = if patch.home_enabled == Some(true) {
@@ -839,19 +1126,6 @@ pub async fn execute(
         result.evidence["config"]["restart"] = json!("not_started");
         return checkpoint(state, id, plan, result).await;
     }
-    apply_home(
-        state,
-        id,
-        plan,
-        screen,
-        original,
-        held,
-        result,
-        &device,
-        patch.home_enabled,
-        &cancel,
-    )
-    .await?;
     if saved["restartRequired"] == true {
         let Some(capability) = capability else {
             // 实际屏在读取后切换了环境，重新检查重启条件。
@@ -882,12 +1156,14 @@ pub async fn execute(
         result.evidence["phase"] = json!("config_app_started");
         checkpoint(state, id, plan, result).await?;
     }
-    if patch.home_enabled == Some(true) && saved["restartRequired"] == true {
+    // 在任何后续主屏或开启锁定动作前，先独立核实并保存普通配置及必要重启事实。
+    // 后续系统策略失败不得让已经确认的新进程/主界面仍停留在 unknown。
+    if patch.home_enabled.is_some() || patch.kiosk_enabled.is_some() {
         progress
             .report(
                 "等待小新配置就绪",
                 65,
-                "正在确认重启后的小新配置，再激活系统主屏",
+                "正在独立核实配置保存和必要重启，再继续主屏或锁定设置",
                 true,
             )
             .await?;
@@ -908,19 +1184,16 @@ pub async fn execute(
             }
         }
         let after =
-            ready.unwrap_or_else(|| Err(AppError::Conflict("重启后小新配置尚未就绪".into())))?;
+            ready.unwrap_or_else(|| Err(AppError::Conflict("小新配置回读尚未就绪".into())))?;
         result.evidence["config"]["after"] = after.clone();
         result.evidence["config"]["readAt"] = json!(now());
-        if !patch.matches(&after) {
-            result.device = ResultState::Failed;
-            result.evidence["config"]["readback"] = json!("different");
-            result.message =
-                "配置重启后回读与本次设置不同，未继续激活主屏；已有保存结果保留".into();
-            return checkpoint(state, id, plan, result).await;
-        }
-        result.evidence["config"]["readback"] = json!("succeeded");
+        let checked = verify_configuration_readback(&device, &screen.fields.ip, patch, &after, result,
+            Duration::from_secs(15), Duration::from_millis(250)).await;
         checkpoint(state, id, plan, result).await?;
+        checked?;
+        if result.device != ResultState::Succeeded { return Ok(()) }
     }
+    apply_home(state,id,plan,screen,original,held,result,&device,patch.home_enabled,&cancel).await?;
     activate_home(
         state,
         id,
@@ -934,6 +1207,9 @@ pub async fn execute(
         &cancel,
     )
     .await?;
+    if patch.kiosk_enabled == Some(true) {
+        apply_kiosk(state,id,plan,screen,original,held,result,&device,true,patch.home_enabled,&cancel).await?;
+    }
     progress
         .report(
             if patch.home_enabled == Some(true) {
@@ -973,12 +1249,60 @@ async fn finish_verification(
 ) -> AppResult<()> {
     if let Some(error) = home_error {
         result.device = ResultState::Unknown;
-        result.message = format!("普通配置结果已记录；主屏策略或运行状态尚待核实：{error}");
+        result.message = format!("配置结果已记录；设备策略或运行状态尚待核实：{error}");
         checkpoint(state, id, plan, result).await?;
         return Err(error);
     }
     merge_home_verification(result);
+    merge_control_verification(result);
     checkpoint(state, id, plan, result).await
+}
+
+fn merge_control_verification(result: &mut ScreenTargetResult) {
+    for (key, label) in [("owner", "设备所有者"), ("kiosk", "应用锁定")] {
+        let Some(evidence) = result.evidence.get(key) else { continue };
+        if evidence["readback"] != "succeeded" {
+            result.device = if evidence["readback"] == "unknown" { ResultState::Unknown } else { ResultState::Failed };
+            result.message = format!("已有配置结果保留；{label}尚未达到本次目标，请查看分段结果；核实不会重放动作");
+            return;
+        }
+        if matches!(result.device, ResultState::Succeeded | ResultState::Skipped) {
+            result.device = ResultState::Succeeded;
+            result.message.push_str(&format!("；{label}已独立回读确认"));
+        }
+    }
+}
+
+async fn verify_controls<P: DeviceCommandPort>(device: &AdbDevice<P>, ip: &str, patch: &AppConfigPatch, result: &mut ScreenTargetResult) -> AppResult<()> {
+    let mut last_error = None;
+    if patch.ensure_device_owner == Some(true) {
+        let owner = super::device_owner::read(device, ip).await;
+        result.evidence["owner"]["component"] = json!(super::device_owner::ADMIN);
+        result.evidence["owner"]["after"] = json!(owner);
+        result.evidence["owner"]["readback"] = json!(match owner.state.as_str() { "self" => "succeeded", "unknown" => "unknown", _ => "different" });
+        if owner.state == "self" && result.evidence["owner"]["ensure"] == "unknown" {
+            result.evidence["owner"]["ensure"] = json!("applied");
+        }
+        if owner.state == "unknown" { last_error = Some(AppError::Conflict("设备所有者仍待核实".into())); }
+    }
+    if let Some(enabled) = patch.kiosk_enabled {
+        result.evidence["kiosk"]["targetEnabled"] = json!(enabled);
+        result.evidence["kiosk"]["readback"] = json!("unknown");
+        match super::kiosk::wait_verified(device, ip, enabled).await {
+            Ok((after, matched)) => {
+                result.evidence["kiosk"]["after"] = json!(after);
+                result.evidence["kiosk"]["readback"] = json!(if matched { "succeeded" } else { "different" });
+                if after.configured && after.enabled == enabled && result.evidence["kiosk"]["save"] == "unknown" {
+                    result.evidence["kiosk"]["save"] = json!("verified");
+                }
+                if matched && matches!(result.evidence["kiosk"]["apply"].as_str(), Some("pending" | "unknown")) {
+                    result.evidence["kiosk"]["apply"] = json!("verified");
+                }
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    last_error.map_or(Ok(()), Err)
 }
 
 fn merge_home_verification(result: &mut ScreenTargetResult) {
@@ -996,6 +1320,9 @@ fn merge_home_verification(result: &mut ScreenTargetResult) {
         result.message =
             "所选普通配置和主屏策略未全部完成；已有保存结果保留，请分别查看结果，未重复保存或重启"
                 .into();
+    } else if enabled && home.get("prepareTaskId").is_some() && home["taskRemovalReadback"]!="succeeded" {
+        result.device=if home["taskRemovalReadback"]=="unknown" {ResultState::Unknown} else {ResultState::Failed};
+        result.message="小新原普通任务退出尚未确认，已有配置和主屏核验事实保留；核实不会重复退出或激活".into();
     } else if enabled && home["runtimeReadback"] != "succeeded" {
         result.device = ResultState::Failed;
         result.message = "持久主屏规则已确认，但未确认小新作为系统主屏在前台运行；请重新读取并激活主屏，已有配置保存结果保留".into();
@@ -1141,7 +1468,7 @@ pub async fn verify(
             "未确认原设备身份，保留待核实结果".into(),
         ));
     }
-    let mut home_error = None;
+    let mut home_error = verify_controls(&device, &screen.fields.ip, patch, result).await.err();
     if let Some(enabled) = patch.home_enabled {
         result.evidence["home"]["targetEnabled"] = json!(enabled);
         result.evidence["home"]["component"] = json!(super::home::COMPONENT);
@@ -1168,6 +1495,9 @@ pub async fn verify(
             Err(error) => home_error = Some(error),
         }
         if enabled {
+            if let Err(error)=super::home_activation::verify_preparation(&device,&screen.fields.ip,&mut result.evidence["home"]).await {
+                if home_error.is_none() {home_error=Some(error)}
+            }
             result.evidence["home"]["runtimeReadback"] = json!("unknown");
             match super::home::wait_runtime_verified(
                 &device,
@@ -1208,6 +1538,7 @@ pub async fn verify(
         result.evidence["config"]["readback"] = json!("not_required");
         result.evidence["config"]["restart"] = json!("not_required");
         result.device = ResultState::Succeeded;
+        result.message = "本次普通配置无需修改或重启".into();
         return finish_verification(state, id, plan, result, home_error).await;
     }
     let (_, after) = read_device(&device, &screen.fields.ip, Some(patch)).await?;
@@ -1228,6 +1559,69 @@ pub async fn verify(
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn home_gate_accounts_for_persisted_auto_lock_and_explicit_unlock_without_blocking_plain_restart() {
+        let commands = super::super::kiosk::tests::Commands::new(true);
+        let mut kiosk: super::super::kiosk::KioskStatus = serde_json::from_value(commands.status).unwrap();
+        kiosk.active = false; kiosk.activity_ready = false; kiosk.lock_task_mode = "none".into();
+        let mut patch = AppConfigPatch { home_enabled: Some(true), ..Default::default() };
+        assert!(home_requires_prior_unlock(&patch, &kiosk, false, false));
+        assert!(home_requires_prior_unlock(&patch, &kiosk, true, true));
+        assert!(!home_requires_prior_unlock(&patch, &kiosk, true, false));
+        patch.kiosk_enabled = Some(false);
+        assert!(!home_requires_prior_unlock(&patch, &kiosk, false, true));
+        patch.kiosk_enabled = None; patch.home_enabled = None;
+        assert!(!home_requires_prior_unlock(&patch, &kiosk, false, true));
+        patch.home_enabled = Some(false);
+        assert!(!home_requires_prior_unlock(&patch, &kiosk, false, true));
+    }
+
+    #[tokio::test]
+    async fn unknown_owner_and_kiosk_results_are_recovered_only_by_reading() {
+        let mut commands = super::super::kiosk::tests::Commands::new(true); commands.read_only = true;
+        let patch = AppConfigPatch { ensure_device_owner: Some(true), kiosk_enabled: Some(true), ..Default::default() };
+        let mut result = ScreenTargetResult { device: ResultState::Unknown,
+            evidence: json!({"config":{"save":"saved","readback":"succeeded","restart":"succeeded"},
+                "owner":{"ensure":"unknown"},"kiosk":{"save":"unknown","apply":"unknown"}}), ..Default::default() };
+        verify_controls(&commands.device(),"192.0.2.1",&patch,&mut result).await.unwrap();
+        assert_eq!(result.evidence["owner"]["ensure"],"applied");
+        assert_eq!(result.evidence["owner"]["readback"],"succeeded");
+        assert_eq!(result.evidence["kiosk"]["save"],"verified");
+        assert_eq!(result.evidence["kiosk"]["apply"],"verified");
+        assert_eq!(result.evidence["kiosk"]["readback"],"succeeded");
+        assert_eq!(result.evidence["config"]["save"],"saved");
+        assert_eq!(*commands.calls.lock().unwrap(),vec!["owner-read","readKiosk","runtime-read"]);
+    }
+
+    #[tokio::test]
+    async fn unreadable_lock_state_stays_unknown_without_replaying_saved_actions() {
+        let mut commands = super::super::kiosk::tests::Commands::new(true);
+        commands.read_only = true; commands.runtime.clear();
+        let patch = AppConfigPatch { kiosk_enabled: Some(true), ..Default::default() };
+        let mut result = ScreenTargetResult { device: ResultState::Succeeded,
+            evidence: json!({"config":{"save":"saved","readback":"succeeded","restart":"not_required"},
+                "kiosk":{"save":"saved","apply":"unknown"}}), ..Default::default() };
+        assert!(verify_controls(&commands.device(),"192.0.2.1",&patch,&mut result).await.is_err());
+        merge_control_verification(&mut result);
+        assert_eq!(result.device,ResultState::Unknown);
+        assert_eq!(result.evidence["config"]["save"],"saved");
+        assert_eq!(result.evidence["config"]["restart"],"not_required");
+        assert_eq!(result.evidence["kiosk"]["save"],"saved");
+        assert_eq!(result.evidence["kiosk"]["apply"],"unknown");
+    }
+
+    #[test]
+    fn kiosk_failure_does_not_overwrite_configuration_or_home_facts() {
+        let mut result = ScreenTargetResult { device: ResultState::Succeeded,
+            evidence: json!({"config":{"save":"saved","readback":"succeeded","restart":"succeeded"},
+                "home":{"readback":"succeeded"},"kiosk":{"save":"saved","apply":"pending","readback":"different"}}), ..Default::default() };
+        merge_control_verification(&mut result);
+        assert_eq!(result.device,ResultState::Failed);
+        assert_eq!(result.evidence["config"]["restart"],"succeeded");
+        assert_eq!(result.evidence["home"]["readback"],"succeeded");
+        assert_eq!(result.evidence["kiosk"]["save"],"saved");
+    }
 
     fn configuration_fixture() -> Value {
         let environment = json!({
@@ -1600,6 +1994,26 @@ mod tests {
         assert_eq!(result.device, ResultState::Succeeded);
         assert_eq!(result.evidence["config"]["restart"], "succeeded");
         assert_eq!(*runtime.calls.lock().unwrap(), vec!["pid", "activity", "pid", "activity"]);
+    }
+
+    #[tokio::test]
+    async fn later_home_failure_preserves_already_confirmed_configuration_restart() {
+        let runtime = ConfigurationRuntime::new("5447", vec![PROVIDER_ONLY], MAIN_RESUMED);
+        let mut result = pending_configuration_restart(true);
+        // 与执行链相同：先完成普通配置/新PID/主界面核实，再进入主屏阶段。
+        verify_runtime(&runtime,&mut result).await.unwrap();
+        assert_eq!(result.device,ResultState::Succeeded);
+        assert_eq!(result.evidence["config"]["restart"],"succeeded");
+        result.device=ResultState::Unknown;
+        result.evidence["phase"]=json!("config_home_activated");
+        result.evidence["home"]=json!({"targetEnabled":true,"save":"unchanged","readback":"succeeded",
+            "activation":"activated","runtimeReadback":"failed"});
+        merge_home_verification(&mut result);
+        assert_eq!(result.device,ResultState::Failed);
+        for key in ["save","readback","restart"] {
+            assert_eq!(result.evidence["config"][key],if key=="save" {"saved"} else {"succeeded"});
+        }
+        assert_eq!(*runtime.calls.lock().unwrap(),vec!["pid","activity","pid","activity"]);
     }
 
     #[tokio::test]

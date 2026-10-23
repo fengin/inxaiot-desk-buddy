@@ -130,6 +130,13 @@ impl ScreenSharedResults {
         if let Some(package) = result.evidence.get("package") { summary["package"] = package.clone(); }
         if let Some(home) = result.evidence.get("home") {
             summary["home"] = serde_json::json!({"component":home["component"],"targetEnabled":home["targetEnabled"],"before":home["before"],"after":home["after"],"save":home["save"],"readback":home["readback"]});
+            for key in ["activation","runtimeReadback","runtimeBefore","runtimeAfter","taskBefore","prepareTaskId","preparation","taskRemovalReadback"] {
+                if let Some(value)=home.get(key) {summary["home"][key]=value.clone();}
+            }
+        }
+        // 两种管理证据只含固定组件、布尔目标及阶段，不复制普通配置或地址。
+        for key in ["owner", "kiosk"] {
+            if let Some(control) = result.evidence.get(key) { summary[key] = control.clone(); }
         }
         if let Some(ntp) = result.evidence.get("ntp") {
             summary["ntp"] = serde_json::json!({"beforeServer":ntp["before"]["server"],"targetServer":ntp["targetServer"],"afterServer":ntp["after"]["server"],"autoTime":ntp["after"]["autoTime"],"save":ntp["save"],"activation":ntp["activation"],"sync":ntp["sync"],"rebootRequired":ntp["rebootRequired"],"clockOffsetSeconds":ntp["syncEvidence"]["clockOffsetSeconds"]});

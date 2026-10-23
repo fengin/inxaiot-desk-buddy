@@ -1,11 +1,45 @@
 import { describe, expect, it } from "vitest";
-import { appConfigChanges, appConfigRestartRequired, appConfigEffectiveAfter, appConfigReadTime, appConfigVoiceSupported, appConfigVoiceDisplay } from "@/shared/model/screenAppConfig";
-import type { ScreenAppConfiguration, ScreenAppConfigRead } from "@/shared/model/screenAppConfig";
+import { appConfigChanges, appConfigRestartRequired, appConfigEffectiveAfter, appConfigReadTime, appConfigVoiceSupported, appConfigVoiceDisplay, appOwnerAllowsDependent, appOwnerDisplay, appKioskConfigurationKnown, appKioskTarget, appKioskDisplay } from "@/shared/model/screenAppConfig";
+import type { ScreenAppConfiguration, ScreenAppConfigRead, ScreenAppConfigPatch } from "@/shared/model/screenAppConfig";
 function configuration(): ScreenAppConfiguration {
   const env={otaUrl:'https://config.example.org',wsUrl:null,h5Url:null,h5ReadyCheckEnabled:true,otaWsUrl:null,otaH5Url:null,effectiveWsUrl:null,effectiveH5Url:'assets/web/demo.html',wsSource:'none' as const,h5Source:'default' as const};
   return {customDeviceName:'原名称',environments:{current:'pre',test:{...env},pre:{...env},prod:{...env}}};
 }
 describe('配置修改字段与重启范围',()=>{
+  const policyRow = (): ScreenAppConfigRead => ({ screenId: 'policy', readAt: '2026-10-23T00:00:00Z', config: configuration(), capabilities: null, message: '已读取' });
+  it('OWNER四态仅self或明确为none且本次ensure允许依赖，false不构成解除动作',()=>{
+    const row=policyRow();
+    expect(appOwnerAllowsDependent(row,true)).toBe(false);expect(appOwnerDisplay()).toContain('升级');
+    for(const state of ['self','none','other','unknown'] as const){
+      row.owner={state,message:''};
+      expect(appOwnerAllowsDependent(row)).toBe(state==='self');
+      expect(appOwnerAllowsDependent(row,true)).toBe(state==='self'||state==='none');
+    }
+    const config=configuration(),patch:ScreenAppConfigPatch={set:{},clear:[],ensureDeviceOwner:true};
+    expect(appConfigChanges(config,patch,undefined,undefined,{state:'none',message:''})).toEqual([{key:'ensureDeviceOwner',label:'设备OWNER权限',before:'尚未设置设备OWNER',after:'设置小新为设备OWNER'}]);
+    expect(appConfigChanges(config,patch,undefined,undefined,{state:'self',message:''})).toEqual([]);
+    expect(appConfigChanges(config,{...patch,ensureDeviceOwner:false} as unknown as ScreenAppConfigPatch,undefined,undefined,{state:'self',message:''})).toEqual([]);
+    expect(appConfigRestartRequired(config,patch)).toBe(false);
+  });
+  it('缺键与保存false严格区分，只有成功读取且运行已知时才提出默认锁定目标',()=>{
+    const row=policyRow();
+    expect(appKioskConfigurationKnown(row)).toBe(false);expect(appKioskTarget(row,'keep')).toBeUndefined();
+    row.kiosk={supported:true,configured:false,active:false,message:''};
+    expect(appKioskConfigurationKnown(row)).toBe(true);expect(appKioskTarget(row,'keep')).toBe(true);
+    expect(appKioskTarget(row,'off')).toBe(false);expect(appKioskDisplay(row.kiosk)).toContain('尚未保存');
+    row.kiosk={supported:true,configured:true,enabled:false,active:false,message:''};
+    expect(appKioskTarget(row,'keep')).toBeUndefined();expect(appKioskDisplay(row.kiosk)).toBe('关闭');
+    row.kiosk.active=null;
+    expect(appKioskTarget(row,'on')).toBeUndefined();
+  });
+  it.each([true,false])('锁定保存%s但运行相反时产生幂等目标差异，单独锁定无需重启',enabled=>{
+    const row=policyRow();row.kiosk={supported:true,configured:true,enabled,active:!enabled,message:''};
+    expect(appKioskTarget(row,'keep')).toBe(enabled);
+    const patch={set:{},clear:[],kioskEnabled:enabled};
+    expect(appConfigChanges(row.config!,patch,undefined,undefined,undefined,row.kiosk)).toEqual([{key:'kioskEnabled',label:'锁定应用',before:enabled?'已开启，未锁定':'已关闭，仍锁定',after:enabled?'开启并锁定':'关闭并解锁'}]);
+    expect(appConfigRestartRequired(row.config!,patch)).toBe(false);
+    row.kiosk.active=enabled;expect(appConfigChanges(row.config!,patch,undefined,undefined,undefined,row.kiosk)).toEqual([]);
+  });
   it('语音启动是全局布尔字段，实际变化需重启一次，同值及省略不重启',()=>{
     const config=configuration();config.autoStartVoiceEngine=false;
     const patch={set:{autoStartVoiceEngine:true},clear:[]};

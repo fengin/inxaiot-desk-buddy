@@ -1,6 +1,6 @@
 # 智能屏运维文档索引
 
-本目录面向智能屏的实施、产品和开发人员。实施人员使用运维电脑上的 INX 实施工作台，管理安装智能小新的 Android 4 寸、10 寸屏：先读取设备事实，再检查并确认本次操作，最后分别核对保存、系统生效及共享记录。工作台源码工程为 `inxaiot-desk-buddy`，小新源码工程为 `inxvision-xiaoxin/voice-on-demand/xiaoxin-app`；两者分别运行在运维电脑和 Android 屏上。
+本目录面向智能屏的实施、产品和开发人员。实施人员使用运维电脑上的 INX 实施工作台，管理安装智能小新的 Android 4 寸、10 寸屏：先读取设备事实，再检查并确认本次操作，最后分别核对保存、系统生效及共享记录。工作台源码工程为 `inxaiot-desk-buddy`，小新源码工程为 `inxvision-xiaoxin/xiaoxin-app`；两者分别运行在运维电脑和 Android 屏上。
 
 ## 阅读顺序
 

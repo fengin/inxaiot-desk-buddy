@@ -2,7 +2,7 @@
 set -eu
 
 ACTION="${1:-}"
-AGENT_VERSION="0.1.13"
+AGENT_VERSION="0.1.14"
 AGENT_PROTOCOL_VERSION="1"
 DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/data/deploy}"
 DATA_ROOT="${DATA_ROOT:-/opt/data}"
@@ -430,6 +430,80 @@ verify_release_image_snapshot() {
   done
 }
 
+cleanup_loaded_image_archives() (
+  # 仅在本次部署健康检查成功后调用。子 shell 避免清理变量影响部署或回滚状态。
+  cleanup_kind="$1"
+  cleanup_directory="$2"
+  cleanup_image="${3:-}"
+  cleanup_warning() { event "artifact_cleanup" "warning" "服务已正常启动，镜像安装包暂未清理：$1" || true; }
+  case "$DEPLOY_ROOT/" in
+    /|*"//"*|*"/./"*|*"/../"*) cleanup_warning "部署目录不安全"; return 0 ;;
+    /*) ;;
+    *) cleanup_warning "部署目录不是绝对路径"; return 0 ;;
+  esac
+  cleanup_id="${cleanup_directory##*/}"
+  case "$cleanup_id" in
+    ''|.|..|*[!A-Za-z0-9._-]*) cleanup_warning "任务目录标识无效"; return 0 ;;
+  esac
+  case "$cleanup_kind" in
+    release)
+      [ "$cleanup_directory" = "$DEPLOY_ROOT/releases/$RELEASE_VERSION" ] || {
+        cleanup_warning "发布目录不属于本次部署"; return 0;
+      }
+      cleanup_parent="$DEPLOY_ROOT/releases"
+      cleanup_files="$cleanup_directory/images"
+      ;;
+    service)
+      [ "$cleanup_directory" = "$DEPLOY_ROOT/service-upgrades/$cleanup_id" ] || {
+        cleanup_warning "升级目录不属于受管范围"; return 0;
+      }
+      [ -z "$TASK_ID" ] || [ "$cleanup_id" = "$TASK_ID" ] || {
+        cleanup_warning "升级目录不属于本次任务"; return 0;
+      }
+      case "$cleanup_image" in
+        ''|*/*|*\\*|*.tar/*) cleanup_warning "镜像副本名称无效"; return 0 ;;
+        *.tar) ;;
+        *) cleanup_warning "镜像副本不是 tar 安装包"; return 0 ;;
+      esac
+      cleanup_parent="$DEPLOY_ROOT/service-upgrades"
+      cleanup_files="$cleanup_directory"
+      ;;
+    *) cleanup_warning "未知镜像清理类型"; return 0 ;;
+  esac
+  for cleanup_path in "$DEPLOY_ROOT" "$cleanup_parent" "$cleanup_directory" "$cleanup_files"; do
+    [ -d "$cleanup_path" ] && [ ! -L "$cleanup_path" ] || {
+      cleanup_warning "目录不存在或含符号链接"; return 0;
+    }
+  done
+  cleanup_root_real="$(cd "$DEPLOY_ROOT" && pwd -P)" || { cleanup_warning "无法核实部署根目录"; return 0; }
+  cleanup_directory_real="$(cd "$cleanup_directory" && pwd -P)" || { cleanup_warning "无法核实任务目录"; return 0; }
+  [ "$cleanup_directory_real" = "$cleanup_root_real/${cleanup_parent##*/}/$cleanup_id" ] || {
+    cleanup_warning "任务目录超出受管范围"; return 0;
+  }
+  if [ "$cleanup_kind" = release ]; then
+    set -- "$cleanup_files"/*.tar
+  else
+    set -- "$cleanup_files/$cleanup_image"
+  fi
+  # 先核实全部候选，保留非普通文件及链接，绝不递归删除目录。
+  for cleanup_file do
+    [ ! -L "$cleanup_file" ] || { cleanup_warning "镜像副本为符号链接"; return 0; }
+    [ -e "$cleanup_file" ] || continue
+    [ -f "$cleanup_file" ] || { cleanup_warning "镜像副本不是普通文件"; return 0; }
+  done
+  cleanup_removed=0
+  for cleanup_file do
+    [ -f "$cleanup_file" ] || continue
+    if rm -f -- "$cleanup_file"; then
+      cleanup_removed=$((cleanup_removed + 1))
+    else
+      cleanup_warning "文件删除失败，已保留待后续处理"
+    fi
+  done
+  [ "$cleanup_removed" -eq 0 ] || event "artifact_cleanup" "success" "已清理本次镜像安装包副本（${cleanup_removed} 个）" || true
+  return 0
+)
+
 find_release_src() {
   extract_dir="$1"
   if [ -f "$extract_dir/manifest.json" ]; then
@@ -650,6 +724,7 @@ install_release() {
     fi
     fail "install" "new release health failed; previous release restored" 41
   fi
+  cleanup_loaded_image_archives release "$new_release_dir"
   event "install" "success" "$new_release_dir"
 }
 
@@ -901,6 +976,7 @@ service_upgrade() {
     fi
     fail "service_upgrade" "service health failed; previous image restored" 86
   fi
+  cleanup_loaded_image_archives service "$upgrade_dir" "$(basename "$REMOTE_IMAGE")"
   event "service_upgrade" "success" "service=${SERVICE_NAME}; image=${SERVICE_IMAGE}; backup=${backup_dir}"
 }
 

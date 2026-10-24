@@ -24,14 +24,18 @@ use crate::infrastructure::{
         task_repository::TargetUpdate,
     },
     project_context::{map_formal_error, project_operator},
+    task_data_lifecycle::TaskDataLifecycle,
     task_recovery::{TaskRecoveryFuture, TaskRecoveryOutcome},
+    task_runtime::cleanup_finished_task_artifacts,
 };
 use crate::runtime::task_queue::{TaskEnvelope, TaskHandlerRegistry};
 use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tokio_util::sync::CancellationToken;
@@ -493,21 +497,48 @@ pub async fn submit(
         data.request_ids
             .insert(target.id.clone(), uuid::Uuid::now_v7().to_string());
     }
-    if let Some(package) = &data.apk {
-        data.apk = Some(
-            apk::stage(
-                package,
-                &state
-                    .paths
-                    .project_task_dir(project, &id)
-                    .map_err(map_formal_error)?,
-            )
-            .await?,
-        );
+    let staged_install = plan.input.action == "install" && data.apk.is_some();
+    let queued = async {
+        if let Some(package) = &data.apk {
+            data.apk = Some(
+                apk::stage(
+                    package,
+                    &state
+                        .paths
+                        .project_task_dir(project, &id)
+                        .map_err(map_formal_error)?,
+                )
+                .await?,
+            );
+        }
+        plan.detail = serde_json::to_value(data)
+            .map_err(|_| AppError::InvalidConfig("保存设备执行计划失败".into()))?;
+        previews::queue_with_id(state, preview, PREVIEW, &hash, &plan, id.clone()).await
+    }.await;
+    if queued.is_err() && staged_install
+        && let Err(error) = cleanup_failed_install_submission(state, project, &id).await
+    {
+        tracing::warn!(task_id = %id, error = %crate::core::log_safety::safe_error(&error),
+            "unqueued screen APK cleanup deferred");
     }
-    plan.detail = serde_json::to_value(data)
-        .map_err(|_| AppError::InvalidConfig("保存设备执行计划失败".into()))?;
-    previews::queue_with_id(state, preview, PREVIEW, &hash, &plan, id).await
+    queued
+}
+
+async fn cleanup_failed_install_submission(
+    state: &FormalAppState,
+    project: &str,
+    task_id: &str,
+) -> AppResult<()> {
+    match state.task_repository.get(task_id).await {
+        Ok(_) => cleanup_finished_task_artifacts(&state.task_repository, &state.paths, task_id).await,
+        Err(AppError::NotFound(_)) => {
+            if !state.task_repository.artifact_directory_referenced(task_id).await? {
+                TaskDataLifecycle::new(&state.paths).clear_orphan_artifacts(project, task_id)?;
+            }
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 pub fn register(registry: &TaskHandlerRegistry, app: AppHandle) -> AppResult<()> {
     for action in WRITE_ACTIONS {
@@ -661,6 +692,12 @@ async fn finish(
         TaskEventLevel::Info,
     )
     .await?;
+    // 全部目标执行、结果保存与共享核实已结束后才释放安装副本。
+    // 清理失败只留待后续补清，不修改设备或平台的既有结果。
+    if let Err(error) = cleanup_finished_task_artifacts(&state.task_repository, &state.paths, id).await {
+        tracing::warn!(task_id = id, error = %crate::core::log_safety::safe_error(&error),
+            "screen maintenance artifact cleanup deferred");
+    }
     Ok(())
 }
 pub async fn run(
@@ -775,38 +812,108 @@ pub async fn run(
         finished: false,
     };
     task_data::save_results(state.local_store.pool(), project, id, &results).await?;
-    let requests = plan
-        .targets
-        .clone()
-        .into_iter()
-        .map(|screen| {
+    // 单屏执行和收尾由同一个 future 推进。外层不能在暂停其他单屏 future 时
+    // 等待同一任务的事件锁，否则持锁子任务没有机会继续执行并释放锁。
+    let batch = drain_maintenance_targets(
+        &plan.targets,
+        plan.input.concurrency as usize,
+        |screen| {
             let plan = &plan;
             let data = &data;
-            let token = cancel.clone();
-            async move { execute_target(state, id, plan, data, &screen, token).await }
-        })
-        .collect::<Vec<_>>();
-    let mut pending = stream::iter(requests).buffer_unordered(plan.input.concurrency as usize);
-    while let Some(result) = pending.next().await {
-        let result = result?;
-        task_data::save_target(state.local_store.pool(), project, id, &result).await?;
-        target_state(state, id, &result, false).await?;
-        tasks::event(
-            state,
-            id,
-            Some(&result.screen_id),
-            "result",
-            &result.message,
-            if target_succeeded(&result) {
-                TaskEventLevel::Info
-            } else {
-                TaskEventLevel::Warn
-            },
-        )
-        .await?;
+            let cancel = cancel.clone();
+            async move {
+                let result = execute_target(state, id, plan, data, &screen, cancel).await?;
+                task_data::save_target(state.local_store.pool(), project, id, &result).await?;
+                target_state(state, id, &result, false).await?;
+                tasks::event(
+                    state,
+                    id,
+                    Some(&result.screen_id),
+                    "result",
+                    &result.message,
+                    if target_succeeded(&result) { TaskEventLevel::Info } else { TaskEventLevel::Warn },
+                ).await?;
+                Ok(())
+            }
+        },
+    ).await;
+    if !batch.failures.is_empty() {
+        for (screen_id, error) in &batch.failures {
+            tracing::warn!(task_id=id, screen_id, error=?crate::core::log_safety::safe_error(error),
+                "screen maintenance target finalization deferred");
+        }
+        // 已经发出的设备操作全部推进到返回后才处理批次；保持原持久化阶段，
+        // 不把未知安装结果覆盖成失败，也不据此重放任何设备或平台写入。
+        return defer_maintenance_batch(&state.task_repository, id, batch.not_started.len()).await;
     }
     let mut results = task_data::read_results(state.local_store.pool(), project, id).await?;
     finish(state, id, &plan, &mut results).await
+}
+
+#[derive(Default)]
+struct MaintenanceBatchDrain {
+    failures: Vec<(String, AppError)>,
+    not_started: Vec<String>,
+}
+
+/// 外层只收集内存结果，持续轮询在途 future；基础设施收尾失败仅阻止后续派发。
+/// 普通单屏设备失败由 execute_target 返回可保存结果，不会触发这个门禁。
+async fn drain_maintenance_targets<F, Fut>(
+    targets: &[ScreenAsset],
+    concurrency: usize,
+    process: F,
+) -> MaintenanceBatchDrain
+where
+    F: Fn(ScreenAsset) -> Fut + Sync,
+    Fut: Future<Output = AppResult<()>> + Send,
+{
+    let stop_dispatch = AtomicBool::new(false);
+    // map 必须直接接收 owned 目标；移到闭包内 clone 会使注册处理器的
+    // Send future 出现高阶 FnOnce 生命周期不匹配，不能按该 lint 改成借用。
+    #[allow(clippy::redundant_iter_cloned)]
+    let requests = targets.iter().cloned().map(|screen| {
+        let stop_dispatch = &stop_dispatch;
+        let process = &process;
+        async move {
+            let screen_id = screen.id.clone();
+            if stop_dispatch.load(Ordering::Acquire) {
+                return (screen_id, None);
+            }
+            let outcome = process(screen).await;
+            if outcome.is_err() {
+                // 在本 future 返回之前关闭补位门禁，不能等外层处理结果后再设置。
+                stop_dispatch.store(true, Ordering::Release);
+            }
+            (screen_id, Some(outcome))
+        }
+    });
+    let mut pending = stream::iter(requests).buffer_unordered(concurrency.max(1));
+    let mut drained = MaintenanceBatchDrain::default();
+    while let Some((screen_id, outcome)) = pending.next().await {
+        match outcome {
+            None => drained.not_started.push(screen_id),
+            Some(Err(error)) => drained.failures.push((screen_id, error)),
+            Some(Ok(())) => {}
+        }
+    }
+    drained
+}
+
+async fn defer_maintenance_batch(
+    repository: &crate::infrastructure::local_sqlite::task_repository::TaskRepository,
+    id: &str,
+    not_started: usize,
+) -> AppResult<()> {
+    repository.protect_results(id, "设备结果尚未完整保存，请核实原任务").await?;
+    let current = repository.get(id).await?.state;
+    if current != TaskState::FinalizingFailed {
+        repository.transition(
+            id, current, TaskState::FinalizingFailed,
+            Some("SCREEN_BATCH_RESULT_PENDING"),
+            Some(&format!("部分设备结果尚未完整保存，已停止后续派发（{not_started} 台未开始）；请核实原任务，不要重复执行")),
+        ).await?;
+    }
+    Ok(())
 }
 
 /// 仅结束从未进入设备阶段的旧排队批次；已有执行证据仍交给原只读恢复流程。
@@ -1466,12 +1573,7 @@ pub fn recover<'a>(
                         },
                         ..Default::default()
                     });
-            if matches!(result.device, ResultState::Pending | ResultState::Unknown)
-                && result.evidence.get("phase").is_none()
-            {
-                result.device = ResultState::Cancelled;
-                result.message = "原任务未记录设备动作提交，后续操作已停止".into();
-            }
+            cancel_unsubmitted_result(result);
             if plan.input.action != "install" {
                 let held = if screen.source == "platform" {
                     let context = write_context::open(state, &plan.project_id).await?;
@@ -1598,8 +1700,7 @@ pub fn recover<'a>(
                     .ok_or_else(|| AppError::Conflict("原安装包信息缺失".into()))?;
                 match intent {
                     Some(intent) if intent.state == "confirmed" => {
-                        result.business = ResultState::Succeeded;
-                        result.evidence["businessReceipt"] = intent.result.unwrap_or_default();
+                        confirm_recovered_install_result(result, &package.app_version, intent.result.unwrap_or_default());
                     }
                     Some(intent) if intent.state == "submitted" => {
                         let mut tx = context
@@ -1635,8 +1736,7 @@ pub fn recover<'a>(
                                     &evidence,
                                 )
                                 .await?;
-                            result.business = ResultState::Succeeded;
-                            result.evidence["businessReceipt"] = evidence;
+                            confirm_recovered_install_result(result, &package.app_version, evidence);
                         } else {
                             local(state)
                                 .update_intent(
@@ -1706,3 +1806,22 @@ pub fn recover<'a>(
         Ok(TaskRecoveryOutcome::Completed)
     })
 }
+
+fn confirm_recovered_install_result(result: &mut ScreenTargetResult, version: &str, receipt: Value) {
+    result.business = ResultState::Succeeded;
+    result.evidence["businessReceipt"] = receipt;
+    result.message = format!("小新 {version} 安装结果已确认；平台版本已核实，未重复安装");
+}
+
+fn cancel_unsubmitted_result(result: &mut ScreenTargetResult) {
+    if matches!(result.device, ResultState::Pending | ResultState::Unknown)
+        && result.evidence.get("phase").is_none()
+    {
+        result.device = ResultState::Cancelled;
+        result.message = "原任务未记录设备动作提交，后续操作已停止".into();
+    }
+}
+
+#[cfg(test)]
+#[path = "maintenance_batch_tests.rs"]
+mod batch_tests;

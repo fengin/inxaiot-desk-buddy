@@ -23,7 +23,9 @@ prepare = agent[agent.index('prepare_service_compose() {'):agent.index('\nrollba
 rollback = agent[agent.index('rollback_service_upgrade() {'):agent.index('\nservice_upgrade() {')]
 rollback_full = agent[agent.index('rollback_release() {'):agent.index('\ninstall_release() {')]
 install_full = agent[agent.index('install_release() {'):agent.index('\nbackup_current() {')]
-load_image = agent[agent.index('load_image_archive_with_tag() {'):agent.index('\nfind_release_src() {')]
+# 本组只验证镜像身份、配置和回滚；独立 tar-cleanup-contract 执行清理函数。
+# 不把含反斜杠路径模式的新 helper 拼进 Windows 原生命令行的 -c 参数。
+load_image = agent[agent.index('load_image_archive_with_tag() {'):agent.index('\ncleanup_loaded_image_archives() (')]
 verify_service = agent[agent.index('verify_service_state() {'):agent.index('\n# 只兼容转换目标服务')]
 verify_release_services = agent[agent.index('verify_runtime_containers() {'):agent.index('\nrollback_release() {')]
 base = 'services:\n  emqx:\n    image: emqx:1\n  device-edge:\n    image: edge:old\n    labels:\n      image: unchanged\n  device-edge-web:\n    image: web:1\n'
@@ -362,6 +364,7 @@ verify_runtime_containers() { :; }
 wait_for_runtime_containers() { :; }
 verify_release_image_snapshot() { :; }
 load_image_archive_with_tag() { [ "$CASE" != image_load_fail ]; }
+cleanup_loaded_image_archives() { :; }
 stop_current_release() { [ "$CASE" != stop_fail ]; }
 wait_for_release() { [ "$CASE" != health_fail ]; }
 tar() { :; }
@@ -416,7 +419,7 @@ fail() { exit "${3:-1}"; }
         )
         syntax = subprocess.run(
             [shell, '-n'], input=install_script.encode('utf-8'),
-            env=install_environment, capture_output=True, timeout=15,
+            env=install_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
         )
         assert syntax.returncode == 0, (
             syntax.stderr.decode('utf-8', errors='replace'),
@@ -424,7 +427,7 @@ fail() { exit "${3:-1}"; }
         )
         completed = subprocess.run(
             [shell, '-s'], input=install_script.encode('utf-8'),
-            env=install_environment, capture_output=True, timeout=15,
+            env=install_environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
         )
         assert completed.returncode == expected_exit, (
             case, completed.returncode, completed.stderr.decode('utf-8', errors='replace')

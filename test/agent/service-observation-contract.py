@@ -59,7 +59,7 @@ with tempfile.TemporaryDirectory(prefix='inxaiot-observation-') as scratch:
     for source, service in sources:
         for case in ['normal', 'unhealthy', 'mismatch', 'stopped', 'missing', 'inspect_error', 'no_current', 'bad_compose']:
             env = dict(environment, CASE=case, FIXTURE_DIR=root.as_posix(), SERVICE_CHECK_SOURCE=source, SERVICE_NAME=service)
-            completed = subprocess.run([arguments.shell, '-s'], input=('set -eu\n' + escape + stub + functions + '\ninspect_services').encode('utf-8'), env=env, capture_output=True, timeout=15)
+            completed = subprocess.run([arguments.shell, '-s'], input=('set -eu\n' + escape + stub + functions + '\ninspect_services').encode('utf-8'), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
             assert completed.returncode == 0, (case, completed.stderr.decode('utf-8'))
             report = json.loads(completed.stdout)['report']
             assert report['source'] == source
@@ -84,7 +84,7 @@ with tempfile.TemporaryDirectory(prefix='inxaiot-observation-') as scratch:
             results.append({'source': source, 'case': case, 'passed': True})
     failure_functions = agent[agent.index('event() {'):agent.index('\nrequire_safe_release_version() {')]
     env = dict(environment, CASE='normal', FIXTURE_DIR=root.as_posix(), SERVICE_CHECK_SOURCE='service_upgrade', SERVICE_NAME='edge', ACTION='service-upgrade', ROLLBACK_OBSERVED='true')
-    failed = subprocess.run([arguments.shell, '-s'], input=('set -eu\n' + escape + stub + functions + '\n' + failure_functions + '\nfail service_upgrade "service health failed; previous image restored" 86').encode('utf-8'), env=env, capture_output=True, timeout=15)
+    failed = subprocess.run([arguments.shell, '-s'], input=('set -eu\n' + escape + stub + functions + '\n' + failure_functions + '\nfail service_upgrade "service health failed; previous image restored" 86').encode('utf-8'), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
     assert failed.returncode == 86
     events = [json.loads(line) for line in failed.stdout.splitlines()]
     assert events[0]['status'] == 'failed'
@@ -98,7 +98,7 @@ with tempfile.TemporaryDirectory(prefix='inxaiot-observation-') as scratch:
             calls = root / f'{mode}-{case}.calls'
             env = dict(environment, CASE=case, FIXTURE_DIR=root.as_posix(), SERVICE_CHECK_SOURCE='manual', SERVICE_NAME=service, CALLS_FILE=calls.as_posix())
             script = 'set -eu\n' + escape + stub + functions + '\n' + verify_all + verify_one + '\nverify_result=0\n' + verifier + ' || verify_result=$?\ninspect_services\nexit "$verify_result"\n'
-            checked = subprocess.run([arguments.shell, '-s'], input=script.encode('utf-8'), env=env, capture_output=True, timeout=15)
+            checked = subprocess.run([arguments.shell, '-s'], input=script.encode('utf-8'), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
             expected_exit = 1 if case == 'unhealthy' or (mode == 'service' and case == 'mismatch') else 0
             assert checked.returncode == expected_exit, (mode, case, checked.stderr.decode('utf-8'))
             report = json.loads(checked.stdout)['report']

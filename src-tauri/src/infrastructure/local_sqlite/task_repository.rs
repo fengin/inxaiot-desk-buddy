@@ -85,6 +85,7 @@ const ACTIVITY_VISIBLE_SQL: &str = "NOT (local_task.state = 'succeeded' \
 
 const CLEARABLE_TASK_SQL: &str = "local_project_id = ? AND state IN \
     ('cancelled', 'succeeded', 'partially_succeeded', 'failed', 'interrupted') \
+    AND NOT (domain_type = 'aio' AND state = 'interrupted') \
     AND NOT EXISTS (SELECT 1 FROM local_task_result_guard g WHERE g.local_task_id = local_task.id)";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -672,12 +673,49 @@ impl TaskRepository {
              error_code, message, created_at, started_at, ended_at, updated_at \
              FROM local_task WHERE state IN \
              ('check_failed', 'cancelled', 'succeeded', 'partially_succeeded', 'failed', \
-              'interrupted') AND NOT EXISTS (SELECT 1 FROM local_task_result_guard g WHERE g.local_task_id=local_task.id) ORDER BY updated_at, id",
+               'interrupted') AND (NOT EXISTS (SELECT 1 FROM local_task_result_guard g WHERE g.local_task_id=local_task.id) \
+                 OR (domain_type='aio' AND state='interrupted')) ORDER BY updated_at, id",
         )
         .fetch_all(&self.pool)
         .await
         .map_err(|error| AppError::database("查询任务制品清理候选", &error))?;
         rows.into_iter().map(map_task).collect()
+    }
+
+    /// 旧任务记录已清空时，仍须排除执行计划、结果保护和其他任务中的文件引用。
+    /// 按任务标识查引用而不信任文件内自报路径；保守匹配宁可保留，不误删执行输入。
+    pub async fn artifact_directory_referenced(&self, task_id: &str) -> AppResult<bool> {
+        if task_id.trim().is_empty() {
+            return Err(AppError::InvalidConfig("任务ID不能为空".into()));
+        }
+        let referenced: i64 = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM local_task WHERE id = ?1 OR instr(payload_ref, ?1) > 0) \
+             OR EXISTS (SELECT 1 FROM local_task_result_guard WHERE local_task_id = ?1) \
+             OR EXISTS (SELECT 1 FROM local_screen_task_data WHERE local_task_id = ?1 \
+                 OR instr(plan_json, ?1) > 0 OR instr(result_json, ?1) > 0) \
+             OR EXISTS (SELECT 1 FROM local_task_target WHERE instr(message_params_json, ?1) > 0) \
+             OR EXISTS (SELECT 1 FROM local_recent_artifact WHERE instr(path, ?1) > 0) \
+             OR EXISTS (SELECT 1 FROM local_screen_write_intent \
+                 WHERE instr(payload_json, ?1) > 0 OR instr(result_json, ?1) > 0)",
+        )
+        .bind(task_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| AppError::database("核对任务临时文件引用", &error))?;
+        Ok(referenced != 0)
+    }
+
+    /// 一体机执行输入在独立受管文件中；存在未完成输入时，不仅凭数据库路径推断孤儿。
+    pub async fn has_unresolved_aio_artifact_input(&self) -> AppResult<bool> {
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM local_task WHERE domain_type = 'aio' AND payload_ref IS NOT NULL \
+             AND (state NOT IN ('cancelled', 'succeeded', 'partially_succeeded', 'failed', 'check_failed') \
+                 OR EXISTS (SELECT 1 FROM local_task_result_guard g WHERE g.local_task_id = local_task.id)))",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| AppError::database("核对未完成一体机发布物输入", &error))?;
+        Ok(pending != 0)
     }
 
     pub async fn targets(&self, task_id: &str) -> AppResult<Vec<TaskTargetRecord>> {

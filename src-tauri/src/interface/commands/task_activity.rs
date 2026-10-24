@@ -1,19 +1,25 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::State;
 
-use crate::application::ports::task_event::{TaskEventInput, TaskEventSink};
+use crate::application::ports::task_event::TaskEventInput;
 use crate::application::ports::task_log::{TaskLogQuery, TaskLogStore};
 use crate::domain::common::task::{TargetState, TaskEvent, TaskEventLevel, TaskRecord, TaskState};
 use crate::formal::app_state::FormalAppState;
 use crate::infrastructure::local_sqlite::task_repository::TargetUpdate;
 use crate::infrastructure::task_data_lifecycle::TaskDataLifecycle;
 use crate::infrastructure::task_runtime::{
-    FinalizationRetryOutcome, retry_pending_local_finalization,
+    FinalizationRetryOutcome, cleanup_finished_task_artifacts,
+    preserve_interrupted_aio_task, retry_pending_local_finalization,
 };
 use crate::interface::error::CommandErrorDto;
+
+#[cfg(test)]
+#[path = "task_activity_cancel_tests.rs"]
+mod cancel_tests;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,11 +120,31 @@ pub async fn clear_finished_local_tasks(
     state: State<'_, FormalAppState>,
     local_project_id: String,
 ) -> Result<u32, CommandErrorDto> {
-    state
-        .task_repository
-        .clear_terminal_activity_for_project(&local_project_id)
+    clear_finished_task_records(&state, &local_project_id)
         .await
         .map_err(CommandErrorDto::from)
+}
+
+pub async fn clear_finished_task_records(
+    state: &FormalAppState,
+    local_project_id: &str,
+) -> crate::core::error::AppResult<u32> {
+    // 先按真实任务类型处理临时副本，再清数据库记录，避免丢失正常清理的归属依据。
+    // 文件占用失败不改变任务结果；启动补清仍只识别受管大文件，日志和诊断保留。
+    for task in state.task_repository.list_artifact_cleanup_candidates().await? {
+        if task.local_project_id == local_project_id
+            && let Err(error) = cleanup_finished_task_artifacts(
+                &state.task_repository, &state.paths, &task.id,
+            ).await
+        {
+            tracing::warn!(task_id = %task.id, error = %crate::core::log_safety::safe_error(&error),
+                "task artifact cleanup before clearing history deferred");
+        }
+    }
+    state
+        .task_repository
+        .clear_terminal_activity_for_project(local_project_id)
+        .await
 }
 
 #[tauri::command]
@@ -131,7 +157,8 @@ pub async fn clear_task_logs(
         .get(&task_id)
         .await
         .map_err(CommandErrorDto::from)?;
-    if !task.state.is_terminal() || state.task_repository.results_protected(&task.id).await.map_err(CommandErrorDto::from)? {
+    if !task.state.is_terminal() || preserve_interrupted_aio_task(&task)
+        || state.task_repository.results_protected(&task.id).await.map_err(CommandErrorDto::from)? {
         return Err(CommandErrorDto::from(
             crate::core::error::AppError::Conflict("任务仍在执行或有结果待核实，暂不能清空日志".into()),
         ));
@@ -303,7 +330,7 @@ pub async fn request_task_cancel(
     };
     if let Err(error) = state
         .task_event_pipeline
-        .emit(
+        .emit_with_lock_timeout(
             task_id,
             TaskEventInput {
                 resource_type: None,
@@ -317,17 +344,15 @@ pub async fn request_task_cancel(
                 message_params: BTreeMap::new(),
                 message: Some(message.into()),
             },
+            Duration::from_secs(2),
         )
         .await
     {
         tracing::error!(task_id, error = ?crate::core::log_safety::safe_error(&error), "persist cancellation event failed");
     }
-    if task.state.is_terminal() && !state.task_repository.results_protected(&task.id).await.map_err(CommandErrorDto::from)? {
-        let _ = TaskDataLifecycle::new(&state.paths).finalize_task(
-            &task.local_project_id,
-            &task.id,
-            task.state,
-        );
+    if let Err(error) = cleanup_finished_task_artifacts(&state.task_repository, &state.paths, &task.id).await {
+        tracing::warn!(task_id = %task.id, error = %crate::core::log_safety::safe_error(&error),
+            "cancelled task artifact cleanup deferred");
     }
     activity_task(state, task).await
 }
@@ -379,7 +404,7 @@ async fn activity_task(
         .iter()
         .any(|target| target.resource_type == "preflight_internal");
     let results_protected=state.task_repository.results_protected(&task.id).await.map_err(CommandErrorDto::from)?;
-    let clearable = task.state.is_terminal() && !results_protected;
+    let clearable = task.state.is_terminal() && !results_protected && !preserve_interrupted_aio_task(&task);
     let stage = if is_preflight {
         match task.state {
             TaskState::Checking => "正在检查".into(),

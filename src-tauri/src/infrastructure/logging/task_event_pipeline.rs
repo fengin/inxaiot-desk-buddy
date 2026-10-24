@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use time::OffsetDateTime;
 use tokio::sync::Mutex as AsyncMutex;
@@ -74,7 +75,18 @@ impl TaskEventPipeline {
         task_id: &str,
         input: TaskEventInput,
     ) -> AppResult<TaskEvent> {
-        self.emit_inner(task_id, input, false).await
+        self.emit_inner(task_id, input, false, None).await
+    }
+
+    /// 取消信号已经生效时，仅限制进入事件锁的等待，避免取消接口被日志锁拖住。
+    /// 取得锁后的序号和 JSONL 写入必须完整结束，不能超时丢弃半条日志。
+    pub async fn emit_with_lock_timeout(
+        &self,
+        task_id: &str,
+        input: TaskEventInput,
+        lock_wait: Duration,
+    ) -> AppResult<TaskEvent> {
+        self.emit_inner(task_id, input, true, Some(lock_wait)).await
     }
 
     fn task_lock(&self, task_id: &str) -> AppResult<Arc<AsyncMutex<()>>> {
@@ -88,15 +100,29 @@ impl TaskEventPipeline {
             .clone())
     }
 
+    #[cfg(test)]
+    pub(crate) async fn hold_task_lock_for_test(
+        &self,
+        task_id: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        self.task_lock(task_id).expect("test task lock").lock_owned().await
+    }
+
     async fn emit_inner(
         &self,
         task_id: &str,
         input: TaskEventInput,
         persist_to_log: bool,
+        lock_wait: Option<Duration>,
     ) -> AppResult<TaskEvent> {
         input.validate()?;
         let task_lock = self.task_lock(task_id)?;
-        let _guard = task_lock.lock().await;
+        let _guard = match lock_wait {
+            Some(limit) => tokio::time::timeout(limit, task_lock.lock())
+                .await
+                .map_err(|_| AppError::timeout("等待任务事件日志锁"))?,
+            None => task_lock.lock().await,
+        };
         let task = self.repository.get(task_id).await?;
         let sequence = self.repository.reserve_sequence(task_id).await?;
         let mut event = TaskEvent {
@@ -131,6 +157,10 @@ impl TaskEventPipeline {
 
 impl TaskEventSink for TaskEventPipeline {
     async fn emit(&self, task_id: &str, input: TaskEventInput) -> AppResult<TaskEvent> {
-        self.emit_inner(task_id, input, true).await
+        self.emit_inner(task_id, input, true, None).await
     }
 }
+
+#[cfg(test)]
+#[path = "task_event_pipeline_tests.rs"]
+mod tests;

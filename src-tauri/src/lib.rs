@@ -128,14 +128,14 @@ pub fn run() {
                 let task_repository = TaskRepository::new(local_store.pool().clone());
                 task_repository.recover_interrupted().await?;
                 let task_data_lifecycle = TaskDataLifecycle::new(&paths);
+                let mut task_logs_safe_to_expire = true;
                 match task_repository.list_artifact_cleanup_candidates().await {
                     Ok(tasks) => {
                         for task in tasks {
-                            if let Err(error) = task_data_lifecycle.finalize_task(
-                                &task.local_project_id,
-                                &task.id,
-                                task.state,
-                            ) {
+                            if let Err(error) = crate::infrastructure::task_runtime::cleanup_finished_task_artifacts(
+                                &task_repository, &paths, &task.id,
+                            ).await {
+                                task_logs_safe_to_expire = false;
                                 tracing::warn!(
                                     task_id = %task.id,
                                     error = %crate::core::log_safety::safe_error(&error),
@@ -145,11 +145,22 @@ pub fn run() {
                         }
                     }
                     Err(error) => {
+                        task_logs_safe_to_expire = false;
                         tracing::warn!(error = %crate::core::log_safety::safe_error(&error), "startup task cleanup scan deferred");
                     }
                 }
-                if let Err(error) = task_data_lifecycle.sweep_expired_logs() {
-                    tracing::warn!(error = %crate::core::log_safety::safe_error(&error), "startup task log retention sweep deferred");
+                // 此时已持有实例锁，队列尚未创建；只补清无任何持久引用的受管安装副本。
+                if let Err(error) = crate::infrastructure::task_runtime::cleanup_orphan_task_artifacts(
+                    &task_repository, &paths,
+                ).await {
+                    tracing::warn!(error = %crate::core::log_safety::safe_error(&error), "startup orphan artifact scan deferred");
+                }
+                if task_logs_safe_to_expire {
+                    if let Err(error) = task_data_lifecycle.sweep_expired_logs() {
+                        tracing::warn!(error = %crate::core::log_safety::safe_error(&error), "startup task log retention sweep deferred");
+                    }
+                } else {
+                    tracing::warn!("startup log expiry deferred until task evidence protection succeeds");
                 }
                 let job_supervisor = JobSupervisor::default();
                 let task_handler_registry = TaskHandlerRegistry::default();

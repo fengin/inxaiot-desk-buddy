@@ -1,5 +1,5 @@
 use crate::core::error::{AppError, AppResult};
-use crate::domain::common::task::{TargetState, TaskState};
+use crate::domain::common::task::{TargetState, TaskRecord, TaskState};
 use crate::formal::app_state::FormalAppState;
 use crate::formal::config::AppPaths;
 use crate::infrastructure::local_sqlite::task_repository::{TargetUpdate, TaskRepository};
@@ -7,6 +7,65 @@ use crate::infrastructure::task_data_lifecycle::TaskDataLifecycle;
 pub use crate::infrastructure::task_recovery::TaskRecoveryOutcome as FinalizationRetryOutcome;
 use crate::runtime::job_supervisor::JobOutcome;
 use crate::runtime::task_queue::{TaskQueue, TaskQueueResult};
+
+/// 公共收尾只释放已到安全终态且没有待核实结果的临时文件。
+/// 智能屏诊断与安装包由文件生命周期按操作类型区分，不能整目录删除。
+pub async fn cleanup_finished_task_artifacts(
+    repository: &TaskRepository,
+    paths: &AppPaths,
+    task_id: &str,
+) -> AppResult<()> {
+    let task = repository.get(task_id).await?;
+    if preserve_interrupted_aio_task(&task) {
+        // 旧版本可能已写过期标记；只撤销标记，避免后续扫描删除待核实日志。
+        return TaskDataLifecycle::new(paths).protect_task_log(&task.local_project_id, task_id);
+    }
+    if !task.state.is_terminal() || repository.results_protected(task_id).await? {
+        return Ok(());
+    }
+    TaskDataLifecycle::new(paths).finalize_task_for_operation(
+        &task.local_project_id,
+        task_id,
+        task.state,
+        &task.domain_type,
+        &task.operation_type,
+    )
+}
+
+pub(crate) fn preserve_interrupted_aio_task(task: &TaskRecord) -> bool {
+    // 中断可能发生在远端动作之后、写入待补存文件之前，缺少该文件不能证明已安全结束。
+    // 这类记录需后续核实，不按空间回收需求删除其任务或恢复依据。
+    task.domain_type == "aio" && task.state == TaskState::Interrupted
+}
+
+/// 仅在应用启动持有数据目录实例锁、任务执行器尚未启动时补清旧孤儿副本。
+pub async fn cleanup_orphan_task_artifacts(
+    repository: &TaskRepository,
+    paths: &AppPaths,
+) -> AppResult<usize> {
+    // AIO 的镜像源路径可能只在 deployment-input.json 中；存在未确认执行输入时
+    // 保守延后孤儿回收，待其结束后的下次启动处理，不解析或追随任意 payload 路径。
+    if repository.has_unresolved_aio_artifact_input().await? {
+        tracing::info!("orphan artifact cleanup deferred while AIO deployment input remains unresolved");
+        return Ok(0);
+    }
+    let lifecycle = TaskDataLifecycle::new(paths);
+    let mut removed = 0;
+    for candidate in lifecycle.list_orphan_artifact_candidates()? {
+        if repository.artifact_directory_referenced(&candidate.task_id).await? {
+            continue;
+        }
+        match lifecycle.clear_orphan_artifacts(&candidate.project_id, &candidate.task_id) {
+            Ok(count) => removed += count,
+            Err(error) => tracing::warn!(
+                task_id = %candidate.task_id,
+                error = %crate::core::log_safety::safe_error(&error),
+                "orphan task artifact cleanup deferred"
+            ),
+        }
+    }
+    Ok(removed)
+}
 
 pub async fn retry_pending_local_finalizations(state: &FormalAppState) {
     let Ok(tasks) = state.task_repository.list_active().await else {
@@ -178,9 +237,7 @@ pub async fn reconcile_queue_result(
         return;
     }
     converge_targets(repository, &task.id, next, target_state, error_code).await;
-    if !repository.results_protected(&task.id).await.unwrap_or(true) {
-        let _ = TaskDataLifecycle::new(paths).finalize_task(&task.local_project_id, &task.id, next);
-    }
+    let _ = cleanup_finished_task_artifacts(repository, paths, &task.id).await;
 }
 
 pub async fn reconcile_untracked_active_tasks(
@@ -325,11 +382,7 @@ pub async fn reconcile_shutdown_outcomes(
                 }
             }
         }
-        if !state.task_repository.results_protected(task_id).await.unwrap_or(true) { let _ = TaskDataLifecycle::new(&state.paths).finalize_task(
-            &task.local_project_id,
-            task_id,
-            next,
-        ); }
+        let _ = cleanup_finished_task_artifacts(&state.task_repository, &state.paths, task_id).await;
     }
 }
 

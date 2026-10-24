@@ -39,8 +39,18 @@ pub enum AppError {
 }
 
 impl AppError {
-    pub fn database(operation: &'static str, _error: &sqlx::Error) -> Self {
-        tracing::error!(operation, "database operation failed");
+    pub fn database(operation: &'static str, error: &sqlx::Error) -> Self {
+        // 仅记录类别和标准错误码；原始错误可能带有 SQL、参数或连接凭据。
+        let database_code = error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .filter(|code| safe_database_code(code));
+        tracing::error!(
+            operation,
+            error_kind = database_error_kind(error),
+            database_code = database_code.as_deref().unwrap_or("unavailable"),
+            "database operation failed"
+        );
         Self::Database { operation }
     }
 
@@ -71,5 +81,40 @@ impl AppError {
     pub fn integrity(operation: &'static str, _error: impl std::fmt::Debug) -> Self {
         tracing::error!(operation, "file integrity check failed");
         Self::Integrity { operation }
+    }
+}
+
+fn safe_database_code(code: &str) -> bool {
+    // SQLite 扩展数字码或数据库驱动提供的五位 SQLSTATE。
+    (!code.is_empty() && code.len() <= 10 && code.bytes().all(|byte| byte.is_ascii_digit()))
+        || (code.len() == 5
+            && code
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase()))
+}
+
+fn database_error_kind(error: &sqlx::Error) -> &'static str {
+    match error {
+        sqlx::Error::Configuration(_) => "configuration",
+        sqlx::Error::InvalidArgument(_) => "invalid_argument",
+        sqlx::Error::Database(_) => "database",
+        sqlx::Error::Io(_) => "io",
+        sqlx::Error::Tls(_) => "tls",
+        sqlx::Error::Protocol(_) => "protocol",
+        sqlx::Error::RowNotFound => "row_not_found",
+        sqlx::Error::TypeNotFound { .. } => "type_not_found",
+        sqlx::Error::ColumnIndexOutOfBounds { .. } => "column_index_out_of_bounds",
+        sqlx::Error::ColumnNotFound(_) => "column_not_found",
+        sqlx::Error::ColumnDecode { .. } => "column_decode",
+        sqlx::Error::Encode(_) => "encode",
+        sqlx::Error::Decode(_) => "decode",
+        sqlx::Error::AnyDriverError(_) => "driver",
+        sqlx::Error::PoolTimedOut => "pool_timed_out",
+        sqlx::Error::PoolClosed => "pool_closed",
+        sqlx::Error::WorkerCrashed => "worker_crashed",
+        sqlx::Error::Migrate(_) => "migration",
+        sqlx::Error::InvalidSavePointStatement => "invalid_savepoint",
+        sqlx::Error::BeginFailed => "begin_failed",
+        _ => "other",
     }
 }

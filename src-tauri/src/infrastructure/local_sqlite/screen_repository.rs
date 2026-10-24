@@ -671,7 +671,9 @@ impl ScreenRepository {
         asset: &ScreenAsset,
         evidence: &serde_json::Value,
     ) -> AppResult<()> {
-        let mut tx = self.pool.begin().await.map_err(db)?;
+        // 先取得写锁，再读取请求状态，避免 WAL 读快照在并发写入后无法升级。
+        // 此事务只确认本机缓存与请求，不包含设备操作或平台网络调用。
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await.map_err(db)?;
         let row=sqlx::query("SELECT state,platform_screen_id FROM local_screen_write_intent WHERE local_project_id=? AND business_project_id=? AND request_id=?")
             .bind(project).bind(business).bind(request).fetch_optional(&mut *tx).await.map_err(db)?.ok_or_else(||AppError::Conflict("原业务更新请求不存在".into()))?;
         if row.get::<String, _>("platform_screen_id") != asset.id {

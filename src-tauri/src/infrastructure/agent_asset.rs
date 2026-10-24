@@ -8,9 +8,9 @@ use crate::formal::release_profile_repository::StoredReleaseAgentScript;
 
 pub const AGENT_SOURCE: &str = include_str!("../../resources/agent/edge-node-agent.sh");
 pub const AGENT_FILE_NAME: &str = "edge-node-agent.sh";
-pub const AGENT_VERSION: &str = "0.1.13";
+pub const AGENT_VERSION: &str = "0.1.14";
 pub const AGENT_PROTOCOL_VERSION: &str = "1";
-pub const AGENT_SHA256: &str = "fb7ad58c72dbbbbc3660401ecec38a840965b5596bb78929c42a64f0c7fe377c";
+pub const AGENT_SHA256: &str = "97028dd043f7d435ce1895be0c34836dc878869fad7c3baa4fb9006223611a14";
 pub const MAX_AGENT_SCRIPT_BYTES: usize = 1024 * 1024;
 pub const AGENT_COMPATIBILITY: &[&str] = &[
     "Linux x86_64",
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn embedded_agent_has_version_hash_protocol_and_compatibility() {
         verify_embedded_agent().expect("embedded agent");
-        assert_eq!(AGENT_VERSION, "0.1.13");
+        assert_eq!(AGENT_VERSION, "0.1.14");
         assert_eq!(AGENT_PROTOCOL_VERSION, "1");
         assert_eq!(AGENT_SHA256.len(), 64);
         assert!(!AGENT_COMPATIBILITY.is_empty());
@@ -288,6 +288,32 @@ mod tests {
         let loaded = load_agent_script_file(&path).expect("load custom agent");
         assert!(!loaded.content.contains('\r'));
         assert_eq!(loaded.version, AGENT_VERSION);
+    }
+
+    #[test]
+    fn upgrading_embedded_agent_does_not_replace_a_valid_custom_script() {
+        let actions = super::REQUIRED_ACTIONS
+            .iter()
+            .map(|action| format!("  {action}) : ;;\n"))
+            .collect::<String>();
+        let source = format!(
+            "#!/bin/sh\nAGENT_VERSION=\"custom-0.1.13\"\nAGENT_PROTOCOL_VERSION=\"1\"\ncase \"$1\" in\n{actions}esac\n"
+        );
+        let custom = inspect_agent_source(&source).expect("custom script metadata");
+        let stored = crate::formal::release_profile_repository::StoredReleaseAgentScript {
+            content: custom.content.clone(),
+            version: custom.version.clone(),
+            protocol_version: custom.protocol_version.clone(),
+            sha256: custom.sha256.clone(),
+        };
+        let effective =
+            super::effective_agent_asset(Some(&stored)).expect("custom script remains effective");
+        assert_eq!(effective, custom);
+        assert!(!effective.content.contains("cleanup_loaded_image_archives"));
+        assert_eq!(
+            super::effective_agent_asset(None).unwrap().version,
+            "0.1.14"
+        );
     }
 
     #[test]

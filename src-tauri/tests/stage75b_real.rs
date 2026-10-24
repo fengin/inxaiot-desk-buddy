@@ -2,6 +2,8 @@
 mod aio_assets_regression;
 #[path = "common/project_test_config.rs"]
 mod project_test_config;
+#[path = "common/aio_artifact_cleanup_real.rs"]
+mod artifact_cleanup;
 
 use inxaiot_desk_buddy_lib::application::ports::deployment_workflow::{
     DeploymentPreflightPort, DeploymentSubmissionPort, DeploymentTaskQueryPort,

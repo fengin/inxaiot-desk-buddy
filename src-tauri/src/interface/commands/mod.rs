@@ -12,3 +12,4 @@ pub mod task_activity;
 
 pub mod operation_history;
 pub mod smart_screen;
+pub mod screen_remote;

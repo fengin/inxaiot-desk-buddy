@@ -4,7 +4,7 @@ import { NButton, NPagination, NProgress, NTag, NModal, NCard, useMessage } from
 import { FileText, RefreshCw } from "lucide-vue-next";
 import { useActivityStore } from "@/stores/activity";
 import { useScreenAdapter } from "@/shared/api/screenAdapter";
-import { screenActionLabel, screenStateLabel } from "@/shared/model/screen";
+import { screenActionLabel, screenStateLabel, screenTaskStateLabel } from "@/shared/model/screen";
 import type { ScreenTask, ScreenTaskTarget } from "@/shared/model/screen";
 import { formatDisplayDateTime } from "@/shared/format/dateTime";
 import { appConfigFieldLabel } from "@/shared/model/screenAppConfig";
@@ -23,6 +23,7 @@ const isConfig = computed(() => props.task.action === "app_config");
 const isNtp = computed(() => props.task.action === "ntp");
 const isPing = computed(() => props.task.action === "ping");
 const isRegistration = computed(() => props.task.action === "register");
+const isRemoteAssistance = computed(() => props.task.action === "remote_assistance");
 const registrationConfirmed = computed(() => props.task.targets.length > 0 && props.task.targets.every(target => target.result?.business === "succeeded"));
 const headerConfirmed = computed(() => props.task.state === "succeeded" && (!isRegistration.value || (props.task.mode === "real" && registrationConfirmed.value)) && (!isConfig.value || props.task.targets.every(managementConfirmed)));
 const showScreenDetail = computed(() => ["ping", "inspect", "mac"].includes(props.task.action));
@@ -185,6 +186,7 @@ function registrationSuccessLabel(target: ScreenTaskTarget) {
   return "平台写入已确认";
 }
 function displayState(state: keyof typeof screenStateLabel) {
+  if (isRemoteAssistance.value) return screenTaskStateLabel({ action: "remote_assistance", state });
   if (isConfig.value && state === "succeeded" && !props.task.targets.every(managementConfirmed)) return "结果待核实";
   if (isRegistration.value) {
     if (props.task.mode !== "real") return state === "succeeded" ? "演示完成" : screenStateLabel[state];
@@ -223,15 +225,16 @@ async function openGlobalLogs() {
     <div class="screen-task-progress"><n-progress type="line" :percentage="progress" :show-indicator="false" :status="task.state === 'failed' ? 'error' : headerConfirmed ? 'success' : 'default'" /><b>{{ progress }}%</b><span>{{ completed }} / {{ task.targets.length }} 台已处理</span></div>
     <div class="screen-inline-actions screen-result-actions">
       <n-button v-if="running" size="small" :disabled="task.state === 'cancelling'" @click="cancel">{{ task.state === 'cancelling' ? '正在停止后续操作' : '取消后续执行' }}</n-button>
-      <n-button v-if="task.state === 'needs_review' || (!running && managementVerificationNeeded)" size="small" type="warning" @click="verify">继续核实结果</n-button>
+      <n-button v-if="task.state === 'needs_review' || (!running && managementVerificationNeeded)" size="small" type="warning" @click="verify">{{ isRemoteAssistance ? '补存会话记录' : '继续核实结果' }}</n-button>
       <n-button v-if="!running&&configRestartIds.length" size="small" @click="$emit('restart',configRestartIds)">只重启小新 {{configRestartIds.length}} 台</n-button>
-      <n-button v-if="!running && retryIds.length && !['status','version_sync','merge'].includes(task.action)" size="small" @click="$emit('retry', retryIds)"><template #icon><RefreshCw :size="14" /></template>重试 {{ retryIds.length }} 台失败 / 未执行设备</n-button>
+      <n-button v-if="!running && retryIds.length && !['status','version_sync','merge','remote_assistance'].includes(task.action)" size="small" @click="$emit('retry', retryIds)"><template #icon><RefreshCw :size="14" /></template>重试 {{ retryIds.length }} 台失败 / 未执行设备</n-button>
       <n-button v-if="!running && ['install', 'register', 'inspect', 'version_sync'].includes(task.action)" size="small" type="primary" secondary :disabled="task.state === 'needs_review'" @click="$emit('versions', task.targets.map(target => target.screenId))">核对版本并同步平台</n-button>
       <n-button v-if="task.action === 'ping' || task.action === 'status'" size="small" type="primary" secondary :disabled="running" @click="$emit('status')">查看平台状态差异</n-button>
       <template v-if="task.mode==='real'&&task.action==='diagnostics'&&!running"><n-button size="small" :loading="diagnosticBusy" @click="diagnostics()">查看诊断文件</n-button><n-button size="small" :loading="diagnosticBusy" @click="diagnostics(true)">导出诊断</n-button></template>
       <span class="screen-spacer"></span><n-button size="small" text type="primary" title="查看当前任务日志" @click="openGlobalLogs"><template #icon><FileText :size="14" /></template>任务与日志面板</n-button>
     </div>
-    <div v-if="task.state === 'needs_review'" class="screen-callout">{{ unverifiedInstall ? '本次演示结果待核实，请先继续核实结果，不重复提交安装。' : '回读中断不等于动作失败。先核实已有结果，不重复提交、重装或再次重启。' }}</div>
+    <div v-if="isRemoteAssistance" class="screen-callout" data-testid="remote-assistance-result-notice"><template v-if="task.state === 'needs_review'">会话记录待核实，补存仅处理记录及占用。</template>会话记录不代表H5登录成功，登录结果以屏端页面为准；历史操作不会自动重发。</div>
+    <div v-else-if="task.state === 'needs_review'" class="screen-callout">{{ unverifiedInstall ? '本次演示结果待核实，请先继续核实结果，不重复提交安装。' : '回读中断不等于动作失败。先核实已有结果，不重复提交、重装或再次重启。' }}</div>
     <div class="screen-result-table-wrap">
       <div class="screen-result-table-header"><table class="screen-table screen-small-table screen-result-table" aria-label="结果列表表头"><colgroup><col v-for="column in columns" :key="column.key" :class="`result-col-${column.key}`" /></colgroup><thead><tr><th v-for="column in columns" :key="column.key">{{ column.label }}</th></tr></thead></table></div>
       <div ref="resultBody" class="screen-table-scroll screen-result-table-body inx-scroll-area"><table class="screen-table screen-small-table screen-result-table" aria-label="智能屏操作结果"><colgroup><col v-for="column in columns" :key="column.key" :class="`result-col-${column.key}`" /></colgroup><tbody><tr v-for="target in visibleTargets" :key="target.screenId" :data-screen-id="target.screenId">

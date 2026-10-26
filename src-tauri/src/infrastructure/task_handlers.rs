@@ -470,6 +470,8 @@ pub fn built_in_recovery_registry() -> crate::infrastructure::task_recovery::Tas
         .expect("登记结果处理方法不能重复注册");
     registry.register("smart_screen", "merge", crate::infrastructure::smart_screen::registration::recover)
         .expect("合并结果处理方法不能重复注册");
+    registry.register("smart_screen", "remote_assistance", crate::infrastructure::smart_screen::remote_screen::assistance::recover)
+        .expect("辅助操作会话结果处理方法不能重复注册");
     for operation in ["version_sync","status"] {
         registry.register("smart_screen", operation, crate::infrastructure::smart_screen::value_updates::recover)
             .expect("业务结果处理方法不能重复注册");

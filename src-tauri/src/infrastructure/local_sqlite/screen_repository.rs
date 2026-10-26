@@ -378,6 +378,49 @@ impl ScreenRepository {
             .ok_or_else(|| AppError::NotFound("该屏不在当前项目中".into()))
     }
 
+    /// 高频只读会话只取指定屏的确认资料；不加载项目列表、草稿、空间或观察历史。
+    /// 本机未绑定记录优先，已绑定记录仅以平台主键返回，与 snapshot 的资产可见规则一致。
+    pub async fn confirmed_asset(&self, project: &str, id: &str) -> AppResult<ScreenAsset> {
+        self.require_project(project).await?;
+        let local = sqlx::query(
+            "SELECT id,fields_json,revision FROM local_screen s \
+             WHERE local_project_id=? AND id=? AND removed=0 \
+             AND NOT EXISTS(SELECT 1 FROM local_screen_binding b \
+                 WHERE b.local_project_id=s.local_project_id AND b.local_screen_id=s.id)",
+        )
+        .bind(project).bind(id).fetch_optional(&self.pool).await.map_err(db)?;
+        if let Some(row) = local {
+            return Ok(ScreenAsset {
+                id: row.try_get("id").map_err(db)?,
+                source: "local".into(),
+                fields: decode(&row.try_get::<String, _>("fields_json").map_err(db)?)?,
+                revision: row.try_get::<i64, _>("revision").map_err(db)? as u64,
+                platform_status: "unknown".into(),
+                ..Default::default()
+            });
+        }
+        let row = sqlx::query(
+            "SELECT c.asset_json,c.revision,c.business_project_id \
+             FROM local_screen_platform_cache c JOIN local_screen_context scope \
+             ON scope.local_project_id=c.local_project_id AND scope.business_project_id=c.business_project_id \
+             WHERE c.local_project_id=? AND c.platform_screen_id=? AND scope.data_source_id IS NOT NULL",
+        )
+        .bind(project).bind(id).fetch_optional(&self.pool).await.map_err(db)?
+        .ok_or_else(|| AppError::NotFound("该屏不在当前项目中".into()))?;
+        let mut asset: ScreenAsset = decode(&row.try_get::<String, _>("asset_json").map_err(db)?)?;
+        if asset.id != id {
+            return Err(AppError::Conflict("屏的缓存身份与记录不一致，请刷新资料".into()));
+        }
+        let business: String = row.try_get("business_project_id").map_err(db)?;
+        asset.revision = row.try_get::<i64, _>("revision").map_err(db)? as u64;
+        asset.aliases = sqlx::query_scalar(
+            "SELECT local_screen_id FROM local_screen_binding \
+             WHERE local_project_id=? AND business_project_id=? AND platform_screen_id=? ORDER BY local_screen_id",
+        )
+        .bind(project).bind(business).bind(id).fetch_all(&self.pool).await.map_err(db)?;
+        Ok(asset)
+    }
+
     pub async fn save_draft(
         &self,
         project: &str,

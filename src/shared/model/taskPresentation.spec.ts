@@ -31,6 +31,15 @@ describe("公共任务的业务展示", () => {
     expect(taskStageLabel(previous)).toBe("检查完成，尚未提交注册");
   });
 
+  it("辅助会话结束不推断登录成功，待核实只开放记录补存", () => {
+    const value = { ...task("smart_screen"), operationType: "remote_assistance", state: "succeeded" as const };
+    expect(taskDisplayLabels(value)).toEqual({ name: "远程辅助操作", state: "会话已结束", stage: "登录结果以屏端页面为准", tone: "info" });
+    expect(canRetryTaskResult(value)).toBe(false);
+    const pending = { ...value, state: "finalizing_failed" as const };
+    expect(taskDisplayLabels(pending)).toMatchObject({ state: "会话记录待核实", stage: "仅补存会话记录和释放占用，不重发屏端操作", tone: "warning" });
+    expect(canRetryTaskResult(pending)).toBe(true);
+  });
+
   it.each([
     ["queued", "等待执行", "等待提交平台"],
     ["running", "执行中", "正在提交并确认平台写入"],

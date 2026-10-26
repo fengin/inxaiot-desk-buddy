@@ -91,6 +91,10 @@ pub async fn retry_pending_local_finalization(
     force_takeover: bool,
 ) -> AppResult<FinalizationRetryOutcome> {
     let mut task = state.task_repository.get(task_id).await?;
+    if crate::infrastructure::smart_screen::remote_screen::assistance::orphan_needs_review(state,&task).await? {
+        crate::infrastructure::smart_screen::remote_screen::assistance::converge_orphan(state,&task).await?;
+        task=state.task_repository.get(task_id).await?;
+    }
     if task.state.is_terminal() && state.task_repository.results_protected(task_id).await? {
         task=state.task_repository.begin_result_recovery(task_id).await?;
     }

@@ -1,17 +1,20 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import { NButton, NDrawer, NDrawerContent, NTag, useDialog, useMessage } from "naive-ui";
 import { useScreenAdapter } from "@/shared/api/screenAdapter";
 import { useSmartScreensStore } from "@/stores/smartScreens";
-import { effectiveScreenMac, screenActionLabel, screenActions, screenStateLabel } from "@/shared/model/screen";
+import { effectiveScreenMac, screenActionLabel, screenActions, screenTaskStateLabel } from "@/shared/model/screen";
 import type { ScreenAction, SmartScreen } from "@/shared/model/screen";
 import { formatDisplayDateTime } from "@/shared/format/dateTime";
 import { createScreenListProjection } from "@/shared/model/screenListProjection";
 import { screenNeedsVersionSync } from "@/shared/model/screenMaintenance";
+import ScreenRemoteDialog from "./remote-screen/ScreenRemoteDialog.vue";
 
 const props = defineProps<{ screen?: SmartScreen }>();
 const emit = defineEmits<{ close: []; edit: [screen: SmartScreen]; operate: [action: ScreenAction]; versions: [] }>();
 const store = useSmartScreensStore();
+const remoteScreenOpen = ref(false);
+watch([() => store.projectId, () => props.screen?.id], () => { remoteScreenOpen.value = false; });
 const dialog = useDialog();
 const message = useMessage();
 const display = computed(() => props.screen ? createScreenListProjection(
@@ -74,14 +77,15 @@ function remove() {
         <div v-if="screen.inspectionErrors?.length" class="screen-callout"><div v-for="item in screen.inspectionErrors" :key="item">{{ item }}</div></div>
       </details>
       <h3 class="device-detail-section-title">设备运维</h3>
-      <div class="screen-detail-actions"><n-button v-for="action in screenActions" :key="action.value" size="small" :disabled="action.value === 'adb' && screen.size !== '10'" @click="$emit('operate', action.value)">{{ action.label }}</n-button><n-button size="small" :type="versionPending ? 'warning' : 'default'" :title="versionPending ? versionTitle : '重新核对设备应用版本，无需重复安装'" @click="$emit('versions')">核对版本并同步平台</n-button></div>
+      <div class="screen-detail-actions"><n-button size="small" :disabled="!store.projectId || !screen.ip" @click="remoteScreenOpen = true">查看屏幕</n-button><n-button v-for="action in screenActions" :key="action.value" size="small" :disabled="action.value === 'adb' && screen.size !== '10'" @click="$emit('operate', action.value)">{{ action.label }}</n-button><n-button size="small" :type="versionPending ? 'warning' : 'default'" :title="versionPending ? versionTitle : '重新核对设备应用版本，无需重复安装'" @click="$emit('versions')">核对版本并同步平台</n-button></div>
       <p class="screen-muted">“修改小新配置”读取屏端当前设置；修改运行中的环境配置后，会按需重启小新应用。</p>
       <h3 class="device-detail-section-title">最近操作 <small>{{ history.length }} 条</small></h3>
       <div v-if="!history.length" class="screen-callout">暂无操作记录。检查、安装和维护的结果会保留在这里。</div>
-      <div v-for="task in history" :key="task.id" class="screen-history-item"><div><b>{{ screenActionLabel(task.action) }}</b><n-tag size="small" :bordered="false">{{ screenStateLabel[task.state] }}</n-tag></div><small>{{ formatDisplayDateTime(task.createdAt) }}<template v-if="task.mode !== 'real'"> · 原型模拟</template></small><p>{{ task.targets.find((t) => [screen!.id, ...screen!.aliases].includes(t.screenId))?.message }}</p></div>
+      <div v-for="task in history" :key="task.id" class="screen-history-item"><div><b>{{ screenActionLabel(task.action) }}</b><n-tag size="small" :bordered="false">{{ screenTaskStateLabel(task) }}</n-tag></div><small>{{ formatDisplayDateTime(task.createdAt) }}<template v-if="task.mode !== 'real'"> · 原型模拟</template></small><p>{{ task.targets.find((t) => [screen!.id, ...screen!.aliases].includes(t.screenId))?.message }}</p></div>
       <template #footer><div class="screen-dialog-footer"><n-button v-if="screen.source === 'local'" type="error" quaternary @click="remove">移除本机记录</n-button><span class="screen-spacer"></span><n-button @click="$emit('close')">关闭</n-button><n-button type="primary" @click="$emit('edit', screen)">{{ screen.source === 'local' ? '编辑本机信息' : '编辑资料' }}</n-button></div></template>
     </n-drawer-content>
   </n-drawer>
+  <ScreenRemoteDialog v-if="remoteScreenOpen && screen" :show="remoteScreenOpen" :project-id="store.projectId" :screen-id="screen.id" :name="screen.name" :ip="screen.ip" :target-revision="`${screen.revision}|${screen.ip}|${screen.mac}|${screen.size}`" @close="remoteScreenOpen = false" />
 </template>
 
 <style scoped>

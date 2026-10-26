@@ -26,6 +26,8 @@ import { configureSystemDialogAdapter } from "@/shared/api/systemDialogAdapter";
 import { RealSystemDialogAdapter } from "@/shared/api/realSystemDialogAdapter";
 import { configureScreenAdapter } from "@/shared/api/screenAdapter";
 import { RealScreenAdapter } from "@/shared/api/realScreenAdapter";
+import { configureScreenRemoteAdapter, UnavailableScreenRemoteAdapter } from "@/shared/api/screenRemoteAdapter";
+import { RealScreenRemoteAdapter } from "@/shared/api/realScreenRemoteAdapter";
 
 async function bootstrap() {
   if (isTauriRuntime() && !isPrototypePreview()) {
@@ -37,6 +39,7 @@ async function bootstrap() {
     configureDiagnosticsAdapter(new RealDiagnosticsAdapter());
     configureSystemDialogAdapter(new RealSystemDialogAdapter());
     configureScreenAdapter(new RealScreenAdapter());
+    configureScreenRemoteAdapter(new RealScreenRemoteAdapter());
   } else if (import.meta.env.DEV) {
     const { FixtureWorkbenchAdapter } = await import("@/dev-fixtures/workbenchFixtureAdapter");
     const { FixtureActivityAdapter } = await import("@/dev-fixtures/activityFixtureAdapter");
@@ -48,6 +51,7 @@ async function bootstrap() {
     const { FixtureScreenAdapter } = await import("@/dev-fixtures/screenFixtureAdapter");
     const screenAdapter = new FixtureScreenAdapter();
     configureScreenAdapter(screenAdapter);
+    configureScreenRemoteAdapter(new UnavailableScreenRemoteAdapter());
     configureWorkbenchAdapter(new FixtureWorkbenchAdapter());
     configureActivityAdapter(new FixtureActivityAdapter(screenAdapter));
     configureAioAdapter(new FixtureAioAdapter());

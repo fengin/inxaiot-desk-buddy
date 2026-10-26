@@ -24,7 +24,8 @@ describe("Tauri真实模式物理隔离门禁", () => {
       "RealDataDirectoryAdapter",
       "RealDiagnosticsAdapter",
       "RealSystemDialogAdapter",
-      "RealScreenAdapter"
+      "RealScreenAdapter",
+      "RealScreenRemoteAdapter"
     ]) {
       expect(main).toContain(`new ${adapter}()`);
     }

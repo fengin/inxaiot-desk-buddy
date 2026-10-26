@@ -1,0 +1,9 @@
+{
+  "jar": "00bb846de36f6e9edcbf03b77d43a5dfaabbbc00aefdfb11df0948714156d1d8",
+  "sources": {
+    "build.ps1": "dd1290c4aa78acab62883a7ed44c12b55deb8a3c4c0d11e98f0ffc16e76ff480",
+    "src/com/inx/remote/FocusedText.java": "145e8aa4ed6907af0bce2a922f7183239d9cc578609cf5b2679ec0238381141e",
+    "src/com/inx/remote/TextProtocol.java": "fb6acb8dc163b3d9537c3debbc781c8d3e0773ea207902f168ff4e9e1dc02b7c",
+    "test/com/inx/remote/TextProtocolTest.java": "c9b453748f97456d76251130f9a047e28ddcca93c5d7e0a1ef9f859af1dac70f"
+  }
+}

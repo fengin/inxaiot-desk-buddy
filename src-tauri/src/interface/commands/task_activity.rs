@@ -404,6 +404,7 @@ async fn activity_task(
         .iter()
         .any(|target| target.resource_type == "preflight_internal");
     let results_protected=state.task_repository.results_protected(&task.id).await.map_err(CommandErrorDto::from)?;
+    let orphaned_assistance=crate::infrastructure::smart_screen::remote_screen::assistance::orphan_needs_review(state,&task).await.map_err(CommandErrorDto::from)?;
     let clearable = task.state.is_terminal() && !results_protected && !preserve_interrupted_aio_task(&task);
     let stage = if is_preflight {
         match task.state {
@@ -427,13 +428,13 @@ async fn activity_task(
         domain_type: task.domain_type,
         operation_type: task.operation_type,
         name: task.name,
-        state: if results_protected && task.state.is_terminal() { "finalizing_failed".into() } else { task.state.as_str().into() },
+        state: if orphaned_assistance || (results_protected && task.state.is_terminal()) { "finalizing_failed".into() } else { task.state.as_str().into() },
         stage,
         progress,
         target_count,
         completed_count,
         updated_at: task.updated_at,
-        cancellable: matches!(task.state, TaskState::Queued | TaskState::Running),
+        cancellable: !orphaned_assistance && matches!(task.state, TaskState::Queued | TaskState::Running),
         clearable,
     })
 }

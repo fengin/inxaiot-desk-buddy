@@ -80,7 +80,13 @@ pub fn run() {
     #[cfg(feature = "desktop-e2e")]
     let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
     let application = builder
+        .manage(crate::infrastructure::smart_screen::remote_screen::RemoteScreenSessions::default())
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                if let Some(sessions) = window.try_state::<crate::infrastructure::smart_screen::remote_screen::RemoteScreenSessions>() {
+                    sessions.close_owner(window.label());
+                }
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let Some(confirmation) = window.try_state::<ExitConfirmationState>() else {
                     return;
@@ -264,6 +270,12 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             interface::commands::smart_screen::screen_load,
+            interface::commands::screen_remote::screen_remote_open,
+            interface::commands::screen_remote::screen_remote_capture,
+            interface::commands::screen_remote::screen_remote_close,
+            interface::commands::screen_remote::screen_remote_begin_control,
+            interface::commands::screen_remote::screen_remote_end_control,
+            interface::commands::screen_remote::screen_remote_action,
             interface::commands::smart_screen::screen_lock_preview,
             interface::commands::smart_screen::screen_takeover_release,
             interface::commands::smart_screen::screen_lock_release,
@@ -379,6 +391,9 @@ pub fn run() {
             }
         }
         tauri::RunEvent::Exit => {
+            if let Some(sessions) = app_handle.try_state::<crate::infrastructure::smart_screen::remote_screen::RemoteScreenSessions>() {
+                sessions.close_all();
+            }
             let Some(state) = app_handle.try_state::<FormalAppState>() else {
                 return;
             };

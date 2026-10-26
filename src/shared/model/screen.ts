@@ -168,7 +168,7 @@ export interface ScreenTask {
   mode?: "prototype" | "real";
   id: string;
   projectId: string;
-  action: ScreenAction | "status" | "version_sync" | "merge";
+  action: ScreenAction | "status" | "version_sync" | "merge" | "remote_assistance";
   state: "running" | "cancelling" | "succeeded" | "partially_succeeded" | "failed" | "cancelled" | "needs_review";
   createdAt: string;
   updatedAt: string;
@@ -283,11 +283,21 @@ export const screenActions: { value: ScreenAction; label: string; description: s
   { value: "diagnostics", label: "采集诊断", description: "采集屏信息和应用检查信息" }
 ];
 
-export const screenActionLabel = (action: ScreenTask["action"]) => action === "status" ? "覆盖平台状态" : action === "version_sync" ? "同步平台应用版本" : action === "merge" ? "合并屏记录" : screenActions.find((item) => item.value === action)?.label ?? action;
+export const screenActionLabel = (action: ScreenTask["action"]) => action === "status" ? "覆盖平台状态" : action === "version_sync" ? "同步平台应用版本" : action === "merge" ? "合并屏记录" : action === "remote_assistance" ? "远程辅助操作" : screenActions.find((item) => item.value === action)?.label ?? action;
 export const screenStateLabel: Record<ScreenTask["state"] | ScreenTargetState, string> = {
   queued: "等待执行", running: "执行中", cancelling: "取消中", succeeded: "已成功",
   partially_succeeded: "部分成功", failed: "失败", cancelled: "已取消", needs_review: "结果待核实"
 };
+/** 会话结束不等于网页登录成功，历史列表沿用该语义。 */
+export function screenTaskStateLabel(task: { action: ScreenTask["action"]; state: keyof typeof screenStateLabel }): string {
+  if (task.action !== "remote_assistance") return screenStateLabel[task.state];
+  const labels: Record<keyof typeof screenStateLabel, string> = {
+    queued: "等待辅助操作", running: "辅助操作中", cancelling: "正在结束会话",
+    succeeded: "会话已结束", partially_succeeded: "会话已结束", failed: "会话异常结束",
+    cancelled: "会话已结束", needs_review: "会话记录待核实",
+  };
+  return labels[task.state];
+}
 export const normalizeScreenMac = (value: string) => value.replace(/[:-]/g, "").toUpperCase();
 export const effectiveScreenMac = (screen: SmartScreen) => screen.source === "platform" ? screen.mac || screen.observedMac : screen.observedMac || screen.mac;
 export const screenTaskActive = (task: ScreenTask) => ["running", "cancelling", "needs_review"].includes(task.state);

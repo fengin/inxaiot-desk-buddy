@@ -4,6 +4,13 @@ export const screenTaskPresentation: TaskPresentation = {
   stages: { screen_operation: "设备操作", screen_preflight: "操作检查", screen_save_result: "保存操作结果" },
   canRetryResult: () => true,
   labels: (task) => {
+    if (task.operationType === "remote_assistance") {
+      if (task.state === "finalizing_failed") return { name: "远程辅助操作", state: "会话记录待核实", stage: "仅补存会话记录和释放占用，不重发屏端操作", tone: "warning" };
+      if (task.state === "succeeded" || task.state === "cancelled") return { name: "远程辅助操作", state: "会话已结束", stage: "登录结果以屏端页面为准", tone: "info" };
+      if (task.state === "running") return { name: "远程辅助操作", state: "辅助操作中", stage: "登录结果以屏端页面为准", tone: "info" };
+      if (task.state === "failed" || task.state === "interrupted") return { name: "远程辅助操作", state: "会话异常结束", stage: "请查看屏端结果，不自动重发操作", tone: "warning" };
+      return { name: "远程辅助操作", stage: "登录结果以屏端页面为准", tone: "info" };
+    }
     if (task.operationType === "screen_registration_preview") {
       const checked = task.state === "succeeded" || task.state === "partially_succeeded";
       const failed = ["failed", "check_failed", "interrupted"].includes(task.state);

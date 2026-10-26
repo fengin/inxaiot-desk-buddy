@@ -106,6 +106,7 @@ pub fn action_label(action: &str) -> &str {
         "adb" => "保持 ADB 端口",
         "restart" => "重启小新应用",
         "app_config" => "修改小新配置",
+        "remote_assistance" => "远程辅助操作",
         "reboot" => "重启屏",
         "register" => "注册/更新到平台",
         "merge" => "合并屏记录",

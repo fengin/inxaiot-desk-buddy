@@ -4,7 +4,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { NMessageProvider, NPagination, NTag } from "naive-ui";
 import { describe, expect, it, vi } from "vitest";
 import type { ScreenTask, ScreenTargetState } from "@/shared/model/screen";
-import { screenStateLabel } from "@/shared/model/screen";
+import { screenActions, screenStateLabel, screenTaskStateLabel } from "@/shared/model/screen";
 import * as screenApi from "@/shared/api/screenAdapter";
 import { useActivityStore } from "@/stores/activity";
 import ScreenTaskResults from "./ScreenTaskResults.vue";
@@ -40,6 +40,37 @@ function registrationTask(state: ScreenTask["state"], modes: ("create" | "update
   });
   return value;
 }
+
+describe("远程辅助会话历史", () => {
+  it("历史显示会话语义，不进入批量操作或提供重放失败设备入口", async () => {
+    expect(screenActions.some(item => String(item.value) === "remote_assistance")).toBe(false);
+    const verify = vi.fn(async () => {});
+    const adapter = vi.spyOn(screenApi, "useScreenAdapter").mockReturnValue({ mode: "real", verify } as unknown as ReturnType<typeof screenApi.useScreenAdapter>);
+    try { for (const state of ["succeeded", "failed", "needs_review"] as const) {
+      const value = task(state, [state === "needs_review" ? "needs_review" : state]);
+      value.action = "remote_assistance";
+      value.mode = "real";
+      delete value.input;
+      const wrapper = render(value);
+      try {
+        await flushPromises();
+        expect(wrapper.get("h3").text()).toBe("远程辅助操作");
+        expect(wrapper.get(".screen-result-header .n-tag").text()).toBe(screenTaskStateLabel(value));
+        expect(wrapper.findAll("button").some(button => button.text().startsWith("重试"))).toBe(false);
+        expect(wrapper.get('[data-testid="remote-assistance-result-notice"]').text()).toContain("不代表H5登录成功");
+        expect(wrapper.findAll(".screen-callout")).toHaveLength(1);
+        expect(wrapper.findAll("button").some(button => button.text() === "补存会话记录")).toBe(state === "needs_review");
+        if (state === "needs_review") {
+          await wrapper.findAll("button").find(button => button.text() === "补存会话记录")!.trigger("click");
+          await flushPromises();
+          expect(verify).toHaveBeenCalledExactlyOnceWith(value.projectId, value.id);
+        }
+        expect(wrapper.getComponent(ScreenTaskResults).emitted("retry")).toBeUndefined();
+        expect(wrapper.getComponent(ScreenTaskResults).emitted("restart")).toBeUndefined();
+      } finally { wrapper.unmount(); }
+    } } finally { adapter.mockRestore(); }
+  });
+});
 
 describe("OWNER和应用锁定的独立执行结果", () => {
   function configTask(state: ScreenTask['state'], evidence: Record<string, unknown>) {

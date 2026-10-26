@@ -873,6 +873,7 @@ pub async fn views(state: &FormalAppState, project: &str) -> AppResult<Vec<Scree
             continue;
         };
         let results = task_data::read_results(state.local_store.pool(), project, &task.id).await?;
+        let orphaned_assistance = super::remote_screen::assistance::orphan_needs_review(state,&task).await?;
         let targets = state.task_repository.targets(&task.id).await?;
         let mapped = targets
             .into_iter()
@@ -883,11 +884,13 @@ pub async fn views(state: &FormalAppState, project: &str) -> AppResult<Vec<Scree
                     screen_id: screen.id.clone(),
                     name: screen.fields.name.clone(),
                     ip: screen.fields.ip.clone(),
-                    state: match target.state {
+                    state: if orphaned_assistance && matches!(target.state,TargetState::Pending|TargetState::Running) {
+                        "needs_review"
+                    } else { match target.state {
                         TargetState::Pending => "queued",
                         TargetState::Unknown | TargetState::Interrupted => "needs_review",
                         s => s.as_str(),
-                    }
+                    }}
                     .into(),
                     progress: if target.progress_total > 0 {
                         ((target.progress_current * 100 / target.progress_total).min(100)) as u32
@@ -978,7 +981,7 @@ pub async fn views(state: &FormalAppState, project: &str) -> AppResult<Vec<Scree
             id: task.id,
             project_id: project.into(),
             action: task.operation_type,
-            state: if protected && task.state.is_terminal() {
+            state: if orphaned_assistance || (protected && task.state.is_terminal()) {
                 "needs_review"
             } else {
                 match task.state {

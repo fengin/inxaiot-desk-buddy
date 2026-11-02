@@ -25,6 +25,7 @@ use crate::core::error::{AppError, AppResult};
 use crate::domain::aio::deployment::{AgentInvocation, DeploymentMode, DeploymentPlan};
 use crate::domain::aio::release::sha256_file;
 use crate::domain::common::task::{StepState, TargetState, TaskEventLevel};
+use crate::infrastructure::deployment_clock::{ClockSyncEvent, synchronize_host_clock};
 
 #[derive(Clone, Debug)]
 pub struct RemoteDeploymentFiles {
@@ -435,6 +436,92 @@ where
             35,
         )
         .await?;
+        let clock_sync = synchronize_host_clock(session, cancellation, &checkpoint, |event| {
+            let (state, level, code, message) = match event {
+                ClockSyncEvent::Checking => (
+                    StepState::Running,
+                    TaskEventLevel::Info,
+                    "CLOCK_CHECK_STARTED",
+                    "正在核对一体机与当前电脑的时钟；偏差超过5秒时自动以电脑为准校准".into(),
+                ),
+                ClockSyncEvent::DriftDetected { offset_ms } => (
+                    StepState::Running,
+                    TaskEventLevel::Warn,
+                    "CLOCK_DRIFT_DETECTED",
+                    format!(
+                        "一体机时钟估算比当前电脑{} {:.3} 秒，将以当前电脑时间自动校准",
+                        if offset_ms > 0 { "快" } else { "慢" },
+                        offset_ms.abs() as f64 / 1_000.0,
+                    ),
+                ),
+                ClockSyncEvent::Verified {
+                    offset_ms,
+                    corrected,
+                } => (
+                    StepState::Succeeded,
+                    TaskEventLevel::Info,
+                    "CLOCK_SYNC_VERIFIED",
+                    format!(
+                        "{}，一体机与当前电脑时间估算偏差{:+.3}秒（允许5秒）",
+                        if corrected {
+                            "已自动校准并回读确认"
+                        } else {
+                            "时钟核对通过，无需校准"
+                        },
+                        offset_ms as f64 / 1_000.0,
+                    ),
+                ),
+            };
+            emit_progress(
+                progress,
+                config,
+                "clock_sync",
+                Some("clock_sync"),
+                Some(state),
+                TargetState::Running,
+                35,
+                level,
+                code,
+                Some(message),
+            )
+        })
+        .await;
+        if let Err(error) = clock_sync {
+            let cancelled = matches!(&error, AppError::Cancelled);
+            let _ = emit_progress(
+                progress,
+                config,
+                "clock_sync",
+                Some("clock_sync"),
+                Some(if cancelled {
+                    StepState::Cancelled
+                } else {
+                    StepState::Failed
+                }),
+                if cancelled {
+                    TargetState::Cancelled
+                } else {
+                    TargetState::Failed
+                },
+                35,
+                if cancelled {
+                    TaskEventLevel::Warn
+                } else {
+                    TaskEventLevel::Error
+                },
+                if cancelled {
+                    "CLOCK_SYNC_CANCELLED"
+                } else {
+                    "CLOCK_SYNC_FAILED"
+                },
+                Some(format!("时钟核对或自动校准未完成：{error}")),
+            );
+            return Err(if cancelled {
+                error
+            } else {
+                AppError::Conflict(format!("一体机时钟核对或自动校准失败：{error}"))
+            });
+        }
         let invocations = plan.agent_invocations();
         let invocation_count = u64::try_from(invocations.len()).unwrap_or(1).max(1);
         for (index, invocation) in invocations.into_iter().enumerate() {

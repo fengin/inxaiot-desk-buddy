@@ -404,6 +404,7 @@ function stageLabel(stage?: string) {
     prepare_lease: "确认任务可执行", prepare_lease_failed: "任务执行条件确认失败",
     prepare_remote: "准备一体机", prepare_local: "准备发布文件",
     upload: "上传发布文件", precheck: "检查运行环境", backup: "备份现有数据",
+    clock_sync: "核对并校准时钟",
     install: "安装发布包", health: "检查服务状态", register: "确认平台注册",
     service_check: "检查目标服务", service_upgrade: "升级目标服务", service_health: "检查目标服务状态",
     remote_complete: "一体机操作完成", finalizing: "保存执行结果", completed: "已完成",
@@ -862,6 +863,7 @@ function historyArtifact(record: OperationHistoryItem) {
               <span v-else><Archive :size="16" /><strong class="metric-number" :class="selectedImageCount === composeServices.length && composeServices.length ? 'metric-operation' : 'metric-warning'" data-testid="summary-image-count">{{ selectedImageCount }}/{{ composeServices.length }}</strong> 个服务镜像</span>
               <span><Clock3 :size="16" />预计 <strong class="metric-number metric-warning" data-testid="summary-estimate">8～12</strong> 分钟</span>
             </div>
+            <p class="operation-clock-note" data-testid="operation-clock-note">部署前自动核对时钟，偏差超过5秒时以当前电脑为准校准。非 root 账号会自动尝试 sudo 免交互提权，不弹密码或额外确认；权限不足时停止该台部署。</p>
             <div v-if="checking" class="preflight-progress" data-testid="operation-preflight-progress" aria-live="polite">
               <div><span>{{ preflightProgressMessage }}</span><strong data-testid="operation-preflight-progress-count">已完成 {{ preflightProgressCurrent }}/{{ preflightProgressTotal }} 项</strong></div>
               <n-progress type="line" :percentage="preflightProgressPercent" :show-indicator="false" :height="5" processing />
@@ -875,6 +877,7 @@ function historyArtifact(record: OperationHistoryItem) {
           <header class="stage-heading"><div><span class="feature-icon operation"><ShieldCheck :size="20" /></span><span><strong>部署检查</strong><small>先检查公共发布配置，再逐台检查连接和运行环境</small></span></div><n-tag size="small" class="preflight-status-tag" :type="!workflow.preflight?.ready ? 'error' : preflightHasWarnings ? 'warning' : 'success'" :bordered="false"><span class="preflight-status-label">{{ !workflow.preflight?.ready ? '有问题待处理' : preflightHasWarnings ? '可继续（有提示）' : '全部通过' }}</span></n-tag></header>
           <DeploymentPreflightGroups :report="workflow.preflight" :nodes="eligibleNodes" @remediate="handleRemediation" />
           <div class="render-preview"><span><FileArchive :size="20" /></span><div><strong>本次发布</strong><small class="render-preview-summary"><template v-if="workflow.preflight?.normalizedPlan.mode !== 'service_upgrade'"><strong class="metric-number metric-operation" data-testid="preflight-summary-image-count">{{ workflow.preflight?.normalizedPlan.imageFiles.length ?? 0 }}</strong> 个服务镜像</template><template v-else>{{ workflow.preflight?.normalizedPlan.artifactName }}</template> {{ workflow.preflight?.normalizedPlan.artifactVersion }} · <strong class="metric-number metric-info" data-testid="preflight-summary-target-count">{{ workflow.preflight?.normalizedPlan.targetMacs.length ?? 0 }}</strong> 台一体机 · 并发 <strong class="metric-number metric-warning" data-testid="preflight-summary-concurrency">{{ workflow.preflight?.normalizedPlan.concurrency ?? concurrency }}</strong> 台</small></div></div>
+          <p class="operation-clock-note" data-testid="operation-clock-note">部署前自动核对时钟，偏差超过5秒时以当前电脑为准校准。非 root 账号会自动尝试 sudo 免交互提权，不弹密码或额外确认；权限不足时停止该台部署。</p>
           <footer class="stage-footer"><span v-if="preflightSnapshotMissing" class="preflight-submit-warning" data-testid="operation-preflight-snapshot-warning">本次检查结果不完整，请返回重新检查</span><n-button size="small" @click="step = 0">返回调整</n-button><n-button size="small" class="operation-button" data-testid="operation-submit" :loading="executing" :disabled="executing || !preflightSubmissionReady" @click="startOperation"><template #icon><Play /></template>{{ executing ? "正在创建部署任务" : "提交部署任务" }}</n-button></footer>
         </section>
 
@@ -949,6 +952,14 @@ function historyArtifact(record: OperationHistoryItem) {
 </template>
 
 <style scoped>
+.operation-clock-note {
+  flex: none;
+  margin: 0;
+  color: var(--inx-color-text-secondary);
+  font-size: var(--inx-font-size-base);
+  line-height: 1.7;
+}
+
 .compose-missing-alert {
   margin-bottom: 10px;
 }

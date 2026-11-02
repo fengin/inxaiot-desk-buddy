@@ -166,7 +166,8 @@ impl DeploymentPlan {
         let steps = match input.mode {
             DeploymentMode::FirstDeploy => vec![
                 step("precheck", "远端环境预检", Some("precheck"), 10),
-                step("upload", "上传镜像与配置", None, 30),
+                step("upload", "上传镜像与配置", None, 25),
+                step("clock_sync", "核对并自动校准一体机时钟", None, 5),
                 step("install", "安装并启动全部服务", Some("install"), 35),
                 step("register", "调用一体机本地注册接口", None, 10),
                 step("health", "服务与版本检查", Some("health"), 15),
@@ -174,13 +175,15 @@ impl DeploymentPlan {
             DeploymentMode::FullUpgrade => vec![
                 step("precheck", "远端环境预检", Some("precheck"), 10),
                 step("backup", "备份当前配置与必要数据", Some("backup"), 15),
-                step("upload", "上传镜像与配置", None, 25),
+                step("upload", "上传镜像与配置", None, 20),
+                step("clock_sync", "核对并自动校准一体机时钟", None, 5),
                 step("install", "升级并重建全部服务", Some("install"), 35),
                 step("health", "服务与版本检查", Some("health"), 15),
             ],
             DeploymentMode::ServiceUpgrade => vec![
                 step("service_check", "检查目标服务", Some("service-check"), 15),
-                step("upload", "上传单个镜像", None, 35),
+                step("upload", "上传单个镜像", None, 30),
+                step("clock_sync", "核对并自动校准一体机时钟", None, 5),
                 step(
                     "service_upgrade",
                     "加载镜像并重建目标服务",

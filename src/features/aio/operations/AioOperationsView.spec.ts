@@ -42,6 +42,7 @@ class RecoveryActivityAdapter extends FixtureActivityAdapter {
 
 class RecoveryOperationsAdapter extends FixtureOperationsAdapter {
   completed = false;
+  stage = "upload";
   finalState: "succeeded" | "failed" = "succeeded";
   override async getTask(projectId: string, taskId: string) {
     if (taskId !== recoveredTaskId) return super.getTask(projectId, taskId);
@@ -51,7 +52,7 @@ class RecoveryOperationsAdapter extends FixtureOperationsAdapter {
       operationType: "full_upgrade",
       name: "恢复中的整包升级",
       state: this.completed ? this.finalState : "running",
-      stage: this.completed ? "completed" : "upload",
+      stage: this.completed ? "completed" : this.stage,
       progress: this.completed ? 100 : 35,
       targetCount: 1,
       completedCount: this.completed ? 1 : 0,
@@ -63,7 +64,7 @@ class RecoveryOperationsAdapter extends FixtureOperationsAdapter {
       targets: [{
         mac: "000C293BB931",
         state: this.completed ? this.finalState : "running",
-        stage: this.completed ? "completed" : "upload",
+        stage: this.completed ? "completed" : this.stage,
         progress: this.completed ? 100 : 35,
         updatedAt: new Date().toISOString()
       }],
@@ -598,12 +599,14 @@ describe("部署页面活动任务恢复", () => {
     try {
       await flushPromises();
       await wrapper.get('[data-testid="operation-mode-service"]').trigger("click");
+      expect(wrapper.get('[data-testid="operation-clock-note"]').text()).toBe("部署前自动核对时钟，偏差超过5秒时以当前电脑为准校准。非 root 账号会自动尝试 sudo 免交互提权，不弹密码或额外确认；权限不足时停止该台部署。");
       await wrapper.get('[data-testid="operation-image-select-device-edge"]').trigger("click");
       await wrapper.get('[data-testid="operation-preflight"]').trigger("click");
       await vi.waitFor(() => {
         expect(wrapper.find('[data-testid="operation-preflight-report"]').exists()).toBe(true);
       });
       const workflow = useDeploymentWorkflowStore(pinia);
+      expect(wrapper.get('[data-testid="operation-preflight-report"] [data-testid="operation-clock-note"]').text()).toBe("部署前自动核对时钟，偏差超过5秒时以当前电脑为准校准。非 root 账号会自动尝试 sudo 免交互提权，不弹密码或额外确认；权限不足时停止该台部署。");
       const checkedTaskId = workflow.preflightTaskId;
       const checkedSnapshot = workflow.preflight?.executionSnapshot;
       const preflightCallsBeforeSubmit = operationsAdapter.preflightCalls;
@@ -747,6 +750,12 @@ describe("部署页面活动任务恢复", () => {
     expect(wrapper.get('.aio-execution-table strong').text()).toBe("AIO-1F-弱电间");
     expect(wrapper.get('.aio-execution-table').text()).toContain("上传发布文件");
     expect(wrapper.get('.aio-execution-table').text()).not.toContain("upload");
+    operationsAdapter.stage = "clock_sync";
+    const clockWorkflow = useDeploymentWorkflowStore(pinia);
+    await clockWorkflow.loadTask(clockWorkflow.currentTaskProjectId!, recoveredTaskId);
+    await flushPromises();
+    expect(wrapper.get('.aio-execution-table').text()).toContain("核对并校准时钟");
+    expect(wrapper.get('.aio-execution-table').text()).not.toContain("clock_sync");
     const historyButton = wrapper.findAll('button').find((button) => button.text() === '查看历史记录');
     expect(historyButton).toBeDefined();
     await historyButton!.trigger('click');

@@ -7,6 +7,7 @@ pub mod client_instance;
 pub mod csv_inventory;
 pub mod data_directory;
 pub mod database;
+mod deployment_clock;
 pub mod deployment_control;
 pub mod deployment_finalization;
 mod deployment_preflight_probes;

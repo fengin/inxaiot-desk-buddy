@@ -20,6 +20,7 @@ export const aioTaskPresentation: TaskPresentation = {
     ssh_connected: "连接完成",
     upload: "上传发布文件",
     prepare_agent: "准备执行脚本",
+    clock_sync: "核对并校准时钟",
     precheck: "检查运行环境",
     backup: "备份现有数据",
     install: "安装发布包",

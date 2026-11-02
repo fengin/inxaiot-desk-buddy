@@ -12,6 +12,7 @@ const task = (domainType: string): ActivityTask => ({
 describe("公共任务的业务展示", () => {
   it("相同阶段代码按业务显示，未知业务不套用一体机文案", () => {
     expect(taskStageLabel(task("aio"))).toBe("安装发布包");
+    expect(taskStageLabel({ ...task("aio"), stage: "clock_sync" })).toBe("核对并校准时钟");
     expect(taskStageLabel(task("test-device"))).toBe("处理中");
     const unregister = registerTaskPresentation("test-device", {
       stages: { install: "安装测试应用" }, canRetryResult: () => true

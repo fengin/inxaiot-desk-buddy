@@ -69,7 +69,7 @@ fn patches(targets: &[ScreenAsset]) -> BTreeMap<String, AppConfigPatch> {
 
 fn plan(project: &str, targets: Vec<ScreenAsset>) -> ScreenPlan {
     ScreenPlan { project_id: project.into(), input: input(&targets),
-        detail: serde_json::to_value(maintenance::MaintenancePlan { apk: None, observations: Default::default(),
+        detail: serde_json::to_value(maintenance::MaintenancePlan { settings: None, apk: None, observations: Default::default(),
             request_ids: Default::default(), app_config: Some(patches(&targets)), ntp: None }).unwrap(),
         targets, business_project_id: None, data_source_id: None,
         operator: "隔离门禁测试".into(), instance_id: "size-test".into(), created_at: now() }
@@ -272,7 +272,7 @@ fn same_size_keeps_legacy_capability_flow_and_other_actions_keep_their_rules() {
         let mut install = input(&targets); install.action = "install".into(); install.application_id = Some("xiaoxin".into());
         assert!(matches!(maintenance::preflight(&state, &project, install).await.unwrap_err(), AppError::InvalidConfig(message) if message == "一批安装只能选择同一种明确尺寸，包括当前筛选隐藏的目标"));
         let mut ntp = plan(&project, targets.clone()); ntp.input.action = "ntp".into();
-        ntp.detail = serde_json::to_value(maintenance::MaintenancePlan { apk: None, observations: Default::default(), request_ids: Default::default(), app_config: None,
+        ntp.detail = serde_json::to_value(maintenance::MaintenancePlan { settings: None, apk: None, observations: Default::default(), request_ids: Default::default(), app_config: None,
             ntp: Some(targets.iter().map(|screen| (screen.id.clone(), inxaiot_desk_buddy_lib::domain::smart_screen::ntp::NtpPatch { server: "192.0.2.142".into() })).collect()) }).unwrap();
         let preview = save_preview(&state, &ntp).await;
         tasks::submit(&state, &project, &preview, ntp.input.clone()).await.unwrap();

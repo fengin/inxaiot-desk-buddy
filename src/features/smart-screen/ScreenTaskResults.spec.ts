@@ -351,7 +351,7 @@ describe("紧凑操作结果与恢复动作", () => {
       const tag = wrapper.get("tbody .n-tag");
       expect(tag.text()).toBe(label);
       expect(wrapper.get("tbody").getComponent(NTag).props("type")).toBe(type);
-      expect(wrapper.get("thead").text()).toContain("在线状态");
+      expect(wrapper.get("thead").text()).toContain("网络连通性");
       expect(wrapper.get(".screen-result-header .n-tag").text()).toBe("检查完成");
       expect(wrapper.get("tbody").text()).not.toContain("设备：已完成");
       if (state === "failed") expect(wrapper.get(".screen-result-message").text()).toBe(target.message);

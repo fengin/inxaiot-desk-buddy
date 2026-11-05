@@ -18,6 +18,8 @@ pub mod value_updates;
 pub mod maintenance;
 pub mod installation_progress;
 pub mod device_maintenance;
+pub mod sleep_policy;
+pub mod screen_settings;
 pub mod diagnostics;
 pub mod history;
 pub mod platform;

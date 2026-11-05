@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { NAlert, NButton, NCheckbox, NInput, NInputNumber, NModal, NPagination, NPopover, NSelect } from "naive-ui";
+import { NAlert, NButton, NCheckbox, NInput, NModal, NPagination, NPopover, NSelect } from "naive-ui";
 import { useScreenAdapter } from "@/shared/api/screenAdapter";
 import { useSmartScreensStore } from "@/stores/smartScreens";
 import { screenMaintenanceFingerprint } from "@/shared/model/screenMaintenance";
@@ -12,6 +12,8 @@ import { appConfigCurrentValueKnown, appConfigDefinition, appConfigDefinitions, 
 import ScreenTargetPicker from "./ScreenTargetPicker.vue";
 import ScreenTaskResults from "./ScreenTaskResults.vue";
 import ScreenVoiceConfig from "./ScreenVoiceConfig.vue";
+import ScreenOperationStartPanel from "./ScreenOperationStartPanel.vue";
+import ScreenOperationFooter from "./ScreenOperationFooter.vue";
 
 const step = defineModel<number>("step", { required: true });
 const emit = defineEmits<{ busy: [value: boolean] }>();
@@ -30,9 +32,6 @@ const voiceMode = computed(() => voiceEdits.autoStartVoiceEngine?.mode === "set"
 const names = reactive<Record<string, Edit>>({});
 const rows = ref<ScreenAppConfigRead[]>([]), included = ref<string[]>([]), checks = ref<ScreenPreflightItem[]>([]);
 const busy = ref(false), error = ref(""), readingIds = ref<string[]>([]);
-const readingId = computed(() => readingIds.value[0] ?? "");
-const prepared = ref<ScreenOperationInput>();
-const preparedBatchKey = ref("");
 const savedDraft = ref<ScreenAppConfigDraft|null>(null), freshRead = ref(false);
 const page = ref(1), pageSize = ref(50), detailId = ref("");
 const listBody = ref<HTMLElement>();
@@ -42,6 +41,7 @@ let draftWrites = Promise.resolve();
 let restoring = false;
 let generation = 0;
 let sizeRevision = 0;
+let preserveReadEdits = false;
 const task = computed(() => store.snapshot.tasks.find(t => t.id === store.openedTaskId));
 const running = computed(() => task.value && ["running", "cancelling"].includes(task.value.state));
 const includedSet = computed(() => new Set(included.value));
@@ -49,11 +49,12 @@ const screensById = computed(() => new Map(store.snapshot.screens.map(screen => 
 function batchSizeWarning(ids: readonly string[]) {
   return screenBatchSizeWarning(ids.map(id => screensById.value.get(id) ?? { size: "unknown" as const }), "4 寸屏和 10 寸屏不能同时修改配置，请分批选择。");
 }
-function sizeBatchKey(ids: readonly string[]) { return JSON.stringify(ids.map(id => [id, screensById.value.get(id)?.size ?? "unknown"])); }
-const selectionSizeKey = computed(() => sizeBatchKey(store.selectedIds));
+const selectionScope = computed(() => JSON.stringify(store.selectedIds.map(id => {
+  const screen = screensById.value.get(id);
+  return [id, screen ? screenMaintenanceFingerprint(screen) : null];
+})));
 const selectionSizeWarning = computed(() => batchSizeWarning(store.selectedIds));
 const includedSizeWarning = computed(() => batchSizeWarning(included.value));
-const operationBatchKey = computed(() => sizeBatchKey(included.value));
 const visibleError = computed(() => error.value === selectionSizeWarning.value || error.value === includedSizeWarning.value ? "" : error.value);
 const selected = computed(() => rows.value.filter(r => includedSet.value.has(r.screenId) && r.config));
 const includedRows = computed(() => rows.value.filter(row => includedSet.value.has(row.screenId)));
@@ -164,7 +165,6 @@ const voiceDirtyKeys = computed(() => freshRead.value ? voiceFields.value.filter
   const edit = voiceEdits[field.definition.key];
   return field.editable && edit?.mode === "set" && includedRows.value.some(row => row.config && appConfigValue(row.config, field.definition.key) !== edit.value);
 }).map(field => field.definition.key) : []);
-const readyIds = computed(() => checks.value.filter(row => row.state === "ready").map(row => row.screenId));
 function name(id: string) { return screensById.value.get(id)?.name ?? id; }
 function ip(id: string) { return screensById.value.get(id)?.ip ?? ""; }
 function changeEnvironment(value: AppEnvironment) {
@@ -267,12 +267,13 @@ function editName(row: ScreenAppConfigRead, value: string) {
 }
 watch(pageSize, () => { page.value = 1; });
 watch([page, pageSize], () => { if (listBody.value) listBody.value.scrollTop = 0; });
-function invalidate() { checks.value = []; prepared.value = undefined; preparedBatchKey.value = ""; }
-watch(selectionSizeKey, () => {
+function invalidate() { checks.value = []; }
+watch(selectionScope, () => {
   ++sizeRevision; invalidate();
+  if (busy.value) { ++generation; busy.value = false; readingIds.value = []; }
   if (step.value === 1 && !restoring) {
     freshRead.value = false;
-    error.value = selectionSizeWarning.value || "所选屏尺寸或范围已变化，请重新读取配置后再检查提交。";
+    error.value = selectionSizeWarning.value || "所选屏身份或范围已变化，请返回选屏页重新读取。";
   } else if (step.value === 0 && ["4 寸屏和 10 寸屏不能同时修改配置，请分批选择。", "请先确认所选屏尺寸"].includes(error.value)) error.value = "";
 }, { flush: "sync" });
 watch([environment, switchEnvironment, readyMode, homeMode, homeActivation, ensureDeviceOwner, kioskMode, () => JSON.stringify(voiceEdits), concurrency, () => JSON.stringify(edits), () => JSON.stringify(names), () => included.value.join("|")], invalidate);
@@ -281,6 +282,7 @@ watch(environment, () => { if(restoring)return;for (const edit of Object.values(
 watch(busy, value => emit("busy", value), { flush: "sync" });
 watch(() => store.projectId, () => { void flushDraft();reset();savedDraft.value=null;void loadDraft(); });
 watch(() => store.selectedIds.join("|"), () => { if (step.value === 0 && !busy.value) { rows.value = []; invalidate(); } });
+watch(step, (value, previous) => { if (value === 0 && previous === 1) { ++generation; freshRead.value = false; busy.value = false; readingIds.value = []; invalidate(); } }, { flush: "sync" });
 onBeforeUnmount(() => { void flushDraft();++generation; emit("busy", false); });
 onMounted(loadDraft);
 async function loadDraft(){const project=store.projectId;try{const value=await useScreenAdapter().loadAppConfigDraft?.(project);if(project===store.projectId)savedDraft.value=value??null;}catch(cause){if(project===store.projectId)error.value=(cause as Error).message;}}
@@ -307,28 +309,29 @@ function restoreDraft(){
   restoring=true;environment.value=draft.environment;switchEnvironment.value=draft.switchEnvironment;readyMode.value=draft.readyMode;homeMode.value=draft.homeMode??"keep";homeActivation.value=draft.homeActivation===true;restoreVoiceEdits(draft);
   ensureDeviceOwner.value=draft.ensureDeviceOwner===true;kioskMode.value=["on","off"].includes(draft.kioskMode||"")?draft.kioskMode!:"keep";
   Object.assign(edits,draft.edits);Object.assign(names,draft.names);store.selectedIds=ids;rows.value=draft.rows.filter(row=>ids.includes(row.screenId));included.value=draft.includedIds.filter(id=>ids.includes(id));
-  freshRead.value=false;invalidate();step.value=1;restoring=false;
+  freshRead.value=false;invalidate();restoring=false;void read(true);
 }
-function reset() { ++generation; rows.value = []; included.value = []; readingIds.value = []; invalidate(); freshRead.value=false;busy.value = false; error.value = ""; step.value = 0; store.openedTaskId = ""; page.value=1;detailId.value="";for(const key of Object.keys(names))delete names[key];for(const field of fields)keepAddress(field.key);readyMode.value="keep";homeMode.value="keep";homeActivation.value=false;ensureDeviceOwner.value=false;kioskMode.value="keep";resetVoiceEdits();switchEnvironment.value=false; }
-async function selectAgain() { const request = ++generation; freshRead.value = false; invalidate(); readingIds.value = []; busy.value = false; await flushDraft(); if (request !== generation) return; error.value = ""; step.value = 0; }
-async function read() {
-  if(busy.value)return;
+function reset() { ++generation; preserveReadEdits = false; rows.value = []; included.value = []; readingIds.value = []; invalidate(); freshRead.value=false;busy.value = false; error.value = ""; step.value = 0; store.openedTaskId = ""; page.value=1;detailId.value="";for(const key of Object.keys(names))delete names[key];for(const field of fields)keepAddress(field.key);readyMode.value="keep";homeMode.value="keep";homeActivation.value=false;ensureDeviceOwner.value=false;kioskMode.value="keep";resetVoiceEdits();switchEnvironment.value=false; }
+async function read(preserveEdits = preserveReadEdits, managed = false) {
+  if(busy.value && !managed)return false;
   const ids = [...store.selectedIds], warning = batchSizeWarning(ids);
-  if (warning) { error.value = warning; return; }
-  if (!ids.length) { error.value = "请先选择智能屏"; return; }
+  if (warning) { error.value = warning; return false; }
+  if (!ids.length) { error.value = "请先选择智能屏"; return false; }
   const adapter = useScreenAdapter();
-  if (!adapter.readAppConfig) { error.value = "请在正式桌面程序中读取实际屏配置"; return; }
-  const request = ++generation, project = store.projectId, revision = sizeRevision;
+  if (!adapter.readAppConfig) { error.value = "请在正式桌面程序中读取实际屏配置"; return false; }
+  const request = managed ? generation : ++generation, project = store.projectId, revision = sizeRevision, scope = selectionScope.value;
   const readBatchCurrent = () => {
-    if (generation !== request || project !== store.projectId) return false;
+    if (generation !== request || project !== store.projectId || scope !== selectionScope.value) return false;
     const currentWarning = batchSizeWarning(ids);
     if (revision !== sizeRevision || currentWarning) { error.value = currentWarning || "所选屏尺寸或范围已变化，请重新读取配置后再检查提交。"; return false; }
     return true;
   };
-  const continuing = step.value === 1, previousIncluded = new Set(included.value), previousRows = new Set(rows.value.map(row => row.screenId));
+  const continuing = preserveEdits, previousIncluded = new Set(included.value), previousRows = new Set(rows.value.filter(row => row.config).map(row => row.screenId));
+  preserveReadEdits = true;
   page.value = 1; detailId.value = "";
   if (!continuing) { for (const field of fields) keepAddress(field.key); readyMode.value = "keep"; homeMode.value = "keep"; homeActivation.value = false; ensureDeviceOwner.value=false;kioskMode.value="keep"; resetVoiceEdits(); switchEnvironment.value = false; for (const id of Object.keys(names)) delete names[id]; }
-  rows.value = []; included.value = []; readingIds.value = []; invalidate(); freshRead.value=false;error.value = ""; busy.value = true; step.value = 1;
+  rows.value = []; included.value = []; readingIds.value = []; invalidate(); freshRead.value=false;error.value = ""; busy.value = true;
+  const readConcurrency = Math.max(1, Math.min(3, Math.trunc(concurrency.value) || 1));
   try {
     const completed = new Map<string, ScreenAppConfigRead>(), acceptedIds = new Set<string>();
     let next = 0;
@@ -354,8 +357,9 @@ async function read() {
         included.value = ids.filter(screenId => acceptedIds.has(screenId));
       }
     };
-    await Promise.all(Array.from({ length: Math.min(3, ids.length) }, worker));
-    if (!readBatchCurrent()) return;
+    await Promise.all(Array.from({ length: Math.min(readConcurrency, ids.length) }, worker));
+    if (!readBatchCurrent()) return false;
+    if (!rows.value.some(row => row.config)) { error.value = "所选屏配置均未读取成功，请核对下方原因后重新读取。"; return false; }
     if (!continuing) {
       const current = summaries.value.current.value;
       if (current === "test" || current === "pre" || current === "prod") environment.value = current;
@@ -372,58 +376,59 @@ async function read() {
       const edit = voiceEdits[field.definition.key];
       if (field.editable && edit?.mode === "set" && includedRows.value.every(row => row.config && appConfigValue(row.config, field.definition.key) === edit.value)) voiceEdits[field.definition.key] = { mode: "keep", value: null };
     }
-  } catch (cause) { if (generation === request) error.value = (cause as Error).message; }
-  finally { if (generation === request) { busy.value = false; readingIds.value = []; } }
+    step.value = 1;
+    return true;
+  } catch (cause) { if (generation === request) error.value = (cause as Error).message; return false; }
+  finally { if (generation === request) { if (!managed) busy.value = false; readingIds.value = []; } }
 }
-async function prepare() {
-  if(busy.value)return;
-  const warning = batchSizeWarning(included.value);
-  if (warning) { error.value = warning; invalidate(); return; }
-  if(!freshRead.value){error.value='请先重新读取屏端当前配置，再检查修改内容';return;}
-  if (homeNeedsUnlock.value.length) { error.value=homeUnlockHint.value; invalidate(); return; }
-  if (voiceValidationErrors.value.length) { error.value = voiceValidationErrors.value.join("；"); return; }
-  if (!changedRows.value.length) { error.value = "请至少选择一项需要修改的配置"; return; }
-  const adapter = useScreenAdapter();
-  if (!adapter.preflightAppConfig) return;
-  for (const row of changedRows.value) for (const value of Object.values(patches.value[row.screenId].set)) {
-    if (typeof value === "string" && !value.trim()) { error.value = "OTA 地址不能为空。WebSocket、H5地址和设备名可删除内容来清空。"; return; }
-  }
-  const ids = changedRows.value.map(row => row.screenId);
-  const executionWarning = batchSizeWarning(ids);
-  if (executionWarning) { error.value = executionWarning; invalidate(); return; }
-  const input: ScreenOperationInput = { action: "app_config", targetIds: ids, appVersion: "", abi: "universal", reinstall: false, concurrency: concurrency.value,
-    expectedTargets: Object.fromEntries(ids.map(id => [id, screenMaintenanceFingerprint(screensById.value.get(id)!)])) };
-  const payload = JSON.parse(JSON.stringify(Object.fromEntries(ids.map(id => [id, patches.value[id]])))) as Record<string, ScreenAppConfigPatch>;
-  for (const row of changedRows.value) for (const [key, value] of Object.entries(payload[row.screenId].set)) {
-    const field = appConfigDefinition(row, key);
-    if (!field) { error.value = "所选屏未提供该字段定义，请重新读取后检查"; return; }
-    const issue = appConfigFieldIssue(field, value);
-    if (!field.writable || issue) { error.value = `${field.label}：${issue || "此项不可修改"}`; return; }
-  }
-  const request = ++generation, revision = sizeRevision, batch = operationBatchKey.value; busy.value = true; error.value = "";
-  try {
-    const result = await adapter.preflightAppConfig(store.projectId, input, payload);
-    if (request !== generation || revision !== sizeRevision || batch !== operationBatchKey.value) return;
-    checks.value = result; prepared.value = input; preparedBatchKey.value = batch;
-  } catch (cause) { if (request === generation) error.value = (cause as Error).message; }
-  finally { if (request === generation) busy.value = false; }
-}
+const submissionKey = computed(() => JSON.stringify({ scope: selectionScope.value, included: included.value, patches: patches.value, concurrency: concurrency.value }));
 async function submit() {
   if(busy.value)return;
-  const warning = batchSizeWarning(included.value) || batchSizeWarning(readyIds.value);
-  if (warning) { error.value = warning; invalidate(); return; }
-  if (!freshRead.value || preparedBatchKey.value !== operationBatchKey.value) { error.value = "所选屏尺寸或范围已变化，请重新读取配置后再检查提交。"; invalidate(); return; }
-  if (!prepared.value || !readyIds.value.length) return;
-  const request = ++generation, project = store.projectId; busy.value = true; error.value = "";
+  const request = ++generation, project = store.projectId, scope = selectionScope.value;
+  const current = () => request === generation && project === store.projectId && scope === selectionScope.value;
+  busy.value = true; error.value = ""; invalidate();
   try {
-    const taskId = await useScreenAdapter().execute(project, { ...prepared.value, targetIds: [...readyIds.value] });
-    if (request !== generation || project !== store.projectId) return;
+    if (!freshRead.value && !await read(true, true)) return;
+    if (!current()) return;
+    const warning = batchSizeWarning(included.value);
+    if (warning) { error.value = warning; invalidate(); return; }
+    if (homeNeedsUnlock.value.length) { error.value=homeUnlockHint.value; invalidate(); return; }
+    if (voiceValidationErrors.value.length) { error.value = voiceValidationErrors.value.join("；"); return; }
+    if (!changedRows.value.length) { error.value = "请至少选择一项需要修改的配置"; return; }
+    const adapter = useScreenAdapter();
+    if (!adapter.preflightAppConfig) return;
+    for (const row of changedRows.value) for (const value of Object.values(patches.value[row.screenId].set)) {
+      if (typeof value === "string" && !value.trim()) { error.value = "OTA 地址不能为空。WebSocket、H5地址和设备名可删除内容来清空。"; return; }
+    }
+    const ids = changedRows.value.map(row => row.screenId);
+    const executionWarning = batchSizeWarning(ids);
+    if (executionWarning) { error.value = executionWarning; invalidate(); return; }
+    const input: ScreenOperationInput = { action: "app_config", targetIds: ids, appVersion: "", abi: "universal", reinstall: false, concurrency: concurrency.value,
+      expectedTargets: Object.fromEntries(ids.map(id => [id, screenMaintenanceFingerprint(screensById.value.get(id)!)])) };
+    const payload = JSON.parse(JSON.stringify(Object.fromEntries(ids.map(id => [id, patches.value[id]])))) as Record<string, ScreenAppConfigPatch>;
+    for (const row of changedRows.value) for (const [key, value] of Object.entries(payload[row.screenId].set)) {
+      const field = appConfigDefinition(row, key);
+      if (!field) { error.value = "所选屏未提供该字段定义，请重新读取后检查"; return; }
+      const issue = appConfigFieldIssue(field, value);
+      if (!field.writable || issue) { error.value = `${field.label}：${issue || "此项不可修改"}`; return; }
+    }
+    const key = submissionKey.value;
+    const result = await adapter.preflightAppConfig(project, input, payload);
+    if (!current() || key !== submissionKey.value) return;
+    if (result.length !== ids.length || ids.some(id => !result.some(row => row.screenId === id))) { error.value = "检查结果与目标屏不一致，请重新操作"; return; }
+    checks.value = result;
+    const blocked = result.filter(row => row.state === "blocked");
+    if (blocked.length) { error.value = blocked.map(row => `${name(row.screenId)}：${row.reason}`).join("；"); return; }
+    const ready = result.filter(row => row.state === "ready").map(row => row.screenId);
+    if (!ready.length) { error.value = "所选配置均已满足，无需修改"; return; }
+    const taskId = await adapter.execute(project, { ...input, targetIds: ready });
+    if (!current()) return;
     store.openedTaskId = taskId; step.value = 2;
     await flushDraft();await useScreenAdapter().saveAppConfigDraft?.(project,null);
     if(request!==generation||project!==store.projectId)return;
     savedDraft.value=null;
     await store.refresh();
-  } catch (cause) { if (request === generation) error.value = (cause as Error).message; }
+  } catch (cause) { if (current()) { error.value = (cause as Error).message; if (/过期|已变化|重新读取/.test(error.value)) freshRead.value = false; invalidate(); } }
   finally { if (request === generation) busy.value = false; }
 }
 function toggle(id: string, value: boolean) { included.value = value ? [...included.value, id] : included.value.filter(item => item !== id); }
@@ -436,17 +441,20 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
     <n-alert v-if="visibleError" type="warning" :show-icon="true">{{ visibleError }}</n-alert>
     <div v-if="step === 0" class="screen-config-select screen-select-stage">
       <screen-target-picker :disabled="busy" />
-      <aside class="screen-config-guide screen-operation-guide">
-        <h3>读取小新当前配置</h3>
-        <p class="screen-operation-help">先读取屏端配置，再选择需要修改的内容。保存后按需重启小新，保留应用数据。</p>
+      <screen-operation-start-panel v-model:concurrency="concurrency" title="读取小新当前配置" :screens="store.selectedScreens" :disabled="busy">
+        <template #description><p class="screen-operation-help">先读取屏端配置，再修改所需内容。保存后按需重启小新，保留应用数据。</p></template>
         <n-button v-if="savedDraft" :disabled="busy" @click="restoreDraft">继续本机未提交修改（{{savedDraft.targetIds.length}} 台）</n-button>
-        <span v-if="selectionSizeWarning" class="screen-config-size-warning" role="status" data-testid="screen-config-size-warning">{{ selectionSizeWarning }}</span>
-        <n-button type="primary" :loading="busy" :disabled="busy || Boolean(selectionSizeWarning) || !store.selectedIds.length || !useScreenAdapter().readAppConfig" @click="read">读取 {{ store.selectedIds.length }} 台配置</n-button>
-      </aside>
+        <template #status>
+          <span v-if="selectionSizeWarning" class="screen-config-size-warning" role="status" data-testid="screen-config-size-warning">{{ selectionSizeWarning }}</span>
+          <div v-if="busy || rows.length" class="screen-config-read-progress" role="status"><span v-if="busy">正在读取 {{ readingIds.length }} 台</span><span>已完成 {{ rows.length }}/{{ store.selectedIds.length }} 台</span><span v-if="rows.some(row => !row.config)" class="screen-warning">{{ rows.filter(row => !row.config).length }} 台失败</span></div>
+          <p v-for="row in rows.filter(item => !item.config)" :key="row.screenId" class="screen-config-read-failure screen-warning">{{ name(row.screenId) }}：{{ row.message }}</p>
+        </template>
+        <template #action><n-button type="primary" :loading="busy" :disabled="busy || Boolean(selectionSizeWarning) || !store.selectedIds.length || !useScreenAdapter().readAppConfig" data-testid="screen-config-read" @click="read()">读取 {{ store.selectedIds.length }} 台配置</n-button></template>
+      </screen-operation-start-panel>
     </div>
     <div v-else-if="step === 1" class="screen-config-editor">
-      <p v-if="!freshRead && !busy" class="screen-config-notice">请重新读取屏端当前配置后再检查提交；本机草稿不会直接写入设备。</p>
-      <div v-if="selectionSizeWarning || includedSizeWarning" class="screen-config-size-notice"><span class="screen-config-size-warning" role="status" data-testid="screen-config-size-warning">{{ selectionSizeWarning || includedSizeWarning }}</span><n-button size="tiny" :disabled="busy" @click="selectAgain">重新选屏</n-button></div>
+      <p v-if="!freshRead && !busy" class="screen-config-notice">点击修改时将先重新读取当前配置，保留本次修改并重新校验；本机草稿不会直接写入设备。</p>
+      <div v-if="selectionSizeWarning || includedSizeWarning" class="screen-config-size-notice"><span class="screen-config-size-warning" role="status" data-testid="screen-config-size-warning">{{ selectionSizeWarning || includedSizeWarning }} 请通过上方步骤返回选屏页调整。</span></div>
       <fieldset :disabled="busy" class="screen-config-form" aria-label="批量配置表单">
         <div class="screen-config-field">
           <div class="screen-config-label"><label>{{ definition('environments.current')?.label || '选择环境' }}</label></div>
@@ -489,11 +497,7 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
               <screen-voice-config :fields="voiceFields" :edits="voiceEdits" :dirty-keys="voiceDirtyKeys" :ready="freshRead" :busy="busy" :selected-count="included.length" :schema-errors="voiceSchemaErrors" :screen-name="name" @edit="editVoice" />
             </div>
           </div>
-          <div class="screen-config-reread">
-            <n-button size="small" :loading="Boolean(readingId)" :disabled="busy || Boolean(selectionSizeWarning) || !store.selectedIds.length" @click="read">重新读取配置</n-button>
-            <span v-if="readingId" class="screen-config-read-progress" :title="`正在读取 ${readingIds.map(name).join('、')} · 已完成 ${rows.length}/${store.selectedIds.length} 台`"><span>{{ readingIds.length > 1 ? `正在读取 ${readingIds.length} 台` : `正在读取 ${name(readingId)}` }}</span><span>已完成 {{ rows.length }}/{{ store.selectedIds.length }} 台</span></span>
-            <span v-else class="screen-muted" title="未修改项各自保留；有差异时展示多数值。">未修改项各自保留；有差异时展示多数值。</span>
-          </div>
+          <span class="screen-config-edit-hint screen-muted" title="未修改项各自保留；有差异时显示多数值。">未修改项各自保留；有差异时显示多数值。</span>
         </div>
       </fieldset>
       <section class="screen-config-list" aria-label="智能屏配置检查列表" role="table" :aria-rowcount="listRows.length + 1">
@@ -522,11 +526,16 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
           </div>
         </div>
       </section>
-      <div class="screen-config-pagination"><span class="screen-muted">共 {{ listRows.length }} 台 · 已选 {{ selected.length }} 台<span v-if="rows.some(row => !row.config)" class="screen-warning"> · {{ rows.filter(row => !row.config).length }} 台读取失败</span></span><n-pagination v-model:page="page" v-model:page-size="pageSize" :item-count="listRows.length" :page-sizes="[20, 50, 100]" :page-slot="5" size="small" show-size-picker /></div>
       <p v-if="voiceValidationErrors.length" class="screen-config-validation screen-warning">{{ voiceValidationErrors.join('；') }}</p>
       <p v-if="homeNeedsUnlock.length" class="screen-config-validation screen-warning" data-testid="screen-config-unlock-required">{{ homeUnlockHint }}</p>
       <p v-if="homeActivationMayReopen" class="screen-config-validation screen-muted" data-testid="screen-config-home-impact">切到小新主屏可能重新打开页面，当前语音对话会结束。</p>
-      <div class="screen-config-submit"><span>本次修改 {{ changedRows.length }} 台 · 预计重启 {{ restartCount }} 台</span><label>并发台数<n-input-number v-model:value="concurrency" :min="1" :max="3" :disabled="busy" size="small" /></label><n-button v-if="!prepared" size="small" type="primary" :loading="busy && !readingId" :disabled="busy || Boolean(includedSizeWarning) || !changedRows.length || !freshRead || voiceValidationErrors.length > 0 || homeNeedsUnlock.length > 0" @click="prepare">检查修改内容</n-button><n-button v-else size="small" type="success" :loading="busy" :disabled="busy || Boolean(includedSizeWarning) || !freshRead || !readyIds.length || homeNeedsUnlock.length > 0" @click="submit">确认修改 {{ readyIds.length }} 台</n-button></div>
+      <screen-operation-footer class="screen-config-submit" :total="listRows.length" :selected="selected.length" :concurrency="concurrency">
+        <template #device-status><span v-if="rows.some(row => !row.config)" class="screen-danger">· {{ rows.filter(row => !row.config).length }} 台读取失败</span></template>
+        <template #changes><span :class="changedRows.length ? 'screen-warning' : 'screen-success'">本次修改 {{ changedRows.length }} 台</span><span aria-hidden="true"> · </span><span :class="restartCount ? 'screen-warning' : 'screen-success'">预计重启 {{ restartCount }} 台</span></template>
+        <template v-if="listRows.length > 20" #pagination><n-pagination v-model:page="page" v-model:page-size="pageSize" :item-count="listRows.length" :page-sizes="[20, 50, 100]" :page-slot="5" size="small" show-size-picker /></template>
+        <template #action><n-button size="small" type="primary" :loading="busy" :disabled="busy || Boolean(selectionSizeWarning || includedSizeWarning) || !included.length || freshRead && (!changedRows.length || voiceValidationErrors.length > 0 || homeNeedsUnlock.length > 0)" data-testid="screen-config-submit" @click="submit">修改配置 {{ freshRead ? changedRows.length : selected.length }} 台</n-button></template>
+        <template #status><span v-if="busy && readingIds.length" aria-live="polite">正在重新读取 {{ readingIds.length }} 台</span></template>
+      </screen-operation-footer>
     </div>
     <div v-else class="screen-config-results"><screen-task-results v-if="task" :task="task" @retry="retry" @restart="restart" /><p v-else>正在读取任务结果…</p><footer class="screen-config-result-footer"><n-button size="small" :disabled="busy || !task || Boolean(running)" @click="reset">新的配置操作</n-button></footer></div>
     <n-modal v-model:show="detailShow" preset="card" :aria-label="`${name(detailId)} · 配置详情`" class="screen-config-detail-modal" :style="{ width: 'min(760px, 94vw)' }" :bordered="false" :auto-focus="false">
@@ -569,14 +578,14 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
 .screen-config-operation.is-selecting{padding:0}
 .screen-config-size-warning{color:var(--inx-color-warning);font-size:var(--inx-font-size-table);line-height:1.5}.screen-config-size-notice{display:flex;align-items:center;gap:12px;flex:none}
 .screen-config-editor{display:flex;flex-direction:column;flex:1;overflow:hidden;min-height:0;gap:8px}
-.screen-config-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:24px;row-gap:10px;border:0;padding:0 0 4px;margin:0;min-width:0;flex:none}
-.screen-config-field{display:grid;grid-template-columns:116px minmax(0,1fr);gap:8px;align-items:center;min-width:0;min-height:28px}
+.screen-config-form{--config-column-gap:24px;--config-label-width:116px;--config-field-gap:8px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:var(--config-column-gap);row-gap:10px;border:0;padding:0 0 4px;margin:0;min-width:0;flex:none}
+.screen-config-field{display:grid;grid-template-columns:var(--config-label-width) minmax(0,1fr);gap:var(--config-field-gap);align-items:center;min-width:0;min-height:28px}
 .screen-config-label{min-width:0;line-height:20px}
 .screen-config-label label{font-size:var(--inx-font-size-base);font-weight:400;white-space:nowrap}
 .screen-config-control{min-width:0}
 .screen-config-control :deep(.n-input__suffix .n-button){font-size:var(--inx-font-size-table)}
-.screen-config-options-row{grid-column:1/-1;display:flex;align-items:center;flex-wrap:wrap;gap:6px 16px;min-width:0}
-.screen-config-checks{display:flex;align-items:center;flex-wrap:wrap;gap:6px 16px;min-height:28px;min-width:0}
+.screen-config-options-row{grid-column:1/-1;display:grid;grid-template-columns:minmax(0,max-content) minmax(0,1fr);align-items:start;column-gap:12px;min-width:0}
+.screen-config-checks{display:flex;align-items:center;flex-wrap:wrap;gap:6px 16px;min-height:28px;min-width:0;box-sizing:border-box}
 .screen-config-check-control{display:flex;align-items:center;flex:none;gap:4px;min-height:28px;white-space:nowrap}
 .screen-config-check-control>.n-button{font-size:var(--inx-font-size-table)}
 .screen-config-check-control.is-edited :deep(.n-checkbox__label){color:var(--inx-color-warning)}
@@ -585,12 +594,9 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
 .screen-config-home-control :deep(.n-checkbox__label){padding-right:0}
 .screen-config-home-activation{gap:0;color:var(--inx-color-text-secondary)}
 .screen-config-home-activation :deep(.n-checkbox__label){padding-left:4px}
-.screen-config-reread{display:flex;align-items:center;gap:10px;margin-left:auto;flex:1 1 260px;max-width:430px;min-width:0}
-.screen-config-reread>.n-button{flex:none}
-.screen-config-reread>span{min-width:0;font-size:var(--inx-font-size-table);line-height:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.screen-config-read-progress{display:flex;align-items:center;gap:6px;flex:1}
-.screen-config-read-progress>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis}
-.screen-config-read-progress>span:last-child{flex:none}
+.screen-config-edit-hint{display:block;min-width:0;margin:0;padding-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;font-size:var(--inx-font-size-table);line-height:17px}
+.screen-config-read-progress{display:flex;align-items:center;flex-wrap:wrap;gap:6px;font-size:var(--inx-font-size-table)}
+.screen-config-read-failure{margin:0;font-size:var(--inx-font-size-table);overflow-wrap:anywhere}
 .screen-config-notice{margin:0;padding:5px 8px;color:var(--inx-color-text-secondary);background:var(--inx-color-surface-subtle);font-size:var(--inx-font-size-table);flex:none}
 .screen-config-validation{margin:0;font-size:var(--inx-font-size-table);flex:none}
 .screen-config-list{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden;border:1px solid var(--inx-color-border);border-radius:6px;--config-columns:26px minmax(100px,1.1fr) 118px 144px minmax(100px,1fr) 96px 42px}
@@ -605,9 +611,6 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
 .screen-config-status small{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .screen-config-row-summary{display:flex;flex-direction:column;align-items:flex-start;line-height:18px;font-size:11px}
 .screen-config-differences{max-width:460px;font-size:12px;overflow-wrap:anywhere}.screen-config-differences>div{margin-top:8px}.screen-config-differences strong{font-weight:500}
-.screen-config-pagination{display:flex;align-items:center;justify-content:space-between;gap:10px;flex:none;font-size:11px;min-height:28px}
-.screen-config-submit{display:flex;align-items:center;gap:16px;justify-content:flex-end;flex:none;padding:8px 0 0;border-top:1px solid var(--inx-color-border)}
-.screen-config-submit>span{margin-right:auto}.screen-config-submit label{display:flex;align-items:center;gap:8px}.screen-config-submit .n-input-number{width:78px}
 .screen-config-current{display:grid;grid-template-columns:fit-content(45%) minmax(0,1fr);gap:4px 12px;margin:12px 0;padding:10px 12px;background:var(--inx-color-surface-subtle);border-radius:6px;color:var(--inx-color-text-secondary);font-size:12px}
 .screen-config-current dt,.screen-config-current dd{margin:0;min-width:0;line-height:1.6}.screen-config-current dt{text-align:right}.screen-config-current dd{text-align:left;overflow-wrap:anywhere}.screen-config-current .is-section-start{padding-top:6px}
 .screen-config-current dd.is-edited,.screen-config-detail-pending{color:var(--inx-color-warning)}
@@ -616,5 +619,5 @@ function restart(ids: string[]) { store.selectedIds = ids; store.operation = "re
 .screen-config-name-field{display:grid;grid-template-columns:max-content minmax(0,280px) max-content;align-items:center;gap:10px;min-width:0}.screen-config-name-field label{font-size:var(--inx-font-size-base);font-weight:400}.screen-config-name-field small{font-size:var(--inx-font-size-table);color:var(--inx-color-text-secondary);white-space:nowrap}
 .screen-config-results{display:flex;flex:1;flex-direction:column;gap:8px;min-height:0;overflow:hidden}
 .screen-config-result-footer{display:flex;flex:none;justify-content:flex-end;padding-top:8px;border-top:1px solid var(--inx-color-border)}
-@media(max-width:1100px){.screen-config-form{column-gap:16px}.screen-config-field{grid-template-columns:110px minmax(0,1fr);gap:6px}.screen-config-list{--config-columns:24px minmax(90px,1fr) 104px 132px minmax(80px,1fr) 80px 36px}.screen-config-list-row{column-gap:6px;padding-inline:8px}}
+@media(max-width:1100px){.screen-config-form{--config-column-gap:16px;--config-label-width:110px;--config-field-gap:6px}.screen-config-checks{column-gap:12px}.screen-config-list{--config-columns:24px minmax(90px,1fr) 104px 132px minmax(80px,1fr) 80px 36px}.screen-config-list-row{column-gap:6px;padding-inline:8px}}
 </style>

@@ -3,7 +3,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const READ_ACTIONS: &[&str] = &["ping", "inspect", "mac", "diagnostics"];
-pub const WRITE_ACTIONS: &[&str] = &["install", "time", "ntp", "adb", "restart", "reboot", "app_config"];
+pub const WRITE_ACTIONS: &[&str] = &[
+    "install",
+    "time",
+    "ntp",
+    "sleep_off",
+    "screen_settings",
+    "adb",
+    "restart",
+    "reboot",
+    "app_config",
+];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +46,8 @@ pub struct ScreenPreflightItem {
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation: Option<super::model::ScreenObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<super::settings::ScreenSettingsRead>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,16 +105,20 @@ pub struct ScreenTaskView {
     pub targets: Vec<ScreenTaskTarget>,
     pub logs: Vec<ScreenTaskLog>,
     pub input: Option<ScreenOperationInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<BTreeMap<String, super::settings::ScreenSettingsPatch>>,
 }
 pub fn action_label(action: &str) -> &str {
     match action {
-        "ping" => "检查屏在离线",
+        "ping" => "检查设备（仅网络）",
         "inspect" => "检查设备",
         "mac" => "获取/核对 MAC",
         "diagnostics" => "采集诊断",
         "install" => "安装/升级小新",
         "time" => "校准时间",
         "ntp" => "设置NTP服务器",
+        "sleep_off" => "关闭屏睡眠",
+        "screen_settings" => "设置智能屏",
         "adb" => "保持 ADB 端口",
         "restart" => "重启小新应用",
         "app_config" => "修改小新配置",

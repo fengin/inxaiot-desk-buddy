@@ -444,6 +444,7 @@ async fn cancelled_maintenance_batch_never_calls_devices_and_releases_local_guar
         instance_id: "测试电脑".into(),
         created_at: inxaiot_desk_buddy_lib::infrastructure::local_sqlite::screen_repository::now(),
         detail: serde_json::to_value(maintenance::MaintenancePlan {
+            settings: None,
             apk: None,
             app_config: None,
             ntp: None,
@@ -524,7 +525,7 @@ async fn ntp_terminal_unconfirmed_sync_is_not_reverified_during_result_finalizat
     let plan=ScreenPlan {
         project_id:project.clone(),input:request.clone(),targets:vec![screen],business_project_id:None,data_source_id:None,
         operator:"测试".into(),instance_id:"测试电脑".into(),created_at:inxaiot_desk_buddy_lib::infrastructure::local_sqlite::screen_repository::now(),
-        detail:serde_json::to_value(maintenance::MaintenancePlan { apk:None,app_config:None,ntp:Some([(id.clone(),NtpPatch{server:"192.0.2.142".into()})].into()),observations:Default::default(),request_ids:Default::default() }).unwrap(),
+        detail:serde_json::to_value(maintenance::MaintenancePlan { settings:None,apk:None,app_config:None,ntp:Some([(id.clone(),NtpPatch{server:"192.0.2.142".into()})].into()),observations:Default::default(),request_ids:Default::default() }).unwrap(),
     };
     let preview=uuid::Uuid::now_v7().to_string();
     previews::save(&state,&preview,&plan,maintenance::PREVIEW).await.unwrap();

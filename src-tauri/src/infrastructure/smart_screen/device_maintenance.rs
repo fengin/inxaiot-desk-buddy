@@ -1,6 +1,7 @@
 use super::{
     device::{AdbDevice, AndroidTools, DeviceCommandPort, XIAOXIN_PACKAGE},
     leases::HeldScreenLeases,
+    sleep_policy::{self, SleepPolicyStatus},
     task_data,
     value_updates::reliable_identity,
 };
@@ -14,7 +15,7 @@ use serde_json::{Value, json};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-mod clock;
+pub(crate) mod clock;
 
 const PID_EXIT_MARKER: &str = "__INX_XIAOXIN_PIDOF_EXIT__=";
 const STOP_WAIT_LIMIT: Duration = Duration::from_secs(15);
@@ -93,13 +94,19 @@ async fn read<P: DeviceCommandPort>(
 ) -> AppResult<String> {
     device.shell(ip, args, CancellationToken::new()).await
 }
-pub(super) async fn boot_id<P: DeviceCommandPort>(device: &AdbDevice<P>, ip: &str) -> AppResult<String> {
+pub(super) async fn boot_id<P: DeviceCommandPort>(
+    device: &AdbDevice<P>,
+    ip: &str,
+) -> AppResult<String> {
     let id = read(device, ip, &["cat", "/proc/sys/kernel/random/boot_id"]).await?;
     uuid::Uuid::parse_str(&id)
         .map_err(|_| AppError::Conflict("无法取得可靠的系统启动编号".into()))?;
     Ok(id)
 }
-pub(super) async fn root_mode<P: DeviceCommandPort>(device: &AdbDevice<P>, ip: &str) -> AppResult<String> {
+pub(super) async fn root_mode<P: DeviceCommandPort>(
+    device: &AdbDevice<P>,
+    ip: &str,
+) -> AppResult<String> {
     if read(device, ip, &["id"]).await?.contains("uid=0(") {
         return Ok("shell".into());
     }
@@ -133,6 +140,18 @@ async fn clock_settings<P: DeviceCommandPort>(device: &AdbDevice<P>, ip: &str) -
         json!({"zone":read(device,ip,&["getprop","persist.sys.timezone"]).await?,"autoTime":read(device,ip,&["settings","get","global","auto_time"]).await?,"autoZone":read(device,ip,&["settings","get","global","auto_time_zone"]).await?}),
     )
 }
+pub(super) async fn require_date_setting<P: DeviceCommandPort>(
+    device: &AdbDevice<P>,
+    ip: &str,
+) -> AppResult<()> {
+    let help = read(device, ip, &["date", "--help"]).await?;
+    if !help.contains("@UNIXTIME") {
+        return Err(AppError::Conflict(
+            "当前固件日期命令尚未验证，不修改时间".into(),
+        ));
+    }
+    Ok(())
+}
 pub async fn capability<P: DeviceCommandPort>(
     device: &AdbDevice<P>,
     screen: &ScreenAsset,
@@ -142,14 +161,20 @@ pub async fn capability<P: DeviceCommandPort>(
     let ip = &screen.fields.ip;
     let mut value = json!({});
     match action {
+        "sleep_off" => {
+            let status = sleep_policy::read(device, ip, CancellationToken::new()).await?;
+            status.check_conditions()?;
+            if !status.already_disabled() {
+                sleep_policy::check_write_access(device, ip, CancellationToken::new()).await?;
+            }
+            value["alreadyDisabled"] = json!(status.already_disabled());
+            value["message"] = json!(status.preflight_message());
+            value["sleepPolicy"] = serde_json::to_value(status)
+                .map_err(|_| AppError::InvalidConfig("保存屏睡眠检查结果失败".into()))?;
+        }
         "time" => {
             value["root"] = json!(root_mode(device, ip).await?);
-            let help = read(device, ip, &["date", "--help"]).await?;
-            if !help.contains("@UNIXTIME") {
-                return Err(AppError::Conflict(
-                    "当前固件日期命令尚未验证，不修改时间".into(),
-                ));
-            }
+            require_date_setting(device, ip).await?;
             value["clockSettings"] = clock_settings(device, ip).await?;
             value["clock"] = clock::capability(
                 device,
@@ -226,7 +251,7 @@ async fn checkpoint(
 ) -> AppResult<()> {
     task_data::save_target(state.local_store.pool(), &plan.project_id, id, result).await
 }
-async fn authorize(
+pub(super) async fn authorize(
     state: &FormalAppState,
     plan: &ScreenPlan,
     held: Option<&HeldScreenLeases>,
@@ -267,11 +292,58 @@ pub async fn execute(
         return Err(AppError::Cancelled);
     }
     authorize(state, plan, held).await?;
+    if action == "sleep_off" && capabilities["alreadyDisabled"] == true {
+        result.device = ResultState::Skipped;
+        result.message = "已关闭屏睡眠（接电保持唤醒已生效），无需重复设置，也不唤醒屏幕".into();
+        result.observation = Some(before.clone());
+        result.evidence = json!({"phase":"sleep_off_already_disabled","action":action,
+            "before":before,"capability":capabilities,
+            "sleepOff":{"before":capabilities["sleepPolicy"],"after":capabilities["sleepPolicy"],
+                "writeRequested":false,"saved":true,"wakeRequested":false}});
+        return checkpoint(state, plan, id, result).await;
+    }
     result.evidence =
         json!({"phase":"requested","action":action,"before":before,"capability":capabilities});
     result.device = ResultState::Unknown;
     checkpoint(state, plan, id, result).await?;
     match action {
+        "sleep_off" => {
+            let before: SleepPolicyStatus =
+                serde_json::from_value(capabilities["sleepPolicy"].clone()).map_err(|_| {
+                    AppError::InvalidConfig("屏睡眠检查依据不完整，未修改设置".into())
+                })?;
+            let target_mask = before.target_mask();
+            result.evidence["sleepOff"] = json!({"before":before,"targetMask":target_mask,
+                "writeRequested":true,"saved":false,"wakeRequested":false});
+            result.evidence["phase"] = json!("sleep_off_requested");
+            checkpoint(state, plan, id, result).await?;
+            authorize(state, plan, held).await?;
+            sleep_policy::set_mask_with_checkpoint(&device, ip, &before, cancel.clone(), || {
+                authorize(state, plan, held)
+            })
+            .await?;
+            result.evidence["phase"] = json!("sleep_off_written");
+            checkpoint(state, plan, id, result).await?;
+            let after = wait_sleep_policy(&device, ip, target_mask, cancel.clone()).await?;
+            result.evidence["sleepOff"]["saved"] = json!(true);
+            result.evidence["sleepOff"]["after"] = json!(after);
+            result.evidence["phase"] = json!("sleep_off_saved");
+            checkpoint(state, plan, id, result).await?;
+            if after.needs_wake() {
+                if cancel.is_cancelled() {
+                    return Err(AppError::Cancelled);
+                }
+                authorize(state, plan, held).await?;
+                result.evidence["sleepOff"]["wakeRequested"] = json!(true);
+                result.evidence["phase"] = json!("sleep_off_wake_requested");
+                checkpoint(state, plan, id, result).await?;
+                authorize(state, plan, held).await?;
+                super::kiosk::wake(&device, ip, cancel.clone()).await?;
+                result.evidence["sleepOff"]["wakeResponseConfirmed"] = json!(true);
+                result.evidence["phase"] = json!("sleep_off_wake_sent");
+                checkpoint(state, plan, id, result).await?;
+            }
+        }
         "time" => {
             let now = time::OffsetDateTime::now_utc().unix_timestamp();
             result.evidence["requestedSeconds"] = json!(now);
@@ -361,6 +433,80 @@ pub async fn execute(
         _ => unreachable!(),
     }
     verify(state, id, plan, screen, result).await
+}
+
+/// 只读等待设置观察器更新；绝不通过再次写入或重复唤醒来掩盖未知结果。
+async fn wait_sleep_policy<P: DeviceCommandPort>(
+    device: &AdbDevice<P>,
+    ip: &str,
+    target: u32,
+    cancel: CancellationToken,
+) -> AppResult<SleepPolicyStatus> {
+    for attempt in 0..5 {
+        let status = sleep_policy::read(device, ip, cancel.clone()).await?;
+        if status.saved == Some(target)
+            && status.effective_mask == target
+            && status.already_disabled()
+        {
+            return Ok(status);
+        }
+        if attempt < 4 {
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(AppError::Cancelled),
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            }
+        }
+    }
+    Err(AppError::Conflict(
+        "已发出关闭屏睡眠设置，但保存或生效尚未确认，请核实结果；未重复设置".into(),
+    ))
+}
+
+pub(super) fn confirm_sleep_policy(
+    result: &mut ScreenTargetResult,
+    after: &SleepPolicyStatus,
+) -> AppResult<()> {
+    let target = result.evidence["sleepOff"]["targetMask"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| AppError::Conflict("缺少原关闭屏睡眠任务的目标，保留待核实记录".into()))?;
+    if target > i32::MAX as u32
+        || target & 7 != 7
+        || result.evidence["action"] != "sleep_off"
+        || result.evidence["sleepOff"]["writeRequested"] != true
+    {
+        return Err(AppError::Conflict(
+            "原关闭屏睡眠任务没有完整执行依据，保留待核实记录".into(),
+        ));
+    }
+    result.evidence["sleepOff"]["after"] = serde_json::to_value(after)
+        .map_err(|_| AppError::InvalidConfig("保存屏睡眠回读结果失败".into()))?;
+    let saved = after.saved == Some(target) && after.effective_mask == target;
+    result.evidence["sleepOff"]["saved"] = json!(saved);
+    if !saved {
+        result.device = ResultState::Failed;
+        result.message =
+            "当前接电保持唤醒设置未达到本次目标，未确认关闭屏睡眠；未重复设置或唤醒".into();
+        return Ok(());
+    }
+    if let Err(error) = after.check_conditions() {
+        result.device = ResultState::Unknown;
+        result.message = format!(
+            "关闭屏睡眠设置已保存，当前系统生效条件尚未确认，请核实；未重复设置或唤醒：{error}"
+        );
+        return Ok(());
+    }
+    result.device = ResultState::Succeeded;
+    result.evidence["phase"] = json!("sleep_off_verified");
+    result.message = if after.needs_wake() {
+        "已关闭屏睡眠，接电保持唤醒设置和系统策略已确认；当前屏未点亮，本次核实不重复唤醒"
+    } else if result.evidence["sleepOff"]["wakeRequested"] == true {
+        "已关闭屏睡眠，接电保持唤醒设置和系统策略已确认，屏幕已唤醒；未修改原自动息屏时长"
+    } else {
+        "已关闭屏睡眠，接电保持唤醒设置和系统策略均已回读确认；未修改原自动息屏时长"
+    }
+    .into();
+    Ok(())
 }
 /// 配置任务复用相同的停止、启动命令，在自己的任务内记录每一步。
 pub(super) async fn stop_application<P: DeviceCommandPort>(
@@ -473,7 +619,8 @@ pub(super) async fn application_started_with_limit<P: DeviceCommandPort>(
             tokio::time::sleep(interval).await;
         }
     })
-    .await {
+    .await
+    {
         Ok(result) => result,
         Err(_) if reading => Err(AppError::Conflict(
             "读取小新进程或主界面超时，运行状态仍待核实；不会重复启动".into(),
@@ -481,7 +628,11 @@ pub(super) async fn application_started_with_limit<P: DeviceCommandPort>(
         Err(_) => Ok(false),
     }
 }
-pub(super) async fn wait_boot(device: &AdbDevice, screen: &ScreenAsset, capability: &Value) -> AppResult<()> {
+pub(super) async fn wait_boot(
+    device: &AdbDevice,
+    screen: &ScreenAsset,
+    capability: &Value,
+) -> AppResult<()> {
     wait_boot_with_limit(
         device,
         screen,
@@ -491,7 +642,7 @@ pub(super) async fn wait_boot(device: &AdbDevice, screen: &ScreenAsset, capabili
     )
     .await
 }
-async fn wait_boot_with_limit<P: DeviceCommandPort>(
+pub(super) async fn wait_boot_with_limit<P: DeviceCommandPort>(
     device: &AdbDevice<P>,
     screen: &ScreenAsset,
     capability: &Value,
@@ -560,6 +711,10 @@ pub async fn verify(
     result.observation = Some(observed.clone());
     let capability = &result.evidence["capability"];
     match action {
+        "sleep_off" => {
+            let after = sleep_policy::read(&device, ip, CancellationToken::new()).await?;
+            confirm_sleep_policy(result, &after)?;
+        }
         "time" => {
             let verified = clock::verify(&device, ip, &result.evidence).await?;
             result.evidence["clockVerification"] = verified.readings;
@@ -635,6 +790,72 @@ mod tests {
         collections::VecDeque,
         sync::{Arc, Mutex},
     };
+
+    fn sleep_status(mask: u32, powered: bool, awake: bool) -> SleepPolicyStatus {
+        SleepPolicyStatus {
+            saved: Some(mask),
+            saved_raw: mask.to_string(),
+            effective_mask: mask,
+            is_powered: powered,
+            plug_type: if powered { 1 } else { 0 },
+            stay_on: powered && mask & 1 != 0,
+            device_admin_enforced: false,
+            device_admin_timeout_ms: i64::MAX as u64,
+            wakefulness: if awake { "Awake" } else { "Asleep" }.into(),
+            display: if awake { "ON" } else { "OFF" }.into(),
+            screen_off_timeout_ms: i32::MAX as u64,
+        }
+    }
+
+    fn pending_sleep_result() -> ScreenTargetResult {
+        ScreenTargetResult {
+            device: ResultState::Unknown,
+            evidence: json!({"action":"sleep_off","phase":"sleep_off_written",
+                "sleepOff":{"targetMask":7,"writeRequested":true,"saved":false,"wakeRequested":true}}),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sleep_recovery_distinguishes_saved_active_and_not_applied_without_replaying() {
+        let mut active = pending_sleep_result();
+        confirm_sleep_policy(&mut active, &sleep_status(7, true, true)).unwrap();
+        assert_eq!(active.device, ResultState::Succeeded);
+        assert_eq!(active.evidence["sleepOff"]["saved"], true);
+        assert_eq!(active.evidence["phase"], "sleep_off_verified");
+
+        let mut unplugged = pending_sleep_result();
+        confirm_sleep_policy(&mut unplugged, &sleep_status(7, false, true)).unwrap();
+        assert_eq!(unplugged.device, ResultState::Unknown);
+        assert_eq!(unplugged.evidence["sleepOff"]["saved"], true);
+        assert!(unplugged.message.contains("设置已保存"));
+
+        let mut not_applied = pending_sleep_result();
+        confirm_sleep_policy(&mut not_applied, &sleep_status(0, true, true)).unwrap();
+        assert_eq!(not_applied.device, ResultState::Failed);
+        assert_eq!(not_applied.evidence["sleepOff"]["saved"], false);
+        assert!(not_applied.message.contains("未重复设置或唤醒"));
+    }
+
+    #[test]
+    fn sleep_recovery_preserves_a_manually_dark_screen_and_requires_original_submission() {
+        let mut dark = pending_sleep_result();
+        confirm_sleep_policy(&mut dark, &sleep_status(7, true, false)).unwrap();
+        assert_eq!(dark.device, ResultState::Succeeded);
+        assert!(dark.message.contains("不重复唤醒"));
+        assert_eq!(dark.evidence["sleepOff"]["after"]["display"], "OFF");
+
+        for target in [None, Some(0), Some(1), Some(8)] {
+            let mut incomplete = pending_sleep_result();
+            incomplete.evidence["sleepOff"]["targetMask"] = json!(target);
+            assert!(confirm_sleep_policy(&mut incomplete, &sleep_status(7, true, true)).is_err());
+            assert_eq!(incomplete.device, ResultState::Unknown);
+        }
+        let mut not_submitted = pending_sleep_result();
+        not_submitted.evidence["sleepOff"]["writeRequested"] = json!(false);
+        assert!(confirm_sleep_policy(&mut not_submitted, &sleep_status(7, true, true)).is_err());
+        assert_eq!(not_submitted.device, ResultState::Unknown);
+    }
 
     #[derive(Clone)]
     enum PidReply {

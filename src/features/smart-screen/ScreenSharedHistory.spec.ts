@@ -3,11 +3,19 @@ import { afterEach, expect, it, vi } from 'vitest';
 import ScreenSharedHistory from './ScreenSharedHistory.vue';
 import * as api from '@/shared/api/operationHistory';
 import type { OperationHistoryTarget } from '@/shared/model/deploymentWorkflow';
+import { screenSettingsDefaultPatch } from '@/shared/model/screenSettings';
 
 vi.mock('@/shared/api/operationHistory', () => ({listBusinessOperationHistory:vi.fn(),getBusinessOperationHistoryDetail:vi.fn(),previewScreenLocks:vi.fn(),releaseScreenLocks:vi.fn()}));
 afterEach(()=>vi.clearAllMocks());
 const operation={id:'op-a',domainType:'smart_screen',operationType:'reboot',operationName:'重启屏',operatorName:'原操作人',instanceId:'电脑A',state:'running',targetCount:1,successCount:0,failureCount:0,cancelledCount:0,startedAt:'2026-10-03T00:00:00Z'};
 const locks=[{resourceType:'smart_screen',resourceKey:'777:900',ownerInstanceId:'电脑A',ownerUser:'原操作人',fencingToken:4}];
+it('组合设置共享历史显示原选项、逐项结果及未执行的共享重启',async()=>{
+  const item={...operation,operationType:'screen_settings',operationName:'设置智能屏',state:'failed'};
+  vi.mocked(api.listBusinessOperationHistory).mockResolvedValue({items:[item],total:1,page:1,pageSize:20});
+  vi.mocked(api.getBusinessOperationHistoryDetail).mockResolvedValue({operation:item,targets:[{resourceType:'smart_screen',resourceKey:'777:900',state:'failed',resultSummary:'本屏后续已停止',details:{targetName:'办公室屏',screenSettings:{patch:screenSettingsDefaultPatch(),items:{adb:{state:'failed',message:'保存失败'},ntp:{state:'not_selected',message:'未选'},time:{state:'not_started',message:'未开始'},sleepOff:{state:'not_started',message:'未开始'}},reboot:{required:true,requested:false,reasons:['adb']}}}}]});
+  const wrapper=mount(ScreenSharedHistory,{props:{projectId:'项目A'},global:{stubs:{teleport:true}}});
+  try{await flushPromises();await wrapper.findAll('button').find(button=>button.text().includes('设置智能屏'))!.trigger('click');await flushPromises();expect(wrapper.text()).toContain('设置项目');expect(wrapper.text()).toContain('保持ADB端口：未完成');expect(wrapper.text()).toContain('校准时间：未开始');expect(wrapper.text()).toContain('共享重启：未执行');expect(wrapper.text()).not.toContain('应用版本');}finally{wrapper.unmount();}
+});
 async function policyHistory(details: OperationHistoryTarget['details'], state='succeeded') {
   const item={...operation,operationType:'app_config',operationName:'修改小新配置',state};
   vi.mocked(api.listBusinessOperationHistory).mockResolvedValue({items:[item],total:1,page:1,pageSize:20});

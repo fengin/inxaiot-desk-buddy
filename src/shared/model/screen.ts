@@ -5,7 +5,7 @@ import type { ScreenVersionSyncRecord } from "./screenMaintenance";
 
 export type ScreenSize = "4" | "10" | "unknown";
 export type ScreenOnline = "online" | "offline" | "unknown";
-export type ScreenAction = "install" | "ping" | "inspect" | "mac" | "time" | "ntp" | "reboot" | "restart" | "adb" | "diagnostics" | "register" | "app_config";
+export type ScreenAction = "install" | "ping" | "inspect" | "mac" | "time" | "ntp" | "sleep_off" | "screen_settings" | "reboot" | "restart" | "adb" | "diagnostics" | "register" | "app_config";
 export type ScreenTargetState = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "needs_review";
 
 export interface SmartScreen {
@@ -129,6 +129,7 @@ export interface ScreenPreflightItem {
   ip: string;
   state: "ready" | "blocked" | "skip";
   reason: string;
+  settings?: import("./screenSettings").ScreenSettingsRead;
   observation?: ScreenInspection | null;
 }
 
@@ -175,6 +176,7 @@ export interface ScreenTask {
   targets: ScreenTaskTarget[];
   logs: { time: string; level: "INFO" | "WARN" | "ERROR"; message: string }[];
   input?: ScreenOperationInput;
+  settings?: Record<string, import("./screenSettings").ScreenSettingsPatch>;
   registration?: { previewId: string; records: ScreenRegistrationExecutionRecord[] };
   versionSync?: { previewId: string; records: ScreenVersionSyncRecord[] };
 }
@@ -272,24 +274,26 @@ export const screenActions: { value: ScreenAction; label: string; description: s
   { value: "install", label: "安装/升级小新", description: "安装/升级端屏的智能小新应用" },
   { value: "register", label: "注册/更新到平台", description: "登记新屏或更新平台资料" },
   { value: "app_config", label: "修改小新配置", description: "读取和修改小新配置，按需重启并回读" },
-  { value: "time", label: "校准时间", description: "以当前电脑时间校准并回读偏差" },
-  { value: "ntp", label: "设置NTP服务器", description: "配置NTP服务器，用于自动校准时钟" },
-  { value: "ping", label: "检查屏在离线", description: "检查屏IP连通性" },
-  { value: "inspect", label: "检查设备", description: "读取管理连接、系统、应用" },
+  { value: "screen_settings", label: "设置智能屏", description: "检查并修改屏系统设置" },
+  { value: "inspect", label: "检查设备", description: "检查网络、管理连接、系统和小新状态" },
   { value: "mac", label: "获取/核对 MAC", description: "采集网卡地址，核对设备身份" },
-  { value: "adb", label: "保持ADB端口", description: "10 寸屏重启仍保持 5555端口" },
   { value: "restart", label: "重启小新应用", description: "保留应用数据，只恢复小新应用" },
   { value: "reboot", label: "重启屏", description: "重启智能屏系统" },
   { value: "diagnostics", label: "采集诊断", description: "采集屏信息和应用检查信息" }
 ];
 
-export const screenActionLabel = (action: ScreenTask["action"]) => action === "status" ? "覆盖平台状态" : action === "version_sync" ? "同步平台应用版本" : action === "merge" ? "合并屏记录" : action === "remote_assistance" ? "远程辅助操作" : screenActions.find((item) => item.value === action)?.label ?? action;
+export const screenLegacyActionLabels: Partial<Record<ScreenAction, string>> = { ping: "检查设备（仅网络）", time: "校准时间", ntp: "设置NTP服务器", sleep_off: "关闭屏睡眠", adb: "保持ADB端口" };
+export const screenActionLabel = (action: ScreenTask["action"]) => action === "status" ? "覆盖平台状态" : action === "version_sync" ? "同步平台应用版本" : action === "merge" ? "合并屏记录" : action === "remote_assistance" ? "远程辅助操作" : screenActions.find((item) => item.value === action)?.label ?? screenLegacyActionLabels[action as ScreenAction] ?? action;
 export const screenStateLabel: Record<ScreenTask["state"] | ScreenTargetState, string> = {
   queued: "等待执行", running: "执行中", cancelling: "取消中", succeeded: "已成功",
   partially_succeeded: "部分成功", failed: "失败", cancelled: "已取消", needs_review: "结果待核实"
 };
 /** 会话结束不等于网页登录成功，历史列表沿用该语义。 */
 export function screenTaskStateLabel(task: { action: ScreenTask["action"]; state: keyof typeof screenStateLabel }): string {
+  if (task.action === "ping" || task.action === "inspect") {
+    if (task.state === "succeeded") return "检查完成";
+    if (task.state === "partially_succeeded") return "部分检查完成";
+  }
   if (task.action !== "remote_assistance") return screenStateLabel[task.state];
   const labels: Record<keyof typeof screenStateLabel, string> = {
     queued: "等待辅助操作", running: "辅助操作中", cancelling: "正在结束会话",

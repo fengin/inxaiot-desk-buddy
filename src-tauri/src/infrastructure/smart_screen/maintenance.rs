@@ -49,9 +49,13 @@ pub struct MaintenancePlan {
     pub observations: BTreeMap<String, ScreenObservation>,
     pub request_ids: BTreeMap<String, String>,
     #[serde(default)]
-    pub app_config: Option<BTreeMap<String, crate::domain::smart_screen::app_config::AppConfigPatch>>,
+    pub app_config:
+        Option<BTreeMap<String, crate::domain::smart_screen::app_config::AppConfigPatch>>,
     #[serde(default)]
     pub ntp: Option<BTreeMap<String, crate::domain::smart_screen::ntp::NtpPatch>>,
+    #[serde(default)]
+    pub settings:
+        Option<BTreeMap<String, crate::domain::smart_screen::settings::ScreenSettingsPatch>>,
 }
 fn local(state: &FormalAppState) -> ScreenRepository {
     ScreenRepository::new(state.local_store.pool().clone())
@@ -60,14 +64,32 @@ fn detail(plan: &ScreenPlan) -> AppResult<MaintenancePlan> {
     serde_json::from_value(plan.detail.clone())
         .map_err(|_| AppError::Conflict("设备操作检查记录无效".into()))
 }
-fn validate_configuration_batch(targets: &[ScreenAsset], snapshot: &ScreenSnapshot) -> AppResult<()> {
-    crate::domain::smart_screen::app_config::validate_batch_sizes(targets.iter().map(|screen| screen.fields.size.as_str()))?;
-    let current = targets.iter().map(|screen| snapshot.screens.iter().find(|item| item.id == screen.id)
-        .ok_or_else(|| AppError::Conflict("设备资料已变化，请重新读取配置".into())))
+fn validate_configuration_batch(
+    targets: &[ScreenAsset],
+    snapshot: &ScreenSnapshot,
+) -> AppResult<()> {
+    crate::domain::smart_screen::app_config::validate_batch_sizes(
+        targets.iter().map(|screen| screen.fields.size.as_str()),
+    )?;
+    let current = targets
+        .iter()
+        .map(|screen| {
+            snapshot
+                .screens
+                .iter()
+                .find(|item| item.id == screen.id)
+                .ok_or_else(|| AppError::Conflict("设备资料已变化，请重新读取配置".into()))
+        })
         .collect::<AppResult<Vec<_>>>()?;
-    crate::domain::smart_screen::app_config::validate_batch_sizes(current.iter().map(|screen| screen.fields.size.as_str()))?;
+    crate::domain::smart_screen::app_config::validate_batch_sizes(
+        current.iter().map(|screen| screen.fields.size.as_str()),
+    )?;
     // 此整批门禁只处理尺寸；IP、MAC等变化继续由原提交及逐屏same_target保护处理。
-    if targets.iter().zip(current).any(|(before, after)| before.fields.size != after.fields.size) {
+    if targets
+        .iter()
+        .zip(current)
+        .any(|(before, after)| before.fields.size != after.fields.size)
+    {
         return Err(AppError::Conflict("设备关键资料已变化或尚未提交".into()));
     }
     Ok(())
@@ -157,42 +179,113 @@ async fn preflight_with_settings(
     app_config: Option<BTreeMap<String, crate::domain::smart_screen::app_config::AppConfigPatch>>,
     ntp: Option<BTreeMap<String, crate::domain::smart_screen::ntp::NtpPatch>>,
 ) -> AppResult<ScreenPreflight> {
-    preflight_with_device_factory(state,project,input,app_config,ntp,
-        ||Ok(AdbDevice::new(AndroidTools::discover()?))).await
+    preflight_with_device_factory(state, project, input, app_config, ntp, || {
+        Ok(AdbDevice::new(AndroidTools::discover()?))
+    })
+    .await
 }
 
 /// 正式预检与回归共用所有门禁；工厂仅在整批资料与平台条件确认后调用。
 #[doc(hidden)]
-pub async fn preflight_with_device_factory<P:super::device::DeviceCommandPort,F:FnOnce()->AppResult<AdbDevice<P>> + Send>(
-    state:&FormalAppState,project:&str,input:ScreenOperationInput,
-    app_config:Option<BTreeMap<String,crate::domain::smart_screen::app_config::AppConfigPatch>>,
-    ntp:Option<BTreeMap<String,crate::domain::smart_screen::ntp::NtpPatch>>,device_factory:F,
-)->AppResult<ScreenPreflight> {
+pub async fn preflight_with_device_factory<
+    P: super::device::DeviceCommandPort,
+    F: FnOnce() -> AppResult<AdbDevice<P>> + Send,
+>(
+    state: &FormalAppState,
+    project: &str,
+    input: ScreenOperationInput,
+    app_config: Option<BTreeMap<String, crate::domain::smart_screen::app_config::AppConfigPatch>>,
+    ntp: Option<BTreeMap<String, crate::domain::smart_screen::ntp::NtpPatch>>,
+    device_factory: F,
+) -> AppResult<ScreenPreflight> {
+    preflight_settings_with_device_factory(
+        state,
+        project,
+        input,
+        app_config,
+        ntp,
+        None,
+        device_factory,
+    )
+    .await
+}
+
+#[doc(hidden)]
+pub async fn preflight_settings_with_device_factory<
+    P: super::device::DeviceCommandPort,
+    F: FnOnce() -> AppResult<AdbDevice<P>> + Send,
+>(
+    state: &FormalAppState,
+    project: &str,
+    input: ScreenOperationInput,
+    app_config: Option<BTreeMap<String, crate::domain::smart_screen::app_config::AppConfigPatch>>,
+    ntp: Option<BTreeMap<String, crate::domain::smart_screen::ntp::NtpPatch>>,
+    settings: Option<BTreeMap<String, crate::domain::smart_screen::settings::ScreenSettingsPatch>>,
+    device_factory: F,
+) -> AppResult<ScreenPreflight> {
     crate::application::smart_screen::operations::validate_input(&input)?;
+    if input.action == "screen_settings" {
+        let patches = settings
+            .as_ref()
+            .ok_or_else(|| AppError::InvalidConfig("缺少本次智能屏设置选项".into()))?;
+        if patches.keys().collect::<BTreeSet<_>>() != input.target_ids.iter().collect() {
+            return Err(AppError::InvalidConfig("设置选项与所选屏不一致".into()));
+        }
+        for patch in patches.values() {
+            patch.validate()?;
+        }
+    } else if settings.is_some() {
+        return Err(AppError::InvalidConfig("此操作不接受智能屏设置选项".into()));
+    }
     if input.action == "ntp" {
-        let patches = ntp.as_ref().ok_or_else(||AppError::InvalidConfig("请先读取屏的 NTP 设置并填写服务器地址".into()))?;
+        let patches = ntp.as_ref().ok_or_else(|| {
+            AppError::InvalidConfig("请先读取屏的 NTP 设置并填写服务器地址".into())
+        })?;
         if patches.keys().collect::<BTreeSet<_>>() != input.target_ids.iter().collect() {
             return Err(AppError::InvalidConfig("NTP 设置内容与所选屏不一致".into()));
         }
-        for patch in patches.values() { patch.validate()?; }
-    } else if ntp.is_some() { return Err(AppError::InvalidConfig("此操作不接受 NTP 设置内容".into())); }
+        for patch in patches.values() {
+            patch.validate()?;
+        }
+    } else if ntp.is_some() {
+        return Err(AppError::InvalidConfig("此操作不接受 NTP 设置内容".into()));
+    }
     if input.action == "app_config" {
-        let patches = app_config.as_ref().ok_or_else(||AppError::InvalidConfig("请先读取小新配置并选择修改内容".into()))?;
+        let patches = app_config
+            .as_ref()
+            .ok_or_else(|| AppError::InvalidConfig("请先读取小新配置并选择修改内容".into()))?;
         if patches.keys().collect::<BTreeSet<_>>() != input.target_ids.iter().collect() {
             return Err(AppError::InvalidConfig("配置修改内容与所选屏不一致".into()));
         }
         let mut environments = BTreeSet::new();
         for patch in patches.values() {
             patch.validate()?;
-            if patch.is_empty() { return Err(AppError::InvalidConfig("请至少选择一项修改".into())); }
-            for field in patch.fields() {
-                if field.split('.').count() == 3 { environments.insert(field.split('.').nth(1).unwrap().to_string()); }
+            if patch.is_empty() {
+                return Err(AppError::InvalidConfig("请至少选择一项修改".into()));
             }
-            if let Some(env) = patch.set.get("environments.current").and_then(Value::as_str) { environments.insert(env.to_string()); }
+            for field in patch.fields() {
+                if field.split('.').count() == 3 {
+                    environments.insert(field.split('.').nth(1).unwrap().to_string());
+                }
+            }
+            if let Some(env) = patch
+                .set
+                .get("environments.current")
+                .and_then(Value::as_str)
+            {
+                environments.insert(env.to_string());
+            }
         }
-        if environments.len() > 1 { return Err(AppError::InvalidConfig("一批配置只修改一套指定环境".into())); }
-    } else if app_config.is_some() { return Err(AppError::InvalidConfig("此操作不接受小新配置内容".into())); }
+        if environments.len() > 1 {
+            return Err(AppError::InvalidConfig("一批配置只修改一套指定环境".into()));
+        }
+    } else if app_config.is_some() {
+        return Err(AppError::InvalidConfig("此操作不接受小新配置内容".into()));
+    }
     tasks::validate_retry(state, project, &input).await?;
+    if let Some(patches) = &settings {
+        super::screen_settings::validate_retry_patches(state, project, &input, patches).await?;
+    }
     let snapshot = local(state).snapshot(project).await?;
     let selected = input
         .target_ids
@@ -207,7 +300,9 @@ pub async fn preflight_with_device_factory<P:super::device::DeviceCommandPort,F:
         })
         .collect::<AppResult<Vec<_>>>()?;
     if input.action == "app_config" {
-        crate::domain::smart_screen::app_config::validate_batch_sizes(selected.iter().map(|screen| screen.fields.size.as_str()))?;
+        crate::domain::smart_screen::app_config::validate_batch_sizes(
+            selected.iter().map(|screen| screen.fields.size.as_str()),
+        )?;
     }
     if input.action == "install" {
         let sizes = selected
@@ -253,19 +348,41 @@ pub async fn preflight_with_device_factory<P:super::device::DeviceCommandPort,F:
         None
     };
     if let Some(Err(error)) = &context {
-        return Err(AppError::Conflict(format!("本批次包含平台注册屏，平台连接、登录或共享记录不可用，整批未执行：{error}。如仅处理本机未注册屏，请单独选择这些屏后重新操作。")));
+        return Err(AppError::Conflict(format!(
+            "本批次包含平台注册屏，平台连接、登录或共享记录不可用，整批未执行：{error}。如仅处理本机未注册屏，请单独选择这些屏后重新操作。"
+        )));
     }
     let device = device_factory()?;
-    let check = |screen| preflight_screen(state, project, &input, &snapshot, &parsed, &context, &app_config, &device, screen);
+    let check = |screen| {
+        preflight_screen(
+            state,
+            project,
+            &input,
+            &snapshot,
+            &parsed,
+            &context,
+            &app_config,
+            &settings,
+            &device,
+            screen,
+        )
+    };
     let checks = if input.action == "app_config" {
-        super::configuration_reads::try_ordered(selected, input.concurrency.clamp(1, 3) as usize, check).await?
+        super::configuration_reads::try_ordered(
+            selected,
+            input.concurrency.clamp(1, 3) as usize,
+            check,
+        )
+        .await?
     } else {
         // 其他维护操作仍按原顺序逐屏检查；致命错误立即停止，不派发后续屏。
         let mut checks = Vec::new();
         for screen in selected {
             let result = check(screen).await?;
             if let Some(observation) = &result.observation {
-                local(state).append_observation(project, observation).await?;
+                local(state)
+                    .append_observation(project, observation)
+                    .await?;
             }
             checks.push(result);
         }
@@ -277,11 +394,17 @@ pub async fn preflight_with_device_factory<P:super::device::DeviceCommandPort,F:
     // 汇合后按输入顺序保存观察、组合预览与计划，不让完成先后改变ID对应关系。
     for check in checks {
         if let Some(observation) = check.observation {
-            if input.action == "app_config" { local(state).append_observation(project, &observation).await?; }
+            if input.action == "app_config" {
+                local(state)
+                    .append_observation(project, &observation)
+                    .await?;
+            }
             observations.insert(check.item.screen_id.clone(), observation);
         }
         items.push(check.item);
-        if let Some(target) = check.target { targets.push(target); }
+        if let Some(target) = check.target {
+            targets.push(target);
+        }
     }
     if !targets.is_empty() {
         let scope = local(state).scope(project).await?;
@@ -302,6 +425,7 @@ pub async fn preflight_with_device_factory<P:super::device::DeviceCommandPort,F:
                 request_ids: BTreeMap::new(),
                 app_config,
                 ntp,
+                settings,
             })
             .map_err(|_| AppError::InvalidConfig("保存设备检查失败".into()))?,
         };
@@ -316,11 +440,16 @@ struct ScreenPreflightCheck {
 }
 
 async fn preflight_screen<P: super::device::DeviceCommandPort>(
-    state: &FormalAppState, project: &str, input: &ScreenOperationInput,
-    snapshot: &ScreenSnapshot, parsed: &Option<ApkInfo>,
+    state: &FormalAppState,
+    project: &str,
+    input: &ScreenOperationInput,
+    snapshot: &ScreenSnapshot,
+    parsed: &Option<ApkInfo>,
     context: &Option<AppResult<write_context::ScreenWriteContext>>,
     app_config: &Option<BTreeMap<String, crate::domain::smart_screen::app_config::AppConfigPatch>>,
-    device: &AdbDevice<P>, screen: ScreenAsset,
+    settings: &Option<BTreeMap<String, crate::domain::smart_screen::settings::ScreenSettingsPatch>>,
+    device: &AdbDevice<P>,
+    screen: ScreenAsset,
 ) -> AppResult<ScreenPreflightCheck> {
     let mut reason = None;
     let mut observation_result = None;
@@ -356,6 +485,8 @@ async fn preflight_screen<P: super::device::DeviceCommandPort>(
         }
     }
     let mut skip = false;
+    let mut maintenance_message = None;
+    let mut settings_detail = None;
     if reason.is_none() {
         let inspected = device
             .inspect(&screen, "inspect", CancellationToken::new())
@@ -374,18 +505,36 @@ async fn preflight_screen<P: super::device::DeviceCommandPort>(
                 if reason.is_none() && input.action == "app_config" {
                     let patch = &app_config.as_ref().expect("checked config")[&screen.id];
                     let mut restart = false;
-                    match super::app_config::read_device(&device, &screen.fields.ip, Some(patch)).await {
+                    match super::app_config::read_device(&device, &screen.fields.ip, Some(patch))
+                        .await
+                    {
                         Err(error) => reason = Some(error.to_string()),
-                        Ok((capabilities, before)) if patch.restart_required_with_capabilities(&before, &capabilities) => {
+                        Ok((capabilities, before))
+                            if patch.restart_required_with_capabilities(&before, &capabilities) =>
+                        {
                             restart = true;
-                            if let Err(error) = super::device_maintenance::capability(&device, &screen, &observation, "restart").await {
+                            if let Err(error) = super::device_maintenance::capability(
+                                &device,
+                                &screen,
+                                &observation,
+                                "restart",
+                            )
+                            .await
+                            {
                                 reason = Some(error.to_string());
                             }
                         }
                         _ => {}
                     }
                     if reason.is_none() {
-                        if let Err(error) = super::app_config::preflight_controls(&device, &screen.fields.ip, patch, restart).await {
+                        if let Err(error) = super::app_config::preflight_controls(
+                            &device,
+                            &screen.fields.ip,
+                            patch,
+                            restart,
+                        )
+                        .await
+                        {
                             reason = Some(error.to_string());
                         }
                     }
@@ -396,11 +545,53 @@ async fn preflight_screen<P: super::device::DeviceCommandPort>(
                         super::ntp::capability(&device, &screen, &observation).await?;
                         super::ntp::check_status(&device, &screen.fields.ip).await?;
                         Ok::<(), AppError>(())
-                    }.await;
-                    if let Err(error) = checked { reason = Some(error.to_string()); }
+                    }
+                    .await;
+                    if let Err(error) = checked {
+                        reason = Some(error.to_string());
+                    }
                 }
-                if reason.is_none() && parsed.is_none() && !["app_config", "ntp"].contains(&input.action.as_str()) {
-                    if let Err(error) = super::device_maintenance::capability(
+                if reason.is_none() && input.action == "screen_settings" {
+                    let patch = settings
+                        .as_ref()
+                        .and_then(|patches| patches.get(&screen.id))
+                        .ok_or_else(|| AppError::InvalidConfig("缺少本屏设置选项".into()))?;
+                    let checked = super::screen_settings::inspect(
+                        state,
+                        project,
+                        &device,
+                        &screen,
+                        &observation,
+                        patch,
+                    )
+                    .await;
+                    match checked {
+                        Ok(row) => {
+                            if row.blocked_count > 0 {
+                                reason = Some(
+                                    "所选设置有无法执行或未确认的项目，请调整选项后重新检查".into(),
+                                );
+                            } else {
+                                skip = row.pending_count == 0;
+                                maintenance_message = Some(if skip {
+                                    "所选项目均已满足，无需执行".into()
+                                } else {
+                                    format!(
+                                        "待处理 {} 项；ADB与NTP按需共用一次重启",
+                                        row.pending_count
+                                    )
+                                });
+                            }
+                            settings_detail = Some(row);
+                        }
+                        Err(error) => reason = Some(error.to_string()),
+                    }
+                }
+                if reason.is_none()
+                    && parsed.is_none()
+                    && !["app_config", "ntp", "screen_settings"].contains(&input.action.as_str())
+                {
+                    match super::device_maintenance::capability(
                         &device,
                         &screen,
                         &observation,
@@ -408,7 +599,12 @@ async fn preflight_screen<P: super::device::DeviceCommandPort>(
                     )
                     .await
                     {
-                        reason = Some(error.to_string());
+                        Err(error) => reason = Some(error.to_string()),
+                        Ok(capability) if input.action == "sleep_off" => {
+                            skip = capability["alreadyDisabled"] == true;
+                            maintenance_message = capability["message"].as_str().map(str::to_owned);
+                        }
+                        Ok(_) => {}
                     }
                 }
                 observation_result = Some(observation);
@@ -428,8 +624,11 @@ async fn preflight_screen<P: super::device::DeviceCommandPort>(
         name: screen.fields.name.clone(),
         ip: screen.fields.ip.clone(),
         state: state_name.into(),
+        settings: settings_detail,
         reason: reason.unwrap_or_else(|| {
-            if skip {
+            if let Some(message) = maintenance_message {
+                message
+            } else if skip {
                 "已经是目标数字版本，无需重复安装".into()
             } else if parsed.is_some() {
                 "设备身份、安装包、系统及签名已通过检查".into()
@@ -438,8 +637,11 @@ async fn preflight_screen<P: super::device::DeviceCommandPort>(
             }
         }),
     };
-    Ok(ScreenPreflightCheck { item, observation: observation_result,
-        target: (state_name == "ready").then_some(screen) })
+    Ok(ScreenPreflightCheck {
+        item,
+        observation: observation_result,
+        target: (state_name == "ready").then_some(screen),
+    })
 }
 
 pub async fn submit(
@@ -450,7 +652,8 @@ pub async fn submit(
 ) -> AppResult<String> {
     crate::application::smart_screen::operations::validate_input(&input)?;
     let _guard = tasks::submission_lock().lock().await;
-    let (mut plan, hash) = task_data::read_preflight_plan(state.local_store.pool(), project, preview).await?;
+    let (mut plan, hash) =
+        task_data::read_preflight_plan(state.local_store.pool(), project, preview).await?;
     let mut comparable = input.clone();
     comparable.target_ids = plan.input.target_ids.clone();
     comparable.expected_targets = plan.input.expected_targets.clone();
@@ -463,16 +666,38 @@ pub async fn submit(
     }
     if input.action == "app_config" {
         // 旧版产生的混合预览必须重做，不能缩小提交选择后沿用原预览绕过尺寸门禁。
-        crate::domain::smart_screen::app_config::validate_batch_sizes(plan.targets.iter().map(|screen| screen.fields.size.as_str()))?;
+        crate::domain::smart_screen::app_config::validate_batch_sizes(
+            plan.targets
+                .iter()
+                .map(|screen| screen.fields.size.as_str()),
+        )?;
     }
     let snapshot = local(state).snapshot(project).await?;
     if input.action == "app_config" {
         // 原预览可能只保留检查通过的targets，仍须复核原始整批选择，不能遗漏被过滤目标。
-        let originally_selected = plan.input.target_ids.iter().map(|id| snapshot.screens.iter().find(|screen| &screen.id == id)
-            .ok_or_else(|| AppError::Conflict("设备资料已变化，请重新读取配置".into())))
+        let originally_selected = plan
+            .input
+            .target_ids
+            .iter()
+            .map(|id| {
+                snapshot
+                    .screens
+                    .iter()
+                    .find(|screen| &screen.id == id)
+                    .ok_or_else(|| AppError::Conflict("设备资料已变化，请重新读取配置".into()))
+            })
             .collect::<AppResult<Vec<_>>>()?;
-        crate::domain::smart_screen::app_config::validate_batch_sizes(originally_selected.iter().map(|screen| screen.fields.size.as_str()))?;
-        let selected = plan.targets.iter().filter(|screen| ids.contains(&screen.id)).cloned().collect::<Vec<_>>();
+        crate::domain::smart_screen::app_config::validate_batch_sizes(
+            originally_selected
+                .iter()
+                .map(|screen| screen.fields.size.as_str()),
+        )?;
+        let selected = plan
+            .targets
+            .iter()
+            .filter(|screen| ids.contains(&screen.id))
+            .cloned()
+            .collect::<Vec<_>>();
         validate_configuration_batch(&selected, &snapshot)?;
     }
     for screen in plan.targets.iter().filter(|s| ids.contains(&s.id)) {
@@ -514,8 +739,10 @@ pub async fn submit(
         plan.detail = serde_json::to_value(data)
             .map_err(|_| AppError::InvalidConfig("保存设备执行计划失败".into()))?;
         previews::queue_with_id(state, preview, PREVIEW, &hash, &plan, id.clone()).await
-    }.await;
-    if queued.is_err() && staged_install
+    }
+    .await;
+    if queued.is_err()
+        && staged_install
         && let Err(error) = cleanup_failed_install_submission(state, project, &id).await
     {
         tracing::warn!(task_id = %id, error = %crate::core::log_safety::safe_error(&error),
@@ -530,9 +757,15 @@ async fn cleanup_failed_install_submission(
     task_id: &str,
 ) -> AppResult<()> {
     match state.task_repository.get(task_id).await {
-        Ok(_) => cleanup_finished_task_artifacts(&state.task_repository, &state.paths, task_id).await,
+        Ok(_) => {
+            cleanup_finished_task_artifacts(&state.task_repository, &state.paths, task_id).await
+        }
         Err(AppError::NotFound(_)) => {
-            if !state.task_repository.artifact_directory_referenced(task_id).await? {
+            if !state
+                .task_repository
+                .artifact_directory_referenced(task_id)
+                .await?
+            {
                 TaskDataLifecycle::new(&state.paths).clear_orphan_artifacts(project, task_id)?;
             }
             Ok(())
@@ -694,7 +927,9 @@ async fn finish(
     .await?;
     // 全部目标执行、结果保存与共享核实已结束后才释放安装副本。
     // 清理失败只留待后续补清，不修改设备或平台的既有结果。
-    if let Err(error) = cleanup_finished_task_artifacts(&state.task_repository, &state.paths, id).await {
+    if let Err(error) =
+        cleanup_finished_task_artifacts(&state.task_repository, &state.paths, id).await
+    {
         tracing::warn!(task_id = id, error = %crate::core::log_safety::safe_error(&error),
             "screen maintenance artifact cleanup deferred");
     }
@@ -814,10 +1049,8 @@ pub async fn run(
     task_data::save_results(state.local_store.pool(), project, id, &results).await?;
     // 单屏执行和收尾由同一个 future 推进。外层不能在暂停其他单屏 future 时
     // 等待同一任务的事件锁，否则持锁子任务没有机会继续执行并释放锁。
-    let batch = drain_maintenance_targets(
-        &plan.targets,
-        plan.input.concurrency as usize,
-        |screen| {
+    let batch =
+        drain_maintenance_targets(&plan.targets, plan.input.concurrency as usize, |screen| {
             let plan = &plan;
             let data = &data;
             let cancel = cancel.clone();
@@ -831,12 +1064,17 @@ pub async fn run(
                     Some(&result.screen_id),
                     "result",
                     &result.message,
-                    if target_succeeded(&result) { TaskEventLevel::Info } else { TaskEventLevel::Warn },
-                ).await?;
+                    if target_succeeded(&result) {
+                        TaskEventLevel::Info
+                    } else {
+                        TaskEventLevel::Warn
+                    },
+                )
+                .await?;
                 Ok(())
             }
-        },
-    ).await;
+        })
+        .await;
     if !batch.failures.is_empty() {
         for (screen_id, error) in &batch.failures {
             tracing::warn!(task_id=id, screen_id, error=?crate::core::log_safety::safe_error(error),
@@ -904,7 +1142,9 @@ async fn defer_maintenance_batch(
     id: &str,
     not_started: usize,
 ) -> AppResult<()> {
-    repository.protect_results(id, "设备结果尚未完整保存，请核实原任务").await?;
+    repository
+        .protect_results(id, "设备结果尚未完整保存，请核实原任务")
+        .await?;
     let current = repository.get(id).await?.state;
     if current != TaskState::FinalizingFailed {
         repository.transition(
@@ -924,11 +1164,21 @@ async fn reject_unstarted_configuration_batch(
     error: AppError,
 ) -> AppResult<()> {
     let previous = task_data::read_results(state.local_store.pool(), &plan.project_id, id).await?;
-    if state.task_repository.get(id).await?.state != TaskState::Queued || !previous.targets.is_empty() {
-        return Err(AppError::Conflict("原配置任务已有执行记录，请核实原任务；未重放设备动作".into()));
+    if state.task_repository.get(id).await?.state != TaskState::Queued
+        || !previous.targets.is_empty()
+    {
+        return Err(AppError::Conflict(
+            "原配置任务已有执行记录，请核实原任务；未重放设备动作".into(),
+        ));
     }
-    state.task_repository.initialize_target_progress(id, "配置批次检查", 100).await?;
-    state.task_repository.transition(id, TaskState::Queued, TaskState::Running, None, None).await?;
+    state
+        .task_repository
+        .initialize_target_progress(id, "配置批次检查", 100)
+        .await?;
+    state
+        .task_repository
+        .transition(id, TaskState::Queued, TaskState::Running, None, None)
+        .await?;
     let message = format!("{error} 本批次未连接设备或修改配置，请重新选择后读取。");
     let blocked = ScreenResults {
         targets: plan.targets.iter().map(|screen| (screen.id.clone(), ScreenTargetResult {
@@ -940,10 +1190,20 @@ async fn reject_unstarted_configuration_batch(
         finished: true,
     };
     task_data::save_results(state.local_store.pool(), &plan.project_id, id, &blocked).await?;
-    for result in blocked.targets.values() { target_state(state, id, result, true).await?; }
+    for result in blocked.targets.values() {
+        target_state(state, id, result, true).await?;
+    }
     // 尚未建立平台操作起点，不调用共享写入；本机明确记录整批未执行。
-    state.task_repository.transition(id, TaskState::Running, TaskState::Failed,
-        Some("SCREEN_CONFIG_BATCH_BLOCKED"), Some(&message)).await?;
+    state
+        .task_repository
+        .transition(
+            id,
+            TaskState::Running,
+            TaskState::Failed,
+            Some("SCREEN_CONFIG_BATCH_BLOCKED"),
+            Some(&message),
+        )
+        .await?;
     state.task_repository.resolve_results(id).await?;
     tasks::event(state, id, None, "blocked", &message, TaskEventLevel::Warn).await
 }
@@ -1042,10 +1302,42 @@ async fn execute_target(
             cancel,
         )
         .await
+    } else if plan.input.action == "screen_settings" {
+        super::screen_settings::execute(
+            state,
+            id,
+            plan,
+            data,
+            screen,
+            held.as_ref(),
+            &mut result,
+            cancel,
+        )
+        .await
     } else if plan.input.action == "app_config" {
-        super::app_config::execute(state, id, plan, data, screen, held.as_ref(), &mut result, cancel).await
+        super::app_config::execute(
+            state,
+            id,
+            plan,
+            data,
+            screen,
+            held.as_ref(),
+            &mut result,
+            cancel,
+        )
+        .await
     } else if plan.input.action == "ntp" {
-        super::ntp::execute(state, id, plan, data, screen, held.as_ref(), &mut result, cancel).await
+        super::ntp::execute(
+            state,
+            id,
+            plan,
+            data,
+            screen,
+            held.as_ref(),
+            &mut result,
+            cancel,
+        )
+        .await
     } else {
         match data.observations.get(&screen.id) {
             Some(original) => {
@@ -1201,7 +1493,8 @@ async fn execute_install(
         return Err(match uploaded {
             Err(error) => error,
             Ok(output) => {
-                let reason = state.task_event_pipeline
+                let reason = state
+                    .task_event_pipeline
                     .redact_text(&format!("{} {}", output.stdout, output.stderr));
                 let reason: String = reason.trim().chars().take(600).collect();
                 AppError::Conflict(if reason.is_empty() {
@@ -1592,12 +1885,17 @@ pub fn recover<'a>(
                     None
                 };
                 if matches!(result.device, ResultState::Pending | ResultState::Unknown) {
-                    if plan.input.action == "app_config" {
-                        super::app_config::verify(state, &task.id, &plan, &data, screen, result).await?;
+                    if plan.input.action == "screen_settings" {
+                        super::screen_settings::verify(state, &task.id, &plan, screen, result)
+                            .await?;
+                    } else if plan.input.action == "app_config" {
+                        super::app_config::verify(state, &task.id, &plan, &data, screen, result)
+                            .await?;
                     } else if plan.input.action == "ntp" {
                         super::ntp::verify(state, &task.id, &plan, &data, screen, result).await?;
                     } else {
-                        super::device_maintenance::verify(state, &task.id, &plan, screen, result).await?;
+                        super::device_maintenance::verify(state, &task.id, &plan, screen, result)
+                            .await?;
                     }
                 }
                 task_data::save_target(
@@ -1700,7 +1998,11 @@ pub fn recover<'a>(
                     .ok_or_else(|| AppError::Conflict("原安装包信息缺失".into()))?;
                 match intent {
                     Some(intent) if intent.state == "confirmed" => {
-                        confirm_recovered_install_result(result, &package.app_version, intent.result.unwrap_or_default());
+                        confirm_recovered_install_result(
+                            result,
+                            &package.app_version,
+                            intent.result.unwrap_or_default(),
+                        );
                     }
                     Some(intent) if intent.state == "submitted" => {
                         let mut tx = context
@@ -1736,7 +2038,11 @@ pub fn recover<'a>(
                                     &evidence,
                                 )
                                 .await?;
-                            confirm_recovered_install_result(result, &package.app_version, evidence);
+                            confirm_recovered_install_result(
+                                result,
+                                &package.app_version,
+                                evidence,
+                            );
                         } else {
                             local(state)
                                 .update_intent(
@@ -1807,7 +2113,11 @@ pub fn recover<'a>(
     })
 }
 
-fn confirm_recovered_install_result(result: &mut ScreenTargetResult, version: &str, receipt: Value) {
+fn confirm_recovered_install_result(
+    result: &mut ScreenTargetResult,
+    version: &str,
+    receipt: Value,
+) {
     result.business = ResultState::Succeeded;
     result.evidence["businessReceipt"] = receipt;
     result.message = format!("小新 {version} 安装结果已确认；平台版本已核实，未重复安装");

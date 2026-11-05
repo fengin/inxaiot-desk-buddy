@@ -124,8 +124,9 @@ describe("智能屏详情与列表共用待提交资料展示", () => {
       expect(view.fact("本机观测版本").attributes("title")).toContain("192.0.2.90");
       expect(view.fact("5555持久配置").text()).toBe("已读到5555配置");
       expect(view.detail.get('[data-testid="screen-detail-confirmed-ip"]').text()).toContain("待提交 IP 尚未用于这些结果");
-      const adbButton = view.detail.findAllComponents(NButton).find(item => item.text() === "保持ADB端口")!;
-      expect(adbButton.props("disabled")).toBe(false);
+      const settingsButton = view.detail.findAllComponents(NButton).find(item => item.text() === "设置智能屏")!;
+      expect(settingsButton.props("disabled")).toBe(false);
+      expect(view.detail.findAllComponents(NButton).some(item => ["校准时间", "保持ADB端口", "设置NTP服务器", "关闭屏睡眠"].includes(item.text()))).toBe(false);
       expect(view.screen.ip).toBe("192.0.2.10"); expect(view.screen.size).toBe("10");
     } finally { view.dispose(); }
   });

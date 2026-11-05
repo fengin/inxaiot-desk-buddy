@@ -49,6 +49,26 @@ pub(super) async fn check_status<P: DeviceCommandPort>(
     status::read(device, ip).await.map(|_| ())
 }
 
+pub(crate) async fn read_status<P: DeviceCommandPort>(
+    device: &AdbDevice<P>,
+    ip: &str,
+) -> AppResult<Value> {
+    status::read(device, ip).await
+}
+
+pub(crate) async fn source_event<P: DeviceCommandPort>(
+    device: &AdbDevice<P>,
+    ip: &str,
+    server: &str,
+    status: &Value,
+) -> Option<Value> {
+    status::source_event(device, ip, server, status).await
+}
+
+pub(crate) fn fresh_sample(status: &Value) -> bool {
+    status::fresh_sample(status)
+}
+
 pub async fn read_device<P: DeviceCommandPort>(
     device: &AdbDevice<P>,
     ip: &str,
@@ -114,6 +134,16 @@ pub async fn capability<P: DeviceCommandPort>(
     screen: &ScreenAsset,
     observed: &ScreenObservation,
 ) -> AppResult<Value> {
+    configuration_capability(device, screen, observed, false).await
+}
+
+/// 组合设置可先修复持久 ADB；调用方必须在重启前完成端口保存与回读。
+pub(crate) async fn configuration_capability<P: DeviceCommandPort>(
+    device: &AdbDevice<P>,
+    screen: &ScreenAsset,
+    observed: &ScreenObservation,
+    allow_adb_repair: bool,
+) -> AppResult<Value> {
     let firmware = observed.firmware.as_deref().unwrap_or("");
     let known = (screen.fields.size == "4"
         && observed.sdk == Some(27)
@@ -126,14 +156,23 @@ pub async fn capability<P: DeviceCommandPort>(
             "NTP 设置目前只支持已验证的 4 寸 Android 8.1 和 10 寸 Android 10 固件".into(),
         ));
     }
-    let reboot = device_maintenance::capability(device, screen, observed, "reboot")
-        .await
-        .map_err(|error| stage_error("检查重启后管理连接恢复条件", error))?;
+    let boot_id = if allow_adb_repair {
+        device_maintenance::boot_id(device, &screen.fields.ip)
+            .await
+            .map_err(|error| stage_error("读取系统启动编号", error))?
+    } else {
+        device_maintenance::capability(device, screen, observed, "reboot")
+            .await
+            .map_err(|error| stage_error("检查重启后管理连接恢复条件", error))?["bootId"]
+            .as_str()
+            .ok_or_else(|| AppError::Conflict("NTP 重启条件未返回系统启动编号".into()))?
+            .to_owned()
+    };
     let root = device_maintenance::root_mode(device, &screen.fields.ip)
         .await
         .map_err(|error| stage_error("检查系统管理权限", error))?;
     Ok(
-        json!({"supported":true,"activation":"system_reboot","rebootRequired":true,"root":root,"bootId":reboot["bootId"]}),
+        json!({"supported":true,"activation":"system_reboot","rebootRequired":true,"root":root,"bootId":boot_id}),
     )
 }
 
@@ -415,7 +454,7 @@ pub async fn execute(
     wait_sync(state, id, plan, data, screen, result).await
 }
 
-async fn set_server<P: DeviceCommandPort>(
+pub(crate) async fn set_server<P: DeviceCommandPort>(
     device: &AdbDevice<P>,
     ip: &str,
     mode: &str,
@@ -440,6 +479,60 @@ async fn set_server<P: DeviceCommandPort>(
         .await?;
     }
     Ok(())
+}
+
+/// 仅保存并回读配置，不重启、不等待授时；阶段持久化由组合设置驱动负责。
+pub(crate) async fn save_configuration<P, F, Fut>(
+    device: &AdbDevice<P>,
+    ip: &str,
+    mode: &str,
+    patch: &NtpPatch,
+    before: &NtpConfig,
+    cancel: CancellationToken,
+    mut before_write: F,
+) -> AppResult<NtpConfig>
+where
+    P: DeviceCommandPort,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = AppResult<()>>,
+{
+    patch.validate()?;
+    if before.server != patch.server() {
+        if cancel.is_cancelled() {
+            return Err(AppError::Cancelled);
+        }
+        before_write().await?;
+        if cancel.is_cancelled() {
+            return Err(AppError::Cancelled);
+        }
+        set_server(device, ip, mode, patch).await?;
+    }
+    if !before.auto_time {
+        if cancel.is_cancelled() {
+            return Err(AppError::Cancelled);
+        }
+        before_write().await?;
+        if cancel.is_cancelled() {
+            return Err(AppError::Cancelled);
+        }
+        device_maintenance::root_command(
+            device,
+            ip,
+            mode,
+            &["settings", "put", "global", "auto_time", "1"],
+        )
+        .await?;
+    }
+    let after = read_device(device, ip).await?;
+    if !patch.matches(&after)
+        || before.auto_time_zone != after.auto_time_zone
+        || before.time_zone != after.time_zone
+    {
+        return Err(AppError::Conflict(
+            "NTP 设置回读不符合本次目标或原时区设置已变化，未重启屏".into(),
+        ));
+    }
+    Ok(after)
 }
 
 async fn wait_sync(
@@ -614,6 +707,7 @@ mod tests {
     struct Commands {
         calls: Arc<Mutex<Vec<Vec<String>>>>,
         server: Arc<Mutex<String>>,
+        auto_time: Arc<Mutex<Option<bool>>>,
     }
     impl DeviceCommandPort for Commands {
         async fn execute(
@@ -630,15 +724,30 @@ mod tests {
                     ["settings", "get", "global", "ntp_server"] => {
                         self.server.lock().unwrap().clone()
                     }
-                    ["settings", "get", "global", "auto_time"] => "1".into(),
+                    ["settings", "get", "global", "auto_time"] => {
+                        if self.auto_time.lock().unwrap().unwrap_or(true) {
+                            "1".into()
+                        } else {
+                            "0".into()
+                        }
+                    }
                     ["settings", "get", "global", "auto_time_zone"] => "0".into(),
                     ["getprop", "persist.sys.timezone"] => "Asia/Shanghai".into(),
+                    ["getprop", "persist.adb.tcp.port"] => String::new(),
+                    ["cat", "/proc/sys/kernel/random/boot_id"] => {
+                        "00000000-0000-4000-8000-000000000001".into()
+                    }
+                    ["id"] => "uid=0(root)".into(),
                     ["settings", "delete", "global", "ntp_server"] => {
                         *self.server.lock().unwrap() = "null".into();
                         "Deleted 1 rows".into()
                     }
                     ["settings", "put", "global", "ntp_server", value] => {
                         *self.server.lock().unwrap() = value.to_string();
+                        String::new()
+                    }
+                    ["settings", "put", "global", "auto_time", "1"] => {
+                        *self.auto_time.lock().unwrap() = Some(true);
                         String::new()
                     }
                     _ => return Err(AppError::Conflict("非预期设备命令".into())),
@@ -738,6 +847,199 @@ mod tests {
             )
             .await
             .is_err()
+        );
+        assert!(commands.calls.lock().unwrap().is_empty());
+    }
+
+    fn config(server: &str, auto_time: bool) -> NtpConfig {
+        NtpConfig {
+            server: server.into(),
+            auto_time,
+            auto_time_zone: false,
+            time_zone: "Asia/Shanghai".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn combined_save_checks_each_write_and_reads_back_without_reboot_or_timezone_change() {
+        let commands = Commands::default();
+        *commands.server.lock().unwrap() = "old.internal".into();
+        *commands.auto_time.lock().unwrap() = Some(false);
+        let mut checkpoints = 0;
+        let saved = save_configuration(
+            &device(commands.clone()),
+            "192.0.2.10",
+            "shell",
+            &NtpPatch {
+                server: "ntp.internal".into(),
+            },
+            &config("old.internal", false),
+            CancellationToken::new(),
+            || {
+                checkpoints += 1;
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(checkpoints, 2);
+        assert_eq!(saved, config("ntp.internal", true));
+        let calls = commands.calls.lock().unwrap();
+        let writes: Vec<_> = calls
+            .iter()
+            .filter(|args| args.iter().any(|arg| arg == "put"))
+            .collect();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(
+            &writes[0][3..],
+            ["settings", "put", "global", "ntp_server", "ntp.internal"]
+        );
+        assert_eq!(
+            &writes[1][3..],
+            ["settings", "put", "global", "auto_time", "1"]
+        );
+        assert!(calls.iter().all(|args| {
+            !args
+                .iter()
+                .any(|arg| ["reboot", "sync", "date", "hwclock"].contains(&arg.as_str()))
+        }));
+    }
+
+    #[tokio::test]
+    async fn combined_save_unchanged_settings_only_reads_without_authorizing_a_write() {
+        let commands = Commands::default();
+        *commands.server.lock().unwrap() = "ntp.internal".into();
+        let saved = save_configuration(
+            &device(commands.clone()),
+            "192.0.2.10",
+            "shell",
+            &NtpPatch {
+                server: "ntp.internal".into(),
+            },
+            &config("ntp.internal", true),
+            CancellationToken::new(),
+            || async { panic!("已满足的设置不能请求写权限") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved, config("ntp.internal", true));
+        assert!(commands.calls.lock().unwrap().iter().all(|args| {
+            !args
+                .iter()
+                .any(|arg| ["put", "delete", "reboot"].contains(&arg.as_str()))
+        }));
+    }
+
+    #[tokio::test]
+    async fn combined_save_cancellation_during_checkpoint_prevents_the_write() {
+        let commands = Commands::default();
+        let cancel = CancellationToken::new();
+        let error = save_configuration(
+            &device(commands.clone()),
+            "192.0.2.10",
+            "shell",
+            &NtpPatch {
+                server: "ntp.internal".into(),
+            },
+            &config("old.internal", false),
+            cancel.clone(),
+            || {
+                cancel.cancel();
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Cancelled));
+        assert!(commands.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn combined_save_stops_after_losing_permission_between_independent_settings() {
+        let commands = Commands::default();
+        *commands.server.lock().unwrap() = "old.internal".into();
+        *commands.auto_time.lock().unwrap() = Some(false);
+        let mut checks = 0;
+        let error = save_configuration(
+            &device(commands.clone()),
+            "192.0.2.10",
+            "shell",
+            &NtpPatch {
+                server: "ntp.internal".into(),
+            },
+            &config("old.internal", false),
+            CancellationToken::new(),
+            || {
+                checks += 1;
+                std::future::ready(if checks == 1 {
+                    Ok(())
+                } else {
+                    Err(AppError::Conflict("设备占用已失效".into()))
+                })
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Conflict(_)));
+        assert_eq!(*commands.server.lock().unwrap(), "ntp.internal");
+        assert_eq!(*commands.auto_time.lock().unwrap(), Some(false));
+        assert_eq!(commands.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn combined_save_rejects_readback_timezone_changes_without_rebooting() {
+        let commands = Commands::default();
+        *commands.server.lock().unwrap() = "ntp.internal".into();
+        let mut before = config("ntp.internal", true);
+        before.auto_time_zone = true;
+        let error = save_configuration(
+            &device(commands.clone()),
+            "192.0.2.10",
+            "shell",
+            &NtpPatch {
+                server: "ntp.internal".into(),
+            },
+            &before,
+            CancellationToken::new(),
+            || std::future::ready(Ok(())),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("原时区设置已变化"));
+        assert!(commands.calls.lock().unwrap().iter().all(|args| {
+            !args
+                .iter()
+                .any(|arg| ["put", "delete", "reboot"].contains(&arg.as_str()))
+        }));
+    }
+
+    #[tokio::test]
+    async fn combined_capability_can_defer_only_adb_gate_for_a_verified_firmware() {
+        let commands = Commands::default();
+        let mut screen = ScreenAsset::default();
+        screen.fields.ip = "192.0.2.10".into();
+        screen.fields.size = "10".into();
+        let mut observed = ScreenObservation {
+            sdk: Some(29),
+            firmware: Some("STATION/ceres_c4/ceres-c3:10/test".into()),
+            ..Default::default()
+        };
+        assert!(
+            configuration_capability(&device(commands.clone()), &screen, &observed, false)
+                .await
+                .is_err()
+        );
+        let cap = configuration_capability(&device(commands.clone()), &screen, &observed, true)
+            .await
+            .unwrap();
+        assert_eq!(cap["root"], "shell");
+        assert_eq!(cap["bootId"], "00000000-0000-4000-8000-000000000001");
+        commands.calls.lock().unwrap().clear();
+        observed.firmware = Some("unverified".into());
+        assert!(
+            configuration_capability(&device(commands.clone()), &screen, &observed, true)
+                .await
+                .is_err()
         );
         assert!(commands.calls.lock().unwrap().is_empty());
     }

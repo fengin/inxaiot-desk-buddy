@@ -10,6 +10,8 @@ import { isScreenReadOnlyAction, screenCriticalDraftWarning, screenMaintenanceFi
 import type { ScreenVersionPreview, ScreenVersionSyncRecord } from "@/shared/model/screenMaintenance";
 import { validateNtpServer } from "@/shared/model/screenNtp";
 import type { ScreenNtpConfig, ScreenNtpEvidence, ScreenNtpPatch, ScreenNtpRead } from "@/shared/model/screenNtp";
+import { screenSettingsDefaultPatch, screenSettingsFields, screenSettingsNeedsReboot, screenSettingsReadFailure, screenSettingsView,
+  type ScreenSettingsEvidence, type ScreenSettingsItem, type ScreenSettingsKey, type ScreenSettingsPatch, type ScreenSettingsRead } from "@/shared/model/screenSettings";
 
 /** 故障注入仅供测试使用，不是项目属性，不持久化也不暴露于页面适配端口。 */
 type ScreenScenario = "normal" | "platform_offline" | "partial_failure" | "needs_review" | "ntp_sync_unconfirmed" | "write_denied" | "status_changed";
@@ -31,6 +33,8 @@ export class FixtureScreenAdapter implements ScreenAdapter {
   private registrationPreviews = new Map<string, { preview: ScreenRegistrationPreview; fingerprints: Record<string, string>; directory: string }>();
   private ntpConfigs = new Map<string, Record<string, ScreenNtpConfig>>();
   private ntpPatches = new Map<string, Record<string, ScreenNtpPatch>>();
+  private sleepDisabled = new Map<string, Set<string>>();
+  private settingsPatches = new Map<string, Record<string, ScreenSettingsPatch>>();
   constructor(private readonly storage: Storage = localStorage, private readonly tickMs = 650) {}
 
   private state(projectId: string) {
@@ -41,9 +45,10 @@ export class FixtureScreenAdapter implements ScreenAdapter {
     try {
       const raw = this.storage.getItem(SCREEN_STORAGE_PREFIX + projectId);
       if (raw) {
-        const saved = JSON.parse(raw) as ScreenSnapshot & { schemaVersion?: number; fixtureDeviceVersions?: Record<string, string | null>; fixtureNtpConfigs?: Record<string, ScreenNtpConfig> };
+        const saved = JSON.parse(raw) as ScreenSnapshot & { schemaVersion?: number; fixtureDeviceVersions?: Record<string, string | null>; fixtureNtpConfigs?: Record<string, ScreenNtpConfig>; fixtureSleepDisabled?: string[] };
         if (saved.fixtureDeviceVersions) this.deviceVersions.set(projectId, saved.fixtureDeviceVersions);
         if (saved.fixtureNtpConfigs) this.ntpConfigs.set(projectId, saved.fixtureNtpConfigs);
+        if (Array.isArray(saved.fixtureSleepDisabled)) this.sleepDisabled.set(projectId, new Set(saved.fixtureSleepDisabled));
         if (Array.isArray(saved.screens) && Array.isArray(saved.tasks) && Array.isArray(saved.ignoredPairs)) {
           snapshot = { screens: saved.screens, tasks: saved.tasks, ignoredPairs: saved.ignoredPairs, mergeHistory: saved.mergeHistory ?? [], platformDrafts: saved.platformDrafts ?? {}, platformReadAt: saved.platformReadAt, spacesAvailable: saved.spacesAvailable ?? true,
             spaces: Array.isArray(saved.spaces) ? saved.spaces : screenSpaces.map((space) => ({ ...space })), platformAvailable: true };
@@ -88,7 +93,7 @@ export class FixtureScreenAdapter implements ScreenAdapter {
   }
 
   private persist(projectId: string, snapshot: ScreenSnapshot) {
-    this.storage.setItem(SCREEN_STORAGE_PREFIX + projectId, JSON.stringify({ schemaVersion: 3, screens: snapshot.screens, spaces: snapshot.spaces, spacesAvailable: snapshot.spacesAvailable ?? true, tasks: snapshot.tasks, ignoredPairs: snapshot.ignoredPairs, mergeHistory: snapshot.mergeHistory ?? [], platformDrafts: snapshot.platformDrafts ?? {}, platformReadAt: snapshot.platformReadAt, fixtureDeviceVersions: this.deviceVersions.get(projectId) ?? {}, fixtureNtpConfigs: this.ntpConfigs.get(projectId) ?? {} }));
+    this.storage.setItem(SCREEN_STORAGE_PREFIX + projectId, JSON.stringify({ schemaVersion: 3, screens: snapshot.screens, spaces: snapshot.spaces, spacesAvailable: snapshot.spacesAvailable ?? true, tasks: snapshot.tasks, ignoredPairs: snapshot.ignoredPairs, mergeHistory: snapshot.mergeHistory ?? [], platformDrafts: snapshot.platformDrafts ?? {}, platformReadAt: snapshot.platformReadAt, fixtureDeviceVersions: this.deviceVersions.get(projectId) ?? {}, fixtureNtpConfigs: this.ntpConfigs.get(projectId) ?? {}, fixtureSleepDisabled: [...(this.sleepDisabled.get(projectId) ?? [])] }));
   }
 
   private notify(projectId: string, task?: ScreenTask) {
@@ -454,6 +459,33 @@ export class FixtureScreenAdapter implements ScreenAdapter {
     this.persist(projectId, next); this.snapshots.set(projectId, next); this.notify(projectId, task);
   }
 
+  private settingsRead(projectId: string, id: string): ScreenSettingsRead {
+    const screen = this.find(projectId, id);
+    if (!screen.adbAvailable) return screenSettingsReadFailure(id, "模拟管理连接不可用，请重新检查");
+    const supported = ["4", "10"].includes(screen.size), denied = this.scenarios.get(projectId) === "write_denied";
+    const item = (state: ScreenSettingsItem["state"], current: unknown, target: unknown, currentDisplay: string, targetDisplay: string, rebootRequired = false): ScreenSettingsItem => ({
+      state: !supported ? "blocked" : state === "ready" && denied ? "blocked" : state, current, target, currentDisplay, targetDisplay, rebootRequired,
+      reason: !supported ? "当前固件能力尚未确认" : state === "ready" && denied ? "缺少本项系统设置权限" : state === "ready" ? "与目标不一致，需处理" : state === "skip" ? "已满足目标，无需执行" : "未填写NTP目标，保留原设置"
+    });
+    const adbReady = screen.persistentAdb === true || screen.size === "4";
+    const timeReady = screen.clockOffsetSeconds != null && Math.abs(screen.clockOffsetSeconds) <= 15;
+    const sleepReady = this.sleepDisabled.get(projectId)?.has(id) === true;
+    const ntp = this.ntpConfig(projectId, id);
+    const row: ScreenSettingsRead = { screenId: id, readAt: now(), pendingCount: 0, blockedCount: 0, items: {
+      adb: item(adbReady ? "skip" : "ready", { persistentPort: screen.persistentAdb ? "5555" : "", servicePort: "5555", firmwareBootConfigured: screen.size === "4", writeSupported: supported }, { port: "5555" }, adbReady ? "已具备重启后ADB连接" : "尚未持久保持ADB端口", "重启后保持ADB连接", !adbReady),
+      time: item(timeReady ? "skip" : "ready", { systemOffsetSeconds: screen.clockOffsetSeconds, hardwareOffsetSeconds: screen.clockOffsetSeconds }, { source: "computer" }, timeReady ? "系统与硬件时钟偏差在15秒内" : `系统与硬件时钟偏差约${screen.clockOffsetSeconds ?? '未确认'}秒`, "以当前电脑校准系统与硬件时钟"),
+      sleepOff: item(sleepReady ? "skip" : "ready", { saved: sleepReady ? "7" : "0", effectiveMask: sleepReady ? 7 : 0, isPowered: true, plugType: 1, stayOn: sleepReady }, { enabled: true }, sleepReady ? "接电保持唤醒已生效" : "尚未关闭自动睡眠", "持续供电时保持唤醒"),
+      ntp: item("not_selected", { ...ntp, activationConfirmed: true, syncConfirmed: true }, null, ntp.server || "未设置（固件默认）", "未填写目标，保留原设置")
+    } };
+    return screenSettingsView(row, screenSettingsDefaultPatch());
+  }
+  async readSettings(projectId: string, ids: string[]): Promise<ScreenSettingsRead[]> {
+    this.state(projectId); return ids.map(id => copy(this.settingsRead(projectId, id)));
+  }
+  async preflightSettings(projectId: string, input: ScreenOperationInput, patches: Record<string, ScreenSettingsPatch>) {
+    if (input.action !== "screen_settings" || input.targetIds.some(id => !patches[id])) throw new Error("设置内容与所选屏不一致");
+    this.settingsPatches.set(projectId, copy(patches)); return this.preflight(projectId, input);
+  }
   private ntpConfig(projectId: string, id: string) {
     const values = this.ntpConfigs.get(projectId) ?? {};
     values[id] ??= { server: "", autoTime: true, autoTimeZone: false, timeZone: "Asia/Shanghai" };
@@ -487,6 +519,7 @@ export class FixtureScreenAdapter implements ScreenAdapter {
   async preflight(projectId: string, input: ScreenOperationInput): Promise<ScreenPreflightItem[]> {
     if(input.action==='app_config')throw new Error('原型不模拟配置保存，请使用正式桌面程序');
     if (input.action === "ntp" && input.targetIds.some(id => !this.ntpPatches.get(projectId)?.[id])) throw new Error("请先检查 NTP 设置");
+    if (input.action === "screen_settings" && input.targetIds.some(id => !this.settingsPatches.get(projectId)?.[id])) throw new Error("请先检查智能屏设置内容");
     if (input.action === "register") throw new Error("注册与更新必须使用专用资料预览和逐屏确认流程");
     const state = this.state(projectId);
     const selected = state.screens.filter((screen) => input.targetIds.includes(screen.id));
@@ -513,10 +546,16 @@ export class FixtureScreenAdapter implements ScreenAdapter {
       else if (!isScreenReadOnlyAction(input.action) && screenCriticalDraftWarning(screen, state.platformDrafts?.[id])) block(screenCriticalDraftWarning(screen, state.platformDrafts?.[id]));
       else if (!isScreenReadOnlyAction(input.action) && screen.source === "platform" && this.scenarios.get(projectId) === "platform_offline") block("平台不可用，设备写操作暂不能取得共享操作条件；仍可执行只读检查");
       else if (this.busy(state, id)) block("该屏有活动任务或待核实结果");
-      else if (["install", "time", "ntp", "reboot", "restart", "adb"].includes(input.action) && screenMergeCandidates({ ...state, ignoredPairs: [] }).some((c) => c.conflict && [c.local.id, c.platform.id].includes(id))) block("相同 IP 的 MAC 冲突，请先核实身份");
-      else if (input.action !== "ping" && !screen.adbAvailable) block("ADB 无法连接，请先检查调试端口和授权");
+      else if (["install", "time", "ntp", "sleep_off", "screen_settings", "reboot", "restart", "adb"].includes(input.action) && screenMergeCandidates({ ...state, ignoredPairs: [] }).some((c) => c.conflict && [c.local.id, c.platform.id].includes(id))) block("相同 IP 的 MAC 冲突，请先核实身份");
+      else if (!["ping", "inspect"].includes(input.action) && !screen.adbAvailable) block("ADB 无法连接，请先检查调试端口和授权");
       else if (input.action === "adb" && screen.size !== "10") block("仅适用于已经验证的 10 寸屏");
       else if (input.action === "ntp" && !["4", "10"].includes(screen.size)) block("请先确认屏尺寸与支持的固件");
+      else if (input.action === "sleep_off") {
+        if (!["4", "10"].includes(screen.size)) block("请先确认屏尺寸与支持的固件");
+        else if (this.scenarios.get(projectId) === "write_denied") block("当前设备缺少系统设置权限，不能关闭屏睡眠");
+        else if (this.sleepDisabled.get(projectId)?.has(id)) { result = "skip"; reason = "已关闭屏睡眠（接电保持唤醒已生效），无需重复设置"; }
+        else reason = "尚未关闭，将设置接电保持唤醒";
+      }
       else if (input.action === "restart" && !installedVersion) block("未安装小新应用，请先安装");
       else if (input.action === "install") {
         if (input.appVersion && input.abi !== "universal" && input.abi !== screen.abi) block(`安装包不兼容：设备为 ${screen.abi}`);
@@ -526,7 +565,16 @@ export class FixtureScreenAdapter implements ScreenAdapter {
         else if (input.appVersion && result === "ready" && installedVersion === input.appVersion && !input.reinstall) { result = "skip"; reason = "已经是目标版本，无需重复安装"; }
         else if (result === "ready" && !input.appVersion) reason = "APK 元数据未解析，仅演示流程；未完成包名、版本和架构校验";
       }
-      return { screenId: id, name: screen.name, ip: screen.ip, state: result, reason };
+      const settings = input.action === "screen_settings" ? screenSettingsView(this.settingsRead(projectId, id), this.settingsPatches.get(projectId)![id]) : undefined;
+      if (settings && this.scenarios.get(projectId) === "write_denied" && settings.items.ntp.state === "ready") {
+        settings.items.ntp.state = "blocked"; settings.items.ntp.reason = "缺少NTP系统设置权限"; settings.pendingCount--; settings.blockedCount++;
+      }
+      if (settings && result === "ready") {
+        if (settings.blockedCount) block("所选设置含不可执行项目，请查看逐项详情");
+        else if (!settings.pendingCount) { result = "skip"; reason = "所选项目均已满足或未选择，无需执行"; }
+        else reason = `待处理${settings.pendingCount}项；必要时共享一次系统重启`;
+      }
+      return { screenId: id, name: screen.name, ip: screen.ip, state: result, reason, ...(settings ? { settings } : {}) };
     });
   }
 
@@ -540,6 +588,17 @@ export class FixtureScreenAdapter implements ScreenAdapter {
       targets: checks.map((row) => ({ screenId: row.screenId, name: row.name, ip: row.ip, state: "queued", progress: 0, message: "等待派发" })),
       logs: [{ time: now(), level: "INFO", message: `交互原型：模拟${screenActionLabel(input.action)}，不会连接设备或修改数据库。` }]
     };
+    if (input.action === "screen_settings") {
+      task.settings = copy(Object.fromEntries(input.targetIds.map(id => [id, this.settingsPatches.get(projectId)![id]])));
+      for (const target of task.targets) {
+        const row = checks.find(check => check.screenId === target.screenId)!.settings!;
+        const patch = task.settings[target.screenId];
+        const items = Object.fromEntries(screenSettingsFields.map(({ key }) => [key, { state: row.items[key].state === "not_selected" ? "not_selected" : row.items[key].state === "skip" ? "skipped" : "pending", message: row.items[key].reason, before: row.items[key].current, target: row.items[key].target }])) as ScreenSettingsEvidence["items"];
+        target.result = { device: "pending", business: "not_required", shared: "not_required", evidence: { screenSettings: {
+          patch, items, reboot: { required: screenSettingsNeedsReboot(row), requested: false, reasons: ["adb", "ntp"].filter(key => row.items[key as ScreenSettingsKey].state === "ready" && row.items[key as ScreenSettingsKey].rebootRequired) }
+        } } };
+      }
+    }
     if (input.action === "ntp") for (const target of task.targets) target.result = { device: "pending", business: "not_required", shared: "not_required", evidence: { ntp: {
       before: copy(this.ntpConfig(projectId, target.screenId)), targetServer: this.ntpPatches.get(projectId)![target.screenId]!.server,
       save: "pending", activation: "pending", sync: "pending", rebootRequired: true,
@@ -560,6 +619,19 @@ export class FixtureScreenAdapter implements ScreenAdapter {
       target.message = "安装流程演示完成；APK 元数据未解析，未执行真实安装，版本记录未更新";
       return;
     }
+    if (task.action === "screen_settings") {
+      const patch = task.settings![screen.id], evidence = target.result!.evidence!.screenSettings as ScreenSettingsEvidence;
+      if (patch.adb) screen.persistentAdb = true;
+      if (patch.ntp) this.ntpConfigs.get(projectId)![screen.id] = { ...this.ntpConfig(projectId, screen.id), server: patch.ntp.server, autoTime: true };
+      if (patch.time) screen.clockOffsetSeconds = 1;
+      if (patch.sleepOff) { const closed = this.sleepDisabled.get(projectId) ?? new Set<string>(); closed.add(screen.id); this.sleepDisabled.set(projectId, closed); }
+      const after = this.settingsRead(projectId, screen.id);
+      for (const { key } of screenSettingsFields) if (evidence.items[key].state === "pending") evidence.items[key] = { ...evidence.items[key], state: "succeeded", message: "设置和生效已回读确认", after: after.items[key].current };
+      if (evidence.reboot.required) { evidence.reboot.requested = true; evidence.reboot.beforeBootId = `fixture-before-${screen.id}`; evidence.reboot.afterBootId = `fixture-after-${screen.id}`; }
+      target.result!.device = "succeeded";
+      target.message = "模拟设置完成：端口与NTP先保存，必要时共用一次重启，再校时和关闭睡眠；各项均已回读确认";
+      return;
+    }
     screen.checkedAt = now();
     if (["ping", "inspect"].includes(task.action)) screen.ping = ["platform-screen-3", "platform-screen-17"].includes(screen.id) ? "offline" : "online";
     if (task.action === "ping") target.result = {
@@ -567,13 +639,30 @@ export class FixtureScreenAdapter implements ScreenAdapter {
       observation: { id: crypto.randomUUID(), operationType: "ping", observedIp: target.ip, observedAt: screen.checkedAt,
         ping: screen.ping, adbAvailable: false, abis: [], errors: [] }
     };
+    if (task.action === "inspect" && !screen.adbAvailable) {
+      target.state = "failed";
+      target.message = "模拟管理连接不可用；IP连通性结果单独保留";
+      target.result = { device: "failed", business: "not_required", shared: "not_required",
+        observation: { id: crypto.randomUUID(), operationType: "inspect", observedIp: target.ip, observedAt: screen.checkedAt,
+          ping: screen.ping, adbAvailable: false, abis: [], errors: ["模拟ADB无法连接或尚未授权"] } };
+      return;
+    }
     if (["mac", "inspect"].includes(task.action) && !screen.observedMac) screen.observedMac = screen.mac || `02:AA:00:00:00:${this.state(projectId).screens.indexOf(screen).toString(16).padStart(2, "0").toUpperCase()}`;
     if (task.action === "install" && task.input!.appVersion) {
       this.deviceVersions.get(projectId)![screen.id] = task.input!.appVersion;
       screen.observedAppVersion = task.input!.appVersion; screen.appVersion = task.input!.appVersion;
       screen.versionCheckedAt = now(); screen.versionCheckedIp = screen.ip;
     }
-    if (task.action === "inspect") this.readVersion(projectId, screen);
+    if (task.action === "inspect") {
+      this.readVersion(projectId, screen);
+      target.result = { device: "succeeded", business: "not_required", shared: "not_required",
+        observation: { id: crypto.randomUUID(), operationType: "inspect", observedIp: target.ip, observedAt: screen.checkedAt,
+          ping: screen.ping, adbAvailable: true, observedMac: screen.observedMac,
+          android: screen.android.replace(/^Android\s*/i, ""), abis: screen.abi ? [screen.abi] : [],
+          appInstalled: screen.appInstalled, appRunning: screen.appInstalled === false ? false : screen.appRunning ?? screen.appInstalled,
+          observedAppVersion: screen.observedAppVersion, appVersionCode: screen.appVersionCode,
+          freeSpaceMb: screen.freeSpaceMb, clockOffsetSeconds: screen.clockOffsetSeconds, errors: [] } };
+    }
     if (task.action === "ntp") {
       const evidence = target.result!.evidence!.ntp as ScreenNtpEvidence;
       const current = this.ntpConfig(projectId, screen.id), unchanged = current.server === evidence.targetServer && current.autoTime;
@@ -591,9 +680,15 @@ export class FixtureScreenAdapter implements ScreenAdapter {
     }
     if (task.action === "time") screen.clockOffsetSeconds = 1;
     if (task.action === "adb") screen.persistentAdb = true;
+    if (task.action === "sleep_off") {
+      const disabled = this.sleepDisabled.get(projectId) ?? new Set<string>();
+      disabled.add(screen.id); this.sleepDisabled.set(projectId, disabled);
+      target.result = { device: "succeeded", business: "not_required", shared: "not_required" };
+    }
     target.message = task.action === "ping" ? `本机 IP ${screen.ping === "online" ? "可达" : "不可达"}`
       : task.action === "install" ? `小新 ${screen.appVersion} 安装完成，启动检查通过`
-        : task.action === "adb" ? "重启后 5555 已恢复，系统启动完成"
+        : task.action === "sleep_off" ? "模拟关闭屏睡眠：未关闭 → 已关闭；设置和接电保持唤醒已确认，未修改原自动息屏时长"
+          : task.action === "adb" ? "重启后 5555 已恢复，系统启动完成"
           : task.action === "time" ? "时间回读偏差 1 秒，时区与自动校时设置保留"
             : task.action === "mac" ? `已采集网卡 MAC：${screen.observedMac}`
               : task.action === "reboot" ? "系统已重新启动，管理连接恢复"
@@ -609,6 +704,12 @@ export class FixtureScreenAdapter implements ScreenAdapter {
       const index = task.targets.indexOf(target);
       if (scenario === "partial_failure" && index === Math.min(1, task.targets.length - 1)) {
         target.state = "failed"; target.message = "连接中断，未取得成功结果；保留原版本，请检查连接后重试";
+        if (task.action === "screen_settings") {
+          const evidence = target.result!.evidence!.screenSettings as ScreenSettingsEvidence;
+          let stopped = false;
+          for (const { key } of screenSettingsFields) if (evidence.items[key].state === "pending") { evidence.items[key].state = stopped ? "not_started" : "failed"; evidence.items[key].message = stopped ? "前项失败，本项未开始" : "模拟本项失败，停止本屏后续项目"; stopped = true; }
+          target.result!.device = "failed"; target.message = "模拟首个待处理项目失败，已停止本屏后续设置，其他屏继续";
+        }
       } else if (task.action === "ntp" && scenario === "ntp_sync_unconfirmed") {
         this.applyResult(projectId, task, target);
         if (target.state !== "needs_review") {
@@ -617,6 +718,13 @@ export class FixtureScreenAdapter implements ScreenAdapter {
           target.message = "模拟地址保存和生效已确认，但授时未确认；本次已结束，请恢复服务器后发起同值验证新任务";
         }
       } else if (scenario === "needs_review" && index === 0) {
+        if (task.action === "screen_settings") {
+          const evidence = target.result!.evidence!.screenSettings as ScreenSettingsEvidence;
+          const last = screenSettingsFields.filter(field => evidence.items[field.key].state === "pending").at(-1);
+          this.applyResult(projectId, task, target);
+          if (last) { evidence.items[last.key].state = "unknown"; evidence.items[last.key].message = "模拟动作已完成但回读中断，需要只读核实"; }
+          target.result!.device = "unknown";
+        }
         if (task.action === "ntp") {
           this.applyResult(projectId, task, target);
           Object.assign(target.result!.evidence!.ntp as ScreenNtpEvidence, { activation: "unknown", sync: "unknown", syncEvidence: undefined });
@@ -665,6 +773,18 @@ export class FixtureScreenAdapter implements ScreenAdapter {
     if (!task || task.state !== "needs_review") throw new Error("该任务没有待核实结果");
     if (task.action === "register") return this.verifyRegistration(projectId, task);
     if (task.action === "version_sync") return this.verifyVersionSync(projectId, task);
+    if (task.action === "screen_settings") {
+      for (const target of task.targets.filter(item => item.state === "needs_review")) {
+        const screen = this.find(projectId, target.screenId), evidence = target.result?.evidence?.screenSettings as ScreenSettingsEvidence | undefined;
+        if (!evidence || screen.ip !== target.ip) { target.message = "设备身份或原设置证据未确认，保留待核实"; continue; }
+        const current = screenSettingsView(this.settingsRead(projectId, screen.id), evidence.patch);
+        if (current.pendingCount || current.blockedCount) { target.message = "仅核实当前状态，仍有目标未确认；未重复保存或重启"; continue; }
+        for (const { key } of screenSettingsFields) if (evidence.items[key].state === "unknown") evidence.items[key] = { ...evidence.items[key], state: "succeeded", after: current.items[key].current, message: "原目标已只读核实" };
+        target.result!.device = "succeeded"; target.state = "succeeded"; target.progress = 100;
+        target.message = "模拟只读核实原设置结果，未重复保存或重启";
+      }
+      this.finish(task); task.updatedAt = now(); this.changed(projectId, task); return;
+    }
     if (task.action === "ntp") {
       for (const target of task.targets.filter(target => target.state === "needs_review")) {
         const evidence = target.result?.evidence?.ntp as ScreenNtpEvidence | undefined;
@@ -714,7 +834,7 @@ export class FixtureScreenAdapter implements ScreenAdapter {
     if (this.state(projectId).tasks.some((task) => ["running", "cancelling"].includes(task.state))) throw new Error("请先等待或取消正在执行的演示任务");
     const snapshot = createScreenSnapshot();
     this.deviceVersions.set(projectId, Object.fromEntries(snapshot.screens.map((screen) => [screen.id, screen.observedAppVersion ?? screen.appVersion])));
-    this.ntpConfigs.delete(projectId); this.ntpPatches.delete(projectId);
+    this.ntpConfigs.delete(projectId); this.ntpPatches.delete(projectId); this.sleepDisabled.delete(projectId); this.settingsPatches.delete(projectId);
     this.scenarios.delete(projectId); this.snapshots.set(projectId, snapshot); this.changed(projectId);
   }
   subscribe(listener: (projectId: string, task?: ScreenTask) => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }

@@ -7,6 +7,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tokio_util::sync::CancellationToken;
 
 const MAX_OFFSET_SECONDS: u64 = 15;
 
@@ -137,7 +138,7 @@ pub(super) async fn capability<P: DeviceCommandPort>(
     Ok(json!({"rtc":rtc, "beforeHardwareSeconds":hardware_seconds(device, ip, mode, &rtc).await?}))
 }
 
-pub(super) async fn set_system<P: DeviceCommandPort>(
+pub(crate) async fn set_system<P: DeviceCommandPort>(
     device: &AdbDevice<P>,
     ip: &str,
     mode: &str,
@@ -148,15 +149,41 @@ pub(super) async fn set_system<P: DeviceCommandPort>(
     Ok(())
 }
 
-pub(super) async fn set_hardware<P: DeviceCommandPort>(
+pub(crate) async fn set_hardware<P: DeviceCommandPort>(
     device: &AdbDevice<P>,
     ip: &str,
     mode: &str,
     selected: &Value,
 ) -> AppResult<()> {
+    set_hardware_with_checkpoint(device, ip, mode, selected, CancellationToken::new(), || {
+        std::future::ready(Ok(()))
+    })
+    .await
+}
+
+pub(crate) async fn set_hardware_with_checkpoint<P, F, Fut>(
+    device: &AdbDevice<P>,
+    ip: &str,
+    mode: &str,
+    selected: &Value,
+    cancel: CancellationToken,
+    mut before_write: F,
+) -> AppResult<()>
+where
+    P: DeviceCommandPort,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = AppResult<()>>,
+{
     let rtc: HardwareClock = serde_json::from_value(selected.clone())
         .map_err(|_| AppError::Conflict("缺少硬件时钟检查记录，未写入硬件时钟".into()))?;
     check_hardware(device, ip, mode, &rtc).await?;
+    if cancel.is_cancelled() {
+        return Err(AppError::Cancelled);
+    }
+    before_write().await?;
+    if cancel.is_cancelled() {
+        return Err(AppError::Cancelled);
+    }
     root_command(
         device,
         ip,
@@ -167,13 +194,72 @@ pub(super) async fn set_hardware<P: DeviceCommandPort>(
     Ok(())
 }
 
-pub(super) struct Verification {
-    pub succeeded: bool,
-    pub message: String,
-    pub readings: Value,
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClockReadings {
+    system_seconds: i64,
+    system_offset_seconds: i64,
+    system_checked_at: i64,
+    hardware_seconds: i64,
+    hardware_offset_seconds: i64,
+    hardware_checked_at: i64,
+    settings: Value,
+    rtc: Value,
 }
 
-pub(super) async fn verify<P: DeviceCommandPort>(
+impl ClockReadings {
+    fn satisfied(&self) -> bool {
+        self.system_offset_seconds.unsigned_abs() <= MAX_OFFSET_SECONDS
+            && self.hardware_offset_seconds.unsigned_abs() <= MAX_OFFSET_SECONDS
+    }
+}
+
+async fn current_readings<P: DeviceCommandPort>(
+    device: &AdbDevice<P>,
+    ip: &str,
+    mode: &str,
+    rtc: &HardwareClock,
+) -> AppResult<ClockReadings> {
+    let system = system_seconds(device, ip).await?;
+    let system_checked_at = OffsetDateTime::now_utc().unix_timestamp();
+    let hardware = hardware_seconds(device, ip, mode, rtc).await?;
+    let hardware_checked_at = OffsetDateTime::now_utc().unix_timestamp();
+    Ok(ClockReadings {
+        system_seconds: system,
+        system_offset_seconds: system - system_checked_at,
+        system_checked_at,
+        hardware_seconds: hardware,
+        hardware_offset_seconds: hardware - hardware_checked_at,
+        hardware_checked_at,
+        settings: clock_settings(device, ip).await?,
+        rtc: json!(rtc),
+    })
+}
+
+/// 只读检查系统与启动使用的硬件时钟，不要求已有校时提交或制造提交证据。
+pub(crate) async fn inspect<P: DeviceCommandPort>(
+    device: &AdbDevice<P>,
+    screen: &ScreenAsset,
+    observed: &ScreenObservation,
+    mode: &str,
+) -> AppResult<Value> {
+    let capability = capability(device, screen, observed, mode).await?;
+    let rtc: HardwareClock = serde_json::from_value(capability["rtc"].clone())
+        .map_err(|_| AppError::Conflict("硬件时钟检查记录无效，请重新检查".into()))?;
+    let readings = current_readings(device, &screen.fields.ip, mode, &rtc).await?;
+    let satisfied = readings.satisfied();
+    let mut value = json!(readings);
+    value["satisfied"] = json!(satisfied);
+    Ok(value)
+}
+
+pub(crate) struct Verification {
+    pub(crate) succeeded: bool,
+    pub(crate) message: String,
+    pub(crate) readings: Value,
+}
+
+pub(crate) async fn verify<P: DeviceCommandPort>(
     device: &AdbDevice<P>,
     ip: &str,
     evidence: &Value,
@@ -201,19 +287,10 @@ pub(super) async fn verify<P: DeviceCommandPort>(
     let rtc: HardwareClock = serde_json::from_value(selected.clone())
         .map_err(|_| AppError::Conflict("硬件时钟检查记录无效，请重新检查".into()))?;
     check_hardware(device, ip, mode, &rtc).await?;
-    let system = system_seconds(device, ip).await?;
-    let system_checked_at = OffsetDateTime::now_utc().unix_timestamp();
-    let hardware = hardware_seconds(device, ip, mode, &rtc).await?;
-    let hardware_checked_at = OffsetDateTime::now_utc().unix_timestamp();
-    let system_offset = system - system_checked_at;
-    let hardware_offset = hardware - hardware_checked_at;
-    let settings = clock_settings(device, ip).await?;
-    let readings = json!({
-        "systemSeconds":system, "systemOffsetSeconds":system_offset, "systemCheckedAt":system_checked_at,
-        "hardwareSeconds":hardware, "hardwareOffsetSeconds":hardware_offset, "hardwareCheckedAt":hardware_checked_at,
-        "settings":settings, "rtc":rtc,
-    });
-    let problem = if settings != capability["clockSettings"] {
+    let readings = current_readings(device, ip, mode, &rtc).await?;
+    let system_offset = readings.system_offset_seconds;
+    let hardware_offset = readings.hardware_offset_seconds;
+    let problem = if readings.settings != capability["clockSettings"] {
         Some("校时后的时区或自动校时设置与执行前不一致，请检查设备".into())
     } else if system_offset.unsigned_abs() > MAX_OFFSET_SECONDS {
         Some(format!(
@@ -230,7 +307,7 @@ pub(super) async fn verify<P: DeviceCommandPort>(
         return Ok(Verification {
             succeeded: false,
             message,
-            readings,
+            readings: json!(readings),
         });
     }
     let mut message = format!(
@@ -242,7 +319,7 @@ pub(super) async fn verify<P: DeviceCommandPort>(
     Ok(Verification {
         succeeded: true,
         message,
-        readings,
+        readings: json!(readings),
     })
 }
 
@@ -253,7 +330,10 @@ mod tests {
     use std::{
         collections::BTreeMap,
         path::Path,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
         time::Duration,
     };
     use tokio_util::sync::CancellationToken;
@@ -269,6 +349,8 @@ mod tests {
         read_error: bool,
         zone: String,
         calls: Vec<Vec<String>>,
+        cancel_after_rtc_check: Option<CancellationToken>,
+        lease_lost_after_rtc_check: Option<Arc<AtomicBool>>,
     }
     impl Commands {
         fn new(driver: &str, index: &str) -> Self {
@@ -281,6 +363,8 @@ mod tests {
                 read_error: false,
                 zone: "Asia/Shanghai".into(),
                 calls: Vec::new(),
+                cancel_after_rtc_check: None,
+                lease_lost_after_rtc_check: None,
             })))
         }
         fn device(&self) -> AdbDevice<Self> {
@@ -341,7 +425,15 @@ mod tests {
                         _ => panic!("未预期的文件 {path}"),
                     }
                 }
-                ["sh", "-c", command] if command.starts_with("'test -c /dev/rtc") => String::new(),
+                ["sh", "-c", command] if command.starts_with("'test -c /dev/rtc") => {
+                    if let Some(cancel) = &c.cancel_after_rtc_check {
+                        cancel.cancel();
+                    }
+                    if let Some(lost) = &c.lease_lost_after_rtc_check {
+                        lost.store(true, Ordering::SeqCst);
+                    }
+                    String::new()
+                }
                 ["hwclock", "--help"] => "--systohc --utc --rtc".into(),
                 ["hwclock", "-w", "-u", "-f", _] => {
                     if c.write_error {
@@ -392,6 +484,95 @@ mod tests {
     fn evidence(clock: Value, phase: &str) -> Value {
         json!({"phase":phase, "capability":{"root":"shell", "clock":clock,
             "clockSettings":{"zone":"Asia/Shanghai", "autoTime":"1", "autoZone":"1"}}})
+    }
+
+    #[tokio::test]
+    async fn read_only_inspection_requires_both_clocks_without_submission_evidence() {
+        for (size, driver) in [("4", "rk808-rtc"), ("10", "rtc-pcf85063")] {
+            let commands = Commands::new(driver, "rtc0");
+            let (screen, observed) = screen(size);
+            let stale = inspect(&commands.device(), &screen, &observed, "shell")
+                .await
+                .unwrap();
+            assert_eq!(stale["satisfied"], false);
+            assert!(stale["systemOffsetSeconds"].as_i64().unwrap().abs() <= 15);
+            assert!(stale["hardwareOffsetSeconds"].as_i64().unwrap().abs() > 15);
+            commands.0.lock().unwrap().hardware = OffsetDateTime::now_utc().unix_timestamp();
+            let current = inspect(&commands.device(), &screen, &observed, "shell")
+                .await
+                .unwrap();
+            assert_eq!(current["satisfied"], true);
+            assert_eq!(current["rtc"]["name"], driver);
+            assert_eq!(current["settings"]["autoTime"], "1");
+            assert!(current.get("phase").is_none());
+            assert!(current.get("requestedSeconds").is_none());
+            assert!(commands.writes().is_empty());
+        }
+    }
+
+    #[test]
+    fn clock_inspection_accepts_fifteen_seconds_but_never_a_stale_second_clock() {
+        let mut readings = ClockReadings {
+            system_seconds: 0,
+            system_offset_seconds: -15,
+            system_checked_at: 0,
+            hardware_seconds: 0,
+            hardware_offset_seconds: 15,
+            hardware_checked_at: 0,
+            settings: Value::Null,
+            rtc: Value::Null,
+        };
+        assert!(readings.satisfied());
+        readings.hardware_offset_seconds = 16;
+        assert!(!readings.satisfied());
+        readings.hardware_offset_seconds = 0;
+        readings.system_offset_seconds = -16;
+        assert!(!readings.satisfied());
+    }
+
+    #[tokio::test]
+    async fn hardware_write_observes_cancellation_from_the_final_rtc_read() {
+        let commands = Commands::new("rk808-rtc", "rtc0");
+        let cancel = CancellationToken::new();
+        commands.0.lock().unwrap().cancel_after_rtc_check = Some(cancel.clone());
+        let error = set_hardware_with_checkpoint(
+            &commands.device(),
+            "192.0.2.4",
+            "shell",
+            &json!({"index":"rtc0", "name":"rk808-rtc"}),
+            cancel,
+            || std::future::ready(Ok(())),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Cancelled));
+        assert!(commands.writes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn hardware_write_rechecks_lease_after_the_final_rtc_read() {
+        let commands = Commands::new("rtc-pcf85063", "rtc0");
+        let lost = Arc::new(AtomicBool::new(false));
+        commands.0.lock().unwrap().lease_lost_after_rtc_check = Some(lost.clone());
+        let error = set_hardware_with_checkpoint(
+            &commands.device(),
+            "192.0.2.10",
+            "shell",
+            &json!({"index":"rtc0", "name":"rtc-pcf85063"}),
+            CancellationToken::new(),
+            || {
+                std::future::ready(if lost.load(Ordering::SeqCst) {
+                    Err(AppError::Conflict("设备占用已失效".into()))
+                } else {
+                    Ok(())
+                })
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::Conflict(_)));
+        assert!(lost.load(Ordering::SeqCst));
+        assert!(commands.writes().is_empty());
     }
 
     #[tokio::test]

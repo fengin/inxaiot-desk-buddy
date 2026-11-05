@@ -10,11 +10,13 @@ import { ntpServerDisplay, ntpStageLabel } from "@/shared/model/screenNtp";
 import { screenHomeStagesSummary, screenHomeSummary } from "@/shared/model/screenHome";
 import type { OperationHistoryPage,OperationHistoryDetail,OperationHistoryTarget } from "@/shared/model/deploymentWorkflow";
 import CompactOperationTable from "@/shared/components/CompactOperationTable.vue";
+import { screenSettingsFields, screenSettingsSelected } from "@/shared/model/screenSettings";
+import ScreenSettingsResultSummary from "./ScreenSettingsResultSummary.vue";
 const props=defineProps<{projectId:string}>();
 const page=ref(1),loading=ref(false),error=ref(""),detail=ref<OperationHistoryDetail>();
 const data=ref<OperationHistoryPage>({items:[],total:0,page:1,pageSize:20});
 const targetPage=ref(1),targetPageSize=ref(50);
-const targetColumns=computed(()=>[{key:'name',title:'目标屏',width:'18%'},{key:'ip',title:'IP 地址',width:'104px'},{key:'state',title:'结果',width:'84px'},{key:'change',title:detail.value?.operation.operationType==='app_config'?'修改内容':detail.value?.operation.operationType==='ntp'?'NTP 授时':'应用版本',width:'23%'},{key:'message',title:'说明'}]);
+const targetColumns=computed(()=>[{key:'name',title:'目标屏',width:'18%'},{key:'ip',title:'IP 地址',width:'104px'},{key:'state',title:'结果',width:'84px'},{key:'change',title:detail.value?.operation.operationType==='screen_settings'?'设置项目':detail.value?.operation.operationType==='app_config'?'修改内容':detail.value?.operation.operationType==='ntp'?'NTP 授时':'应用版本',width:'23%'},{key:'message',title:'说明'}]);
 const visibleTargets=computed(()=>detail.value?.targets.slice((targetPage.value-1)*targetPageSize.value,targetPage.value*targetPageSize.value)??[]);
 const lockColumns=[{key:'resource',title:'占用范围',width:'32%'},{key:'user',title:'操作人',width:'24%'},{key:'computer',title:'来源电脑'}];
 watch(()=>detail.value?.operation.id,()=>{targetPage.value=1;});
@@ -27,6 +29,7 @@ function changeFields(target:OperationHistoryTarget){const config=target.details
 function configSummary(target:OperationHistoryTarget){const config=target.details?.configuration;return config?`保存：${config.save==='not_required'?'无需执行':configLabels[config.save??'pending']} · 重启：${configLabels[config.restart??'pending']} · 回读：${config.readback==='not_required'?'无需执行':configLabels[config.readback??'pending']}`:'';}
 function ntpSummary(target:OperationHistoryTarget){const ntp=target.details?.ntp;return ntp?`保存：${ntpStageLabel(ntp.save)} · 生效：${ntpStageLabel(ntp.activation)} · 授时：${ntpStageLabel(ntp.sync)}`:'';}
 function ntpAddressSummary(target:OperationHistoryTarget){const ntp=target.details?.ntp;return ntp?`${ntp.beforeServer == null ? '未读取' : ntpServerDisplay(ntp.beforeServer)} → ${ntp.targetServer == null ? '未记录' : ntpServerDisplay(ntp.targetServer)}`:'未记录';}
+function settingsFields(target: OperationHistoryTarget) { const value = target.details?.screenSettings; return value?.patch ? screenSettingsFields.filter(field => screenSettingsSelected(value.patch, field.key)).map(field => field.label).join('、') || '未选择设置' : '详见结果说明'; }
 function homeStagesSummary(target:OperationHistoryTarget){const home=target.details?.home;return home?screenHomeStagesSummary(home):'';}
 function managementStage(value: string | undefined, stage: 'ensure'|'save'|'apply'|'readback') {
   return ({pending:'等待处理',unknown:'待核实',applied:'已执行',saved:'已保存',unchanged:stage==='ensure'?'已具备':'已相同',verified:stage==='apply'?'已核对生效':'已核对保存',succeeded:'已确认',different:'与目标不同',not_required:'无需执行'} as Record<string,string>)[value??'pending']??'未确认';
@@ -109,8 +112,9 @@ onBeforeUnmount(()=>{++request;++detailRequest;});
               <td><n-tag size="small" :bordered="false">{{targetStateLabel(target)}}</n-tag></td>
               <td v-if="detail.operation.operationType==='app_config'" :title="`${changeFields(target)}\n${changeSummary(target)}`">{{changeFields(target)}}<small>{{changeSummary(target)}}</small></td>
               <td v-else-if="detail.operation.operationType==='ntp'" :title="`${ntpAddressSummary(target)}\n${ntpSummary(target)}`">{{ntpAddressSummary(target)}}<small>{{target.details?.ntp?.clockOffsetSeconds == null ? '未取得时间偏差' : `时间偏差 ${target.details.ntp.clockOffsetSeconds} 秒`}}</small></td>
+              <td v-else-if="detail.operation.operationType==='screen_settings'" :title="settingsFields(target)">{{ settingsFields(target) }}</td>
               <td v-else :title="`${target.beforeVersion||'未记录'} → ${target.afterVersion||'未更新'}`">{{target.beforeVersion||'未记录'}} → {{target.afterVersion||'未更新'}}</td>
-              <td :title="targetSummary(target)">{{target.resultSummary||target.errorSummary||'—'}}<small v-if="target.details?.configuration || target.details?.home || target.details?.owner || target.details?.kiosk">{{configAndManagementSummary(target)}}</small><small v-else-if="target.details?.ntp">{{ntpSummary(target)}}</small><small v-else-if="target.details">设备：{{labels[target.details.device??'not_required']}} · 平台数据：{{labels[target.details.business??'not_required']}}</small></td>
+              <td :title="targetSummary(target)">{{target.resultSummary||target.errorSummary||'—'}}<screen-settings-result-summary v-if="target.details?.screenSettings" :evidence="target.details.screenSettings" /><small v-else-if="target.details?.configuration || target.details?.home || target.details?.kiosk || target.details?.owner">{{configAndManagementSummary(target)}}</small><small v-else-if="target.details?.ntp">{{ntpSummary(target)}}</small><small v-else-if="target.details">设备：{{labels[target.details.device??'not_required']}} · 平台数据：{{labels[target.details.business??'not_required']}}</small></td>
             </tr>
             <tr v-if="!detail.targets.length"><td :colspan="targetColumns.length" class="screen-muted">暂无逐台结果</td></tr>
           </compact-operation-table>

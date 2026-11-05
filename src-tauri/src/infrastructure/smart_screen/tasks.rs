@@ -69,6 +69,7 @@ pub async fn preflight(
                 state: "blocked".into(),
                 reason: "屏不属于当前项目或已移除".into(),
                 observation: None,
+                settings: None,
             });
             continue;
         };
@@ -85,6 +86,7 @@ pub async fn preflight(
             ip: screen.fields.ip.clone(),
             state: if reason.is_some() { "blocked" } else { "ready" }.into(),
             observation: None,
+            settings: None,
             reason: reason
                 .clone()
                 .unwrap_or_else(|| "可以按当前确认地址执行只读检查".into()),
@@ -164,8 +166,11 @@ pub async fn validate_retry(state: &FormalAppState, project: &str, input: &Scree
     let Some(id) = &input.retry_of_operation_id else { return Ok(()); };
     let task = state.task_repository.get(id).await?;
     let (previous, _) = task_data::read_plan(state.local_store.pool(), project, id).await?;
+    let same_action = previous.input.action == input.action
+        || (input.action == "screen_settings"
+            && ["time", "adb", "sleep_off"].contains(&previous.input.action.as_str()));
     if task.local_project_id != project || task.domain_type != DOMAIN || !task.state.is_terminal() || state.task_repository.results_protected(id).await?
-        || previous.input.action != input.action || input.target_ids.iter().any(|id| !previous.targets.iter().any(|s| &s.id == id || s.aliases.contains(id))) {
+        || !same_action || input.target_ids.iter().any(|id| !previous.targets.iter().any(|s| &s.id == id || s.aliases.contains(id))) {
         return Err(AppError::Conflict("重试来源必须是本项目已结束的同类操作，且只能选择原操作中的屏".into()));
     }
     Ok(())
@@ -972,6 +977,23 @@ pub async fn views(state: &FormalAppState, project: &str) -> AppResult<Vec<Scree
                 .unwrap_or_default(),
         };
         let protected = state.task_repository.results_protected(&task.id).await?;
+        let settings = if task.operation_type == "screen_settings" {
+            Some(
+                serde_json::from_value::<
+                    BTreeMap<String, crate::domain::smart_screen::settings::ScreenSettingsPatch>,
+                >(
+                    plan.detail
+                        .get("settings")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                )
+                .map_err(|_| {
+                    AppError::Conflict("原智能屏设置内容缺失或损坏，不能还原任务设置".into())
+                })?,
+            )
+        } else {
+            None
+        };
         let input = if ["merge", "status", "version_sync"].contains(&task.operation_type.as_str()) {
             None
         } else {
@@ -1000,6 +1022,7 @@ pub async fn views(state: &FormalAppState, project: &str) -> AppResult<Vec<Scree
             targets: mapped,
             logs,
             input,
+            settings,
         });
     }
     Ok(views)

@@ -5,6 +5,8 @@ import type { ScreenVersionPreview } from "@/shared/model/screenMaintenance";
 /** 屏业务调用约定，正式桌面与开发原型分别装配。 */
 export interface ScreenAdapter {
   readonly mode: "prototype" | "real";
+  readSettings?(projectId: string, screenIds: string[]): Promise<import("@/shared/model/screenSettings").ScreenSettingsRead[]>;
+  preflightSettings?(projectId: string, input: ScreenOperationInput, patches: Record<string, import("@/shared/model/screenSettings").ScreenSettingsPatch>): Promise<ScreenPreflightItem[]>;
   readNtp?(projectId: string, screenIds: string[]): Promise<import("@/shared/model/screenNtp").ScreenNtpRead[]>;
   preflightNtp?(projectId: string, input: ScreenOperationInput, patches: Record<string, import("@/shared/model/screenNtp").ScreenNtpPatch>): Promise<ScreenPreflightItem[]>;
   loadAppConfigDraft?(projectId: string): Promise<import("@/shared/model/screenAppConfig").ScreenAppConfigDraft | null>;

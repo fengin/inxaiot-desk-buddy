@@ -5,7 +5,7 @@ import CompactOperationTable from "@/shared/components/CompactOperationTable.vue
 import type { ScreenPreflightItem } from "@/shared/model/screen";
 import ScreenTimeCheck from "./ScreenTimeCheck.vue";
 
-const props = defineProps<{ rows: ScreenPreflightItem[]; disabled?: boolean; compact?: boolean; time?: boolean }>();
+const props = defineProps<{ rows: ScreenPreflightItem[]; disabled?: boolean; compact?: boolean; time?: boolean; sleepOff?: boolean }>();
 const included = defineModel<string[]>("included", { required: true });
 const columns = computed(() => props.compact ? [
   { key: "select", title: "选择", width: "40px" },
@@ -19,8 +19,12 @@ const columns = computed(() => props.compact ? [
   ...(props.time ? [{ key: "time", title: "时间偏差", width: "130px" }] : []),
   { key: "result", title: "检查说明" }
 ]);
-const stateText = (row: ScreenPreflightItem) => row.state === "ready" ? "检查通过" : row.state === "blocked" ? "不可执行" : "无需执行";
-const stateClass = (row: ScreenPreflightItem) => row.state === "ready" ? "screen-success" : row.state === "blocked" ? "screen-danger" : "screen-muted";
+const stateText = (row: ScreenPreflightItem) => row.state === "ready" ? props.sleepOff ? "待关闭" : "检查通过" : row.state === "blocked" ? "不可执行" : props.sleepOff ? "已关闭" : "无需执行";
+function stateClass(row: ScreenPreflightItem) {
+  if (row.state === "blocked") return "screen-danger";
+  if (props.sleepOff) return row.state === "ready" ? "screen-warning" : "screen-success";
+  return row.state === "ready" ? "screen-success" : "screen-muted";
+}
 function toggle(row: ScreenPreflightItem, checked: boolean) {
   if (props.disabled || row.state !== "ready") return;
   included.value = checked ? [...new Set([...included.value, row.screenId])] : included.value.filter(id => id !== row.screenId);

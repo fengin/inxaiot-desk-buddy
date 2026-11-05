@@ -44,6 +44,39 @@ async function render() {
 }
 
 describe("智能屏交互原型页面", () => {
+  it("检查菜单统一，完整检查和仅网络复用同一首屏并保留两类结果确认入口", async () => {
+    const { wrapper, adapter, store } = await render();
+    const execute = vi.spyOn(adapter, "execute"), cover = vi.spyOn(adapter, "coverStatus"), versions = vi.spyOn(adapter, "submitVersionSync");
+    try {
+      store.selectedIds = ["platform-screen-2"]; store.operation = "inspect";
+      await router.push("/screen/operations"); await flushPromises();
+      const actionSelect = () => wrapper.findAllComponents(NSelect).find(item => item.attributes("aria-label") === "选择智能屏操作")!;
+      expect(actionSelect().props("options")).toEqual(expect.arrayContaining([expect.objectContaining({ value: "inspect", label: "检查设备" })]));
+      expect(actionSelect().props("options")).not.toEqual(expect.arrayContaining([expect.objectContaining({ value: "ping" })]));
+      expect(wrapper.findComponent(ScreenTargetPicker).exists()).toBe(true);
+      expect(wrapper.findAllComponents(NCheckbox).find(item => item.attributes("data-testid") === "screen-inspect-network-only")!.props("checked")).toBe(false);
+      await wrapper.get('[data-testid="screen-inspect-start"]').trigger("click");
+      await vi.waitFor(() => expect(wrapper.find(".screen-inspect-results").exists()).toBe(true));
+      expect(execute).toHaveBeenLastCalledWith(store.projectId, expect.objectContaining({ action: "inspect", concurrency: 3, targetIds: ["platform-screen-2"] }));
+      expect(wrapper.get('[data-testid="screen-check-management"]').text()).toBe("可用");
+      expect(wrapper.get('[data-testid="screen-check-device-info"]').text()).toContain("Android");
+      expect(wrapper.findAll("button").some(button => button.text() === "查看平台状态差异")).toBe(true);
+      expect(wrapper.findAll("button").some(button => button.text() === "核对版本并同步平台")).toBe(true);
+      expect(cover).not.toHaveBeenCalled(); expect(versions).not.toHaveBeenCalled();
+      await wrapper.get('[data-testid="screen-inspect-new"]').trigger("click"); await flushPromises();
+      wrapper.findAllComponents(NCheckbox).find(item => item.attributes("data-testid") === "screen-inspect-network-only")!.vm.$emit("update:checked", true);
+      await flushPromises();
+      expect(store.operation).toBe("ping"); expect(actionSelect().props("value")).toBe("inspect");
+      await wrapper.get('[data-testid="screen-inspect-start"]').trigger("click");
+      await vi.waitFor(() => expect(wrapper.find(".screen-inspect-results").exists()).toBe(true));
+      expect(execute).toHaveBeenLastCalledWith(store.projectId, expect.objectContaining({ action: "ping", concurrency: 3 }));
+      expect(wrapper.get('[data-testid="screen-check-management"]').text()).toBe("本次未检查");
+      expect(wrapper.get('[data-testid="screen-check-device-info"]').text()).toContain("仅检查网络连通性");
+      expect(wrapper.findAll("button").some(button => button.text() === "核对版本并同步平台")).toBe(false);
+      expect(cover).not.toHaveBeenCalled(); expect(versions).not.toHaveBeenCalled();
+    } finally { wrapper.unmount(); adapter.dispose(); }
+  }, 30000);
+
   it("列表版本待同步点击后重新核对，确认前不提交，版本写回刷新后提示消失", async () => {
     const { wrapper, adapter, store } = await render();
     try {
@@ -74,7 +107,7 @@ describe("智能屏交互原型页面", () => {
       const id = "platform-screen-3";
       store.selectedIds = [id]; store.operation = action;
       await router.push("/screen/operations"); await flushPromises();
-      await wrapper.get('[data-testid="screen-operation-first-action"]').trigger("click");
+      await wrapper.get(action === "mac" ? '[data-testid="screen-operation-first-action"]' : '[data-testid="screen-inspect-start"]').trigger("click");
       await vi.waitFor(() => expect(store.snapshot.tasks[0]?.state).toBe("succeeded"), { timeout: 2500 });
       const taskId = store.openedTaskId;
       const result = wrapper.get(".screen-final-stage");
@@ -195,7 +228,7 @@ describe("智能屏交互原型页面", () => {
       expect(wrapper.get('[data-testid="screen-apk-size-warning"]').text()).toBe('一批只能操作同规格尺寸屏');
       store.operation = 'ping'; await flushPromises();
       expect(wrapper.find('[data-testid="screen-apk-size-warning"]').exists()).toBe(false);
-      expect(wrapper.get('[data-testid="screen-operation-first-action"]').attributes('disabled')).toBeUndefined();
+      expect(wrapper.get('[data-testid="screen-inspect-start"]').attributes('disabled')).toBeUndefined();
       store.operation = 'install'; store.selectedIds = ['platform-screen-2', 'platform-screen-3']; await flushPromises();
       expect(wrapper.find('[data-testid="screen-apk-size-warning"]').exists()).toBe(false);
       expect(wrapper.get('[data-testid="screen-apk-picker"]').attributes('disabled')).toBeUndefined();
@@ -395,8 +428,9 @@ describe("智能屏交互原型页面", () => {
       const actionSelect = () => wrapper.findAllComponents(NSelect).find((select) => select.attributes('aria-label') === '选择智能屏操作')!;
       actionSelect().vm.$emit('update:value','ping'); await flushPromises();
       expect(wrapper.findAll('.screen-operation-flow .process-step')).toHaveLength(2);
-      actionSelect().vm.$emit('update:value','adb'); await flushPromises();
-      expect(wrapper.findAll('.screen-operation-flow .process-step')).toHaveLength(4);
+      expect((actionSelect().props('options') ?? []).some(option => 'value' in option && ['time','ntp','adb','sleep_off'].includes(String(option.value)))).toBe(false);
+      actionSelect().vm.$emit('update:value','screen_settings'); await flushPromises();
+      expect(wrapper.findAll('.screen-operation-flow .process-step')).toHaveLength(3);
       const picker = wrapper.findComponent(ScreenTargetPicker);
       await picker.get('.screen-target-row .n-checkbox').trigger('click');
       expect(store.selectedIds).toHaveLength(1);

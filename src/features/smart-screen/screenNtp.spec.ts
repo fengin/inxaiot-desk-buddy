@@ -11,6 +11,7 @@ import { validateNtpServer, type ScreenNtpRead, type ScreenNtpPatch } from "@/sh
 import ScreenNtpConfig from "./ScreenNtpConfig.vue";
 import ScreenOperations from "./ScreenOperations.vue";
 import ScreenTaskResults from "./ScreenTaskResults.vue";
+import { screenSettingsView, type ScreenSettingsItem, type ScreenSettingsPatch, type ScreenSettingsRead } from "@/shared/model/screenSettings";
 
 async function render(options: { count?: number; mixed?: boolean; failFirst?: boolean; autoTime?: boolean; operations?: boolean } = {}) {
   const pinia = createPinia(), adapter = new FixtureScreenAdapter(localStorage, 20), store = useSmartScreensStore(pinia);
@@ -25,6 +26,14 @@ async function render(options: { count?: number; mixed?: boolean; failFirst?: bo
   })));
   const preflight = vi.fn(async (_project: string, input: ScreenOperationInput, patches: Record<string, ScreenNtpPatch>) => input.targetIds.map(id => ({ screenId: id, name: id, ip: "192.0.2.1", state: "ready" as const, reason: patches[id] ? "检查通过" : "缺少设置" })));
   Object.assign(adapter, { readNtp: read, preflightNtp: preflight });
+  const readSettings = vi.fn(async (_project: string, targets: string[]): Promise<ScreenSettingsRead[]> => targets.map(screenId => {
+    const item = (key: string): ScreenSettingsItem => ({ state: key === 'ntp' ? 'not_selected' : 'skip', current: key === 'ntp' ? { server: '', autoTime: true, syncConfirmed: true } : {}, target: true, currentDisplay: '当前值', targetDisplay: '目标值', reason: '已读取', rebootRequired: false });
+    return { screenId, readAt: '2026-11-03T00:00:00Z', pendingCount: 0, blockedCount: 0, items: { adb:item('adb'), ntp:item('ntp'), time:item('time'), sleepOff:item('sleepOff') } };
+  }));
+  const preflightSettings = vi.fn(async (project: string, request: ScreenOperationInput, patches: Record<string, ScreenSettingsPatch>) => (await readSettings(project, request.targetIds)).map(row => {
+    const settings = screenSettingsView(row, patches[row.screenId]); return { screenId:row.screenId,name:row.screenId,ip:'192.0.2.1',state:settings.pendingCount?'ready' as const:'skip' as const,reason:'统一检查结果',settings };
+  }));
+  if (options.operations) Object.assign(adapter, { readSettings, preflightSettings });
   const execute = vi.spyOn(adapter, "execute").mockResolvedValue("ntp-task"), step = ref(0), historyOpen = ref(false);
   if (options.operations) vi.spyOn(adapter, "load").mockImplementation(async () => JSON.parse(JSON.stringify(store.snapshot)));
   const wrapper = mount(defineComponent({ setup: () => () => h(NMessageProvider, null, { default: () => options.operations ? h(ScreenOperations, { historyOpen: historyOpen.value, "onUpdate:historyOpen": value => historyOpen.value = value }) : h(ScreenNtpConfig, { step: step.value, "onUpdate:step": value => step.value = value }) }) }), { global: { plugins: [pinia], stubs: { teleport: true } } });
@@ -32,11 +41,13 @@ async function render(options: { count?: number; mixed?: boolean; failFirst?: bo
   const input = async (value: string) => { wrapper.findAllComponents(NInput).find(control => control.attributes("aria-label") === "NTP服务器地址")!.vm.$emit("update:value", value); await flushPromises(); };
   const select = async (value: string) => { wrapper.findAllComponents(NSelect).find(control => control.attributes("aria-label") === "NTP地址处理")!.vm.$emit("update:value", value); await flushPromises(); };
   const checkbox = async (id: string, value: boolean) => { wrapper.findAllComponents(NCheckbox).find(control => control.attributes("aria-label") === `选择 ${store.snapshot.screens.find(screen => screen.id === id)!.name}`)!.vm.$emit("update:checked", value); await flushPromises(); };
-  return { wrapper, store, adapter, ids, read, preflight, execute, step, historyOpen, click, input, select, checkbox, dispose() { wrapper.unmount(); store.stop(); adapter.dispose(); } };
+  const settingsInput = async (value: string) => { wrapper.findAllComponents(NCheckbox).find(control => control.attributes('data-testid') === 'screen-settings-ntp-enabled')!.vm.$emit('update:checked',true);await flushPromises();wrapper.findAllComponents(NInput).find(control => control.attributes('data-testid') === 'screen-settings-ntp')!.vm.$emit('update:value',value);await flushPromises(); };
+  const settingsRead = async () => { await wrapper.get('[data-testid="screen-settings-read"]').trigger('click'); await flushPromises(); };
+  return { wrapper, store, adapter, ids, read, preflight, readSettings, preflightSettings, settingsInput, settingsRead, execute, step, historyOpen, click, input, select, checkbox, dispose() { wrapper.unmount(); store.stop(); adapter.dispose(); } };
 }
 
 describe("NTP 地址与操作菜单", () => {
-  it("配置、校时与 NTP 连续排列，共用菜单供操作页和详情使用", () => { expect(screenActions.map(action => action.value).slice(2, 5)).toEqual(["app_config", "time", "ntp"]); });
+  it("系统维护合并为设置智能屏，操作页和详情共用同一菜单", () => { expect(screenActions.map(action => action.value).slice(2, 4)).toEqual(["app_config", "screen_settings"]); expect(screenActions.some(action => ["time", "ntp", "adb", "sleep_off"].includes(action.value))).toBe(false); });
   it.each(["", "192.168.3.142", "ntp.internal", "ntp-1.example.com", "ntp", "::1", "2001:db8::1"])("接受服务器地址 %s", value => { expect(validateNtpServer(value)).toBe(""); });
   it.each(["http://192.168.3.142", "192.168.3.142:123", "ntp.internal/path", "192.168.3.999", "ntp server", "-ntp.local"])("拒绝不受支持的地址 %s", value => { expect(validateNtpServer(value)).not.toBe(""); });
 });
@@ -104,11 +115,10 @@ describe("NTP重试操作关联", () => {
       await view.click("读取 2 台 NTP 设置"); await view.input("192.168.3.142"); await view.click("检查设置"); await view.click("保存并生效 2 台"); await view.click("确认设置并按需重启");
       expect(view.wrapper.getComponent(ScreenTaskResults).props("task").id).toBe(original.id);
       await view.click("重试 2 台失败 / 未执行设备"); expect(view.execute).toHaveBeenCalledOnce();
-      await view.click("读取 2 台 NTP 设置"); await view.input("192.168.3.142"); await view.click("检查设置");
-      expect(view.preflight.mock.calls[1]![1].retryOfOperationId).toBe(original.id);
-      await view.click("重新读取设置"); await view.click("检查设置"); expect(view.preflight.mock.calls[2]![1].retryOfOperationId).toBe(original.id);
-      await view.click("保存并生效 2 台"); await view.click("确认设置并按需重启");
-      expect(view.execute.mock.calls[1]![1]).toMatchObject({ retryOfOperationId: original.id, action: "ntp", targetIds: view.ids });
+      expect(view.store.operation).toBe('screen_settings'); await view.settingsRead(); await view.settingsInput("192.168.3.142"); await view.wrapper.get('[data-testid="screen-settings-submit"]').trigger('click');await flushPromises();
+      expect(view.preflightSettings.mock.calls[0]![1].retryOfOperationId).toBe(original.id);
+      expect(view.preflightSettings.mock.calls[0]![2][view.ids[0]]).toEqual({adb:false,time:false,sleepOff:false,ntp:{server:'192.168.3.142'}});
+      expect(view.execute.mock.calls[1]![1]).toMatchObject({ retryOfOperationId: original.id, action: "screen_settings", targetIds: view.ids });
       expect(view.execute.mock.calls[1]![1].retryOfOperationId).not.toBe(original.input!.retryOfOperationId);
     } finally { view.dispose(); }
   });
@@ -121,20 +131,19 @@ describe("NTP重试操作关联", () => {
       await flushPromises(); view.wrapper.getComponent(ScreenTaskResults).vm.$emit("retry", ["old-local-screen", view.ids[1]]); await flushPromises();
       expect(view.historyOpen.value).toBe(false); expect(view.store.selectedIds).toEqual(view.ids);
       expect(view.read).not.toHaveBeenCalled(); expect(view.execute).not.toHaveBeenCalled();
-      await view.click("读取 2 台 NTP 设置"); await view.input("ntp.internal"); await view.click("检查设置");
-      expect(view.preflight.mock.calls[0]![1]).toMatchObject({ retryOfOperationId: original.id, targetIds: view.ids });
-      await view.click("保存并生效 2 台"); await view.click("确认设置并按需重启");
+      await view.settingsRead(); await view.settingsInput("ntp.internal"); await view.wrapper.get('[data-testid="screen-settings-submit"]').trigger('click');await flushPromises();
+      expect(view.preflightSettings.mock.calls[0]![1]).toMatchObject({ retryOfOperationId: original.id, targetIds: view.ids });
       expect(view.execute.mock.calls[0]![1]).toMatchObject({ retryOfOperationId: original.id, targetIds: view.ids });
     } finally { view.dispose(); }
   });
   it("从重试转为新的智能屏操作会清除旧操作关联", async () => {
     const view = await render({ operations: true }), original = failedNtpTask(view);
-    view.store.snapshot.tasks = [original]; view.historyOpen.value = true;
+    view.store.snapshot.tasks = [original]; view.historyOpen.value = true; view.execute.mockRejectedValue(new Error('模拟队列未提交'));
     try {
       await flushPromises(); view.wrapper.getComponent(ScreenTaskResults).vm.$emit("retry", view.ids); await flushPromises();
-      await view.click("读取 2 台 NTP 设置"); await view.input("ntp.internal"); await view.click("检查设置"); expect(view.preflight.mock.calls[0]![1].retryOfOperationId).toBe(original.id);
-      await view.click("重新选屏"); await view.click("读取 2 台 NTP 设置"); await view.input("ntp.internal"); await view.click("检查设置");
-      expect(view.preflight.mock.calls[1]![1].retryOfOperationId).toBeUndefined(); expect(view.execute).not.toHaveBeenCalled();
+      await view.settingsRead(); await view.settingsInput("ntp.internal"); await view.wrapper.get('[data-testid="screen-settings-submit"]').trigger('click');await flushPromises();expect(view.preflightSettings.mock.calls[0]![1].retryOfOperationId).toBe(original.id);
+      await view.wrapper.get('[data-testid="screen-settings-new"]').trigger('click');await flushPromises();await view.settingsRead();await view.settingsInput("ntp.internal");await view.wrapper.get('[data-testid="screen-settings-submit"]').trigger('click');await flushPromises();
+      expect(view.preflightSettings.mock.calls[1]![1].retryOfOperationId).toBeUndefined(); expect(view.execute).toHaveBeenCalledTimes(2);
     } finally { view.dispose(); }
   });
 });

@@ -12,6 +12,7 @@ import { screenPlatformFields } from "@/shared/model/screenRegistration";
 import { confirmScreenTakeover, screenTakeoverConflicts } from "./screenTakeover";
 import type { ScreenAppConfigPatch, ScreenAppConfigRead, ScreenAppConfigDraft } from "@/shared/model/screenAppConfig";
 import type { ScreenNtpPatch, ScreenNtpRead } from "@/shared/model/screenNtp";
+import type { ScreenSettingsPatch, ScreenSettingsRead } from "@/shared/model/screenSettings";
 
 interface BackendSnapshot extends Omit<ScreenSnapshot, "screens" | "tasks"> {
   screens: (Pick<SmartScreen, "id" | "source" | "name" | "ip" | "mac" | "size" | "spaceId" | "location" | "revision" | "appVersion" | "platformStatus" | "aliases">)[];
@@ -75,6 +76,17 @@ export class RealScreenAdapter implements ScreenAdapter {
   private preflights = new Map<string, string>();
   private configPatches = new Map<string, Record<string, ScreenAppConfigPatch>>();
   private ntpPatches = new Map<string, Record<string, ScreenNtpPatch>>();
+  private settingsPatches = new Map<string, Record<string, ScreenSettingsPatch>>();
+  readSettings(projectId: string, screenIds: string[]) {
+    return call<ScreenSettingsRead[]>("screen_settings_read", { localProjectId: projectId, screenIds });
+  }
+  async preflightSettings(projectId: string, input: Parameters<ScreenAdapter["execute"]>[1], patches: Record<string, ScreenSettingsPatch>) {
+    const generation = (this.previewRequests.get(projectId) ?? 0) + 1; this.previewRequests.set(projectId, generation);
+    const snapshot = structuredClone(patches);
+    const preview = await call<{ id: string; items: ScreenPreflightItem[] }>("screen_settings_preflight", { localProjectId: projectId, input, patches: snapshot });
+    if (this.previewRequests.get(projectId) === generation) { this.preflights.set(projectId, preview.id); this.settingsPatches.set(projectId, snapshot); }
+    return preview.items;
+  }
   readNtp(projectId: string, screenIds: string[]) {
     return call<ScreenNtpRead[]>("screen_ntp_read", { localProjectId: projectId, screenIds });
   }
@@ -217,6 +229,8 @@ export class RealScreenAdapter implements ScreenAdapter {
     if(input.action==='app_config'&&!configPatches)return Promise.reject(new Error('请先检查配置修改内容'));
     const ntpPatches=input.action==='ntp'?structuredClone(this.ntpPatches.get(projectId)):undefined;
     if(input.action==='ntp'&&!ntpPatches)return Promise.reject(new Error('请先检查NTP设置'));
+    const settingsPatches=input.action==='screen_settings'?structuredClone(this.settingsPatches.get(projectId)):undefined;
+    if(input.action==='screen_settings'&&!settingsPatches)return Promise.reject(new Error('请先检查智能屏设置内容'));
     const baseline=this.snapshots.get(projectId);
     return this.withTakeover(projectId,()=>call<string>("screen_execute",{localProjectId:projectId,preflightId,input:current}),async(latest,assertCurrent)=>{
       const fingerprints:Record<string,string>={};
@@ -227,8 +241,8 @@ export class RealScreenAdapter implements ScreenAdapter {
         fingerprints[id]=screenMaintenanceFingerprint(after);
       }
       current={...input,expectedTargets:fingerprints};
-      const patches = configPatches ?? ntpPatches;
-      const fresh=await call<{id:string;items:ScreenPreflightItem[]}>(input.action==='app_config'?'screen_app_config_preflight':input.action==='ntp'?'screen_ntp_preflight':'screen_preflight',{localProjectId:projectId,input:current,...(patches?{patches:Object.fromEntries(input.targetIds.map(id=>[id,patches[id]]))}:{})});assertCurrent();
+      const patches = configPatches ?? ntpPatches ?? settingsPatches;
+      const fresh=await call<{id:string;items:ScreenPreflightItem[]}>(input.action==='app_config'?'screen_app_config_preflight':input.action==='ntp'?'screen_ntp_preflight':input.action==='screen_settings'?'screen_settings_preflight':'screen_preflight',{localProjectId:projectId,input:current,...(patches?{patches:Object.fromEntries(input.targetIds.map(id=>[id,patches[id]]))}:{})});assertCurrent();
       if(input.targetIds.some(id=>!fresh.items.some(item=>item.screenId===id&&item.state==='ready')))throw new Error(`重新检查后部分目标不能执行或无需执行，请核对后继续。${fresh.items.filter(item=>item.state!=='ready').map(item=>`${item.name}：${item.reason}`).join('；')}`);
       preflightId=fresh.id;this.preflights.set(projectId,fresh.id);
     });

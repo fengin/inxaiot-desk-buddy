@@ -141,6 +141,9 @@ impl ScreenSharedResults {
         if let Some(ntp) = result.evidence.get("ntp") {
             summary["ntp"] = serde_json::json!({"beforeServer":ntp["before"]["server"],"targetServer":ntp["targetServer"],"afterServer":ntp["after"]["server"],"autoTime":ntp["after"]["autoTime"],"save":ntp["save"],"activation":ntp["activation"],"sync":ntp["sync"],"rebootRequired":ntp["rebootRequired"],"clockOffsetSeconds":ntp["syncEvidence"]["clockOffsetSeconds"]});
         }
+        if let Some(settings) = result.evidence.get("screenSettings") {
+            summary["screenSettings"] = settings.clone();
+        }
         summary["targetName"] = result
             .evidence
             .get("targetName")

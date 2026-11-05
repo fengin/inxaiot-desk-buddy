@@ -11,6 +11,8 @@ import { appConfigFieldLabel } from "@/shared/model/screenAppConfig";
 import { ntpServerDisplay, ntpStageLabel } from "@/shared/model/screenNtp";
 import type { ScreenNtpEvidence } from "@/shared/model/screenNtp";
 import { screenHomeStagesSummary, screenHomeSummary, type ScreenHomeEvidence } from "@/shared/model/screenHome";
+import { screenSettingsConfirmed, screenSettingsEvidence, screenSettingsUncertain } from "@/shared/model/screenSettings";
+import ScreenSettingsResultSummary from "./ScreenSettingsResultSummary.vue";
 
 const props = defineProps<{ task: ScreenTask }>();
 const emit = defineEmits<{ retry: [ids: string[]]; restart: [ids: string[]]; status: []; logsOpened: []; versions: [ids: string[]]; detail: [id: string] }>();
@@ -18,18 +20,24 @@ const activity = useActivityStore();
 const message = useMessage();
 let logOpenRequest = 0;
 onBeforeUnmount(() => { ++logOpenRequest; });
-const page = ref(1), pageSize = ref(50), resultBody = ref<HTMLElement>();
+const page = ref(1), pageSize = ref(50), resultBody = ref<HTMLElement>(), resultHeader = ref<HTMLElement>();
 const isConfig = computed(() => props.task.action === "app_config");
 const isNtp = computed(() => props.task.action === "ntp");
+const isSettings = computed(() => props.task.action === "screen_settings");
+const settingsVerificationNeeded = computed(() => isSettings.value && props.task.targets.some(screenSettingsUncertain));
 const isPing = computed(() => props.task.action === "ping");
+const isInspection = computed(() => props.task.action === "inspect");
+const isDeviceCheck = computed(() => isPing.value || isInspection.value);
 const isRegistration = computed(() => props.task.action === "register");
 const isRemoteAssistance = computed(() => props.task.action === "remote_assistance");
 const registrationConfirmed = computed(() => props.task.targets.length > 0 && props.task.targets.every(target => target.result?.business === "succeeded"));
-const headerConfirmed = computed(() => props.task.state === "succeeded" && (!isRegistration.value || (props.task.mode === "real" && registrationConfirmed.value)) && (!isConfig.value || props.task.targets.every(managementConfirmed)));
+const headerConfirmed = computed(() => props.task.state === "succeeded" && (!isRegistration.value || (props.task.mode === "real" && registrationConfirmed.value)) && (!isConfig.value || props.task.targets.every(managementConfirmed)) && (!isSettings.value || props.task.targets.every(screenSettingsConfirmed)));
 const showScreenDetail = computed(() => ["ping", "inspect", "mac"].includes(props.task.action));
 const visibleTargets = computed(() => props.task.targets.slice((page.value - 1) * pageSize.value, page.value * pageSize.value));
 const columns = computed(() => [
-  { key: "name", label: "目标屏" }, { key: "ip", label: "IP 地址" }, { key: "state", label: isPing.value ? "在线状态" : "状态" },
+  { key: "name", label: "目标屏" }, { key: "ip", label: "IP 地址" },
+  ...(isDeviceCheck.value ? [{ key: "network", label: "网络连通性" }, { key: "management", label: "管理连接" }, { key: "deviceInfo", label: "设备/小新信息" }] : []),
+  { key: "state", label: isDeviceCheck.value ? "检查结果" : "状态" },
   ...(isConfig.value ? [{ key: "save", label: "保存" }, { key: "restart", label: "重启" }, { key: "readback", label: "回读" }] : []),
   ...(isNtp.value ? [{ key: "save", label: "保存" }, { key: "activation", label: "生效" }, { key: "sync", label: "授时" }] : []),
   { key: "message", label: unverifiedInstall.value ? "演示结果 / 处理建议" : "实际结果 / 处理建议" },
@@ -39,9 +47,10 @@ watch(() => props.task.id, () => { page.value = 1; ++logOpenRequest; });
 watch(pageSize, () => { page.value = 1; });
 watch(() => props.task.targets.length, count => { page.value = Math.min(page.value, Math.max(1, Math.ceil(count / pageSize.value))); });
 watch([page, pageSize], () => { if (resultBody.value) resultBody.value.scrollTop = 0; });
+function syncResultScroll() { if (resultHeader.value && resultBody.value) resultHeader.value.scrollLeft = resultBody.value.scrollLeft; }
 const diagnosticText=ref(""),diagnosticOpen=ref(false),diagnosticBusy=ref(false);
 async function diagnostics(exportFile=false){diagnosticBusy.value=true;try{const adapter=useScreenAdapter();if(exportFile){const path=await adapter.exportDiagnostics?.(props.task.projectId,props.task.id);if(path)message.success(`诊断已导出：${path}`);}else{diagnosticText.value=await adapter.readDiagnostics?.(props.task.projectId,props.task.id)??"";diagnosticOpen.value=true;}}catch(cause){message.error((cause as Error).message);}finally{diagnosticBusy.value=false;}}
-const retryIds = computed(() => props.task.targets.filter((t) => ["failed", "cancelled"].includes(t.state) && !managementUncertain(t) && !(props.task.action === "install" && (t.result?.device === "succeeded" || ["installed", "verified"].includes(String(t.result?.evidence?.phase)))) && !(props.task.action==='app_config'&&['saved','verified','unchanged','not_required'].includes(String(configResult(t)?.save))&&!homeNeedsRetry(t)&&!managementNeedsRetry(t))).map((t) => t.screenId));
+const retryIds = computed(() => props.task.targets.filter((t) => ["failed", "cancelled"].includes(t.state) && !managementUncertain(t) && !(isSettings.value && screenSettingsUncertain(t)) && !(props.task.action === "install" && (t.result?.device === "succeeded" || ["installed", "verified"].includes(String(t.result?.evidence?.phase)))) && !(props.task.action==='app_config'&&['saved','verified','unchanged','not_required'].includes(String(configResult(t)?.save))&&!homeNeedsRetry(t)&&!managementNeedsRetry(t))).map((t) => t.screenId));
 const resultLabels: Record<string,string> = { not_required:"无需更新",pending:"待保存",succeeded:"已完成",failed:"未完成",unknown:"待核实",skipped:"无需执行",cancelled:"已取消" };
 function configResult(target:ScreenTaskTarget){return target.result?.evidence?.config as Record<string,unknown>|undefined;}
 function ntpResult(target: ScreenTaskTarget) { return target.result?.evidence?.ntp as ScreenNtpEvidence | undefined; }
@@ -121,13 +130,59 @@ function deviceResultLabel(target:ScreenTaskTarget){
   }
   return target.result?resultLabels[target.result.device]:'';
 }
-function pingResult(target: ScreenTaskTarget) {
+function currentObservation(target: ScreenTaskTarget) {
   // 只使用本次任务保存的实测；当前资产状态可能来自之后的检查。
   const observation = target.result?.observation;
   if (!observation || observation.observedIp !== target.ip) return null;
+  return observation;
+}
+function pingResult(target: ScreenTaskTarget) {
+  const observation = currentObservation(target);
+  if (!observation) return null;
   return observation.ping === "online" || observation.ping === "offline" ? observation.ping : null;
 }
+function networkLabel(target: ScreenTaskTarget) {
+  const ping = pingResult(target);
+  if (ping) return ping === "online" ? "在线" : "离线";
+  if (target.state === "running") return "检查中";
+  if (["queued", "cancelled", "skipped"].includes(target.state)) return "未检查";
+  return "未知";
+}
+function networkType(target: ScreenTaskTarget): "success" | "error" | "info" | "warning" | "default" {
+  const ping = pingResult(target);
+  if (ping) return ping === "online" ? "success" : "error";
+  if (target.state === "running") return "info";
+  return ["queued", "cancelled", "skipped"].includes(target.state) ? "default" : "warning";
+}
+function inspectionObservation(target: ScreenTaskTarget) {
+  const observation = currentObservation(target);
+  // 快速模式的 adbAvailable=false 是结构默认值，不代表尝试过管理连接。
+  return isInspection.value && observation && (!observation.operationType || observation.operationType === "inspect") ? observation : null;
+}
+function managementConnection(target: ScreenTaskTarget) {
+  const observation = inspectionObservation(target);
+  if (!observation || !Object.hasOwn(observation, "adbAvailable") || typeof observation.adbAvailable !== "boolean") return null;
+  // 正式完整读取的连接失败会保存错误；没有失败依据时不将结构默认false当实测。
+  if (!observation.adbAvailable && !observation.errors?.some(error => error.trim())) return null;
+  return observation.adbAvailable;
+}
+function managementConnectionLabel(target: ScreenTaskTarget) {
+  const available = managementConnection(target);
+  return available === null ? "本次未检查" : available ? "可用" : "不可用";
+}
+function deviceInformation(target: ScreenTaskTarget) {
+  if (isPing.value) return { system: "本次未检查", application: "仅检查网络连通性" };
+  const observation = inspectionObservation(target);
+  const android = observation?.android?.trim();
+  const version = observation?.observedAppVersion?.trim();
+  return {
+    system: `系统：${android ? `Android ${android}` : "未确认"}`,
+    application: `小新：${observation?.appInstalled === true ? "已安装" : observation?.appInstalled === false ? "未安装" : "安装未确认"} · ${observation?.appRunning === true ? "运行中" : observation?.appRunning === false ? "未运行" : "运行未确认"} · ${version ? `版本 ${version}` : "版本未确认"}`
+  };
+}
 function targetStateLabel(target: ScreenTaskTarget) {
+  if (isDeviceCheck.value) return target.state === "succeeded" ? "检查完成" : target.state === "failed" ? "检查未完成" : target.state === "running" ? "检查中" : displayState(target.state);
+  if (isSettings.value && target.state === "succeeded" && !screenSettingsConfirmed(target)) return "结果待核实";
   if (isConfig.value && !["queued", "running"].includes(target.state) && (managementUncertain(target) || (target.state === "succeeded" && !managementConfirmed(target)))) return "结果待核实";
   if (isRegistration.value) {
     if (props.task.mode !== "real") return target.state === "succeeded" ? "演示完成" : displayState(target.state);
@@ -135,14 +190,10 @@ function targetStateLabel(target: ScreenTaskTarget) {
     if (["queued", "running", "cancelled", "skipped"].includes(target.state)) return screenStateLabel[target.state];
     return target.result?.business === "failed" ? "注册/更新未完成" : "结果待核实";
   }
-  if (!isPing.value) return displayState(target.state);
-  const ping = pingResult(target);
-  if (ping) return ping === "online" ? "在线" : "离线";
-  if (target.state === "running") return "检查中";
-  if (["queued", "cancelled", "skipped"].includes(target.state)) return "未检查";
-  return "未知";
+  return displayState(target.state);
 }
 function targetStateType(target: ScreenTaskTarget): "success" | "error" | "info" | "warning" | "default" {
+  if (isSettings.value && target.state === "succeeded" && !screenSettingsConfirmed(target)) return "warning";
   if (isConfig.value && !["queued", "running"].includes(target.state) && (managementUncertain(target) || (target.state === "succeeded" && !managementConfirmed(target)))) return "warning";
   if (isRegistration.value) {
     if (props.task.mode !== "real") return "info";
@@ -150,18 +201,14 @@ function targetStateType(target: ScreenTaskTarget): "success" | "error" | "info"
     if (target.result?.business === "failed") return "error";
     return ["queued", "running", "cancelled", "skipped"].includes(target.state) ? "info" : "warning";
   }
-  if (!isPing.value) return target.state === "succeeded" ? "success" : target.state === "failed" ? "error" : "default";
-  const ping = pingResult(target);
-  if (ping) return ping === "online" ? "success" : "error";
-  if (target.state === "running") return "info";
-  return ["queued", "cancelled", "skipped"].includes(target.state) ? "default" : "warning";
+  return target.state === "succeeded" ? "success" : target.state === "failed" ? "error" : "default";
 }
 function targetMessage(target: ScreenTaskTarget) {
-  if (!isPing.value || pingResult(target) || ["queued", "running", "cancelled", "skipped"].includes(target.state)) return target.message;
+  if (!isDeviceCheck.value || pingResult(target) || ["queued", "running", "cancelled", "skipped"].includes(target.state)) return target.message;
   if (target.result?.observation && target.result.observation.observedIp !== target.ip) return "检查地址与本次目标不一致，请重新检查。";
-  const errors = target.result?.observation?.errors.filter(Boolean).join("；");
+  const errors = target.result?.observation?.errors?.filter(Boolean).join("；");
   if (errors) return [...new Set([target.message, errors].filter(Boolean))].join("；");
-  if (target.state === "succeeded") return "未记录本次在线检查结果，请重新检查。";
+  if (target.state === "succeeded") return isPing.value ? "未记录本次在线检查结果，请重新检查。" : "未记录本次网络连通性结果，其他检查以本次记录为准。";
   return target.message || "未取得在线检查结果，请查看日志后重试。";
 }
 function resultSummary(target: ScreenTaskTarget) {
@@ -169,7 +216,7 @@ function resultSummary(target: ScreenTaskTarget) {
   if (!result) return "";
   return [
     ...(homeResult(target) ? [`${screenHomeStagesSummary(homeResult(target)!)} · ${screenHomeSummary(homeResult(target))}`] : []),
-    ...(!isPing.value && result.device !== "not_required" ? [`设备：${deviceResultLabel(target)}`] : []),
+    ...(!isDeviceCheck.value && result.device !== "not_required" ? [`设备：${deviceResultLabel(target)}`] : []),
     ...(result.business !== "not_required" ? [`平台数据：${resultLabels[result.business]}`] : []),
     `操作记录：${result.shared === "not_required" ? "保存在本机" : resultLabels[result.shared]}`
   ].join(" · ");
@@ -186,6 +233,7 @@ function registrationSuccessLabel(target: ScreenTaskTarget) {
   return "平台写入已确认";
 }
 function displayState(state: keyof typeof screenStateLabel) {
+  if (isSettings.value && state === "succeeded" && !props.task.targets.every(screenSettingsConfirmed)) return "结果待核实";
   if (isRemoteAssistance.value) return screenTaskStateLabel({ action: "remote_assistance", state });
   if (isConfig.value && state === "succeeded" && !props.task.targets.every(managementConfirmed)) return "结果待核实";
   if (isRegistration.value) {
@@ -199,7 +247,7 @@ function displayState(state: keyof typeof screenStateLabel) {
     if (state === "needs_review") return "结果待核实";
     if (state === "failed") return "注册/更新未完成";
   }
-  if (isPing.value && state === "succeeded") return "检查完成";
+  if (isDeviceCheck.value && state === "succeeded") return "检查完成";
   return unverifiedInstall.value && state === "succeeded" ? "演示完成" : screenStateLabel[state];
 }
 async function cancel() { try { await useScreenAdapter().cancel(props.task.projectId, props.task.id); } catch (cause) { message.error((cause as Error).message); } }
@@ -217,7 +265,7 @@ async function openGlobalLogs() {
 </script>
 
 <template>
-  <section class="screen-task-results" :class="{ 'screen-task-results-config': isConfig || isNtp }">
+  <section class="screen-task-results" :class="{ 'screen-task-results-config': isConfig || isNtp, 'screen-task-results-check': isDeviceCheck }">
     <div v-if="task.input?.retryOfOperationId" class="screen-muted">重试来源：{{task.input.retryOfOperationId}}</div>
     <div class="screen-result-header"><div class="screen-result-title"><h3>{{ screenActionLabel(task.action) }}</h3><span class="screen-muted">{{ formatDisplayDateTime(task.createdAt) }} · {{ task.targets.length }} 台<template v-if="task.mode !== 'real'"> · 原型模拟</template></span></div><n-tag :bordered="false" :type="headerConfirmed ? 'success' : running || (isRegistration && task.mode !== 'real') ? 'info' : 'warning'">{{ displayState(task.state) }}</n-tag></div>
     <div v-if="isRegistration && running" class="screen-callout" data-testid="screen-registration-awaiting-write">已提交注册/更新任务，尚未确认平台写入成功。</div>
@@ -225,24 +273,29 @@ async function openGlobalLogs() {
     <div class="screen-task-progress"><n-progress type="line" :percentage="progress" :show-indicator="false" :status="task.state === 'failed' ? 'error' : headerConfirmed ? 'success' : 'default'" /><b>{{ progress }}%</b><span>{{ completed }} / {{ task.targets.length }} 台已处理</span></div>
     <div class="screen-inline-actions screen-result-actions">
       <n-button v-if="running" size="small" :disabled="task.state === 'cancelling'" @click="cancel">{{ task.state === 'cancelling' ? '正在停止后续操作' : '取消后续执行' }}</n-button>
-      <n-button v-if="task.state === 'needs_review' || (!running && managementVerificationNeeded)" size="small" type="warning" @click="verify">{{ isRemoteAssistance ? '补存会话记录' : '继续核实结果' }}</n-button>
+      <n-button v-if="task.state === 'needs_review' || (!running && (managementVerificationNeeded || settingsVerificationNeeded))" size="small" type="warning" @click="verify">{{ isRemoteAssistance ? '补存会话记录' : '继续核实结果' }}</n-button>
       <n-button v-if="!running&&configRestartIds.length" size="small" @click="$emit('restart',configRestartIds)">只重启小新 {{configRestartIds.length}} 台</n-button>
       <n-button v-if="!running && retryIds.length && !['status','version_sync','merge','remote_assistance'].includes(task.action)" size="small" @click="$emit('retry', retryIds)"><template #icon><RefreshCw :size="14" /></template>重试 {{ retryIds.length }} 台失败 / 未执行设备</n-button>
       <n-button v-if="!running && ['install', 'register', 'inspect', 'version_sync'].includes(task.action)" size="small" type="primary" secondary :disabled="task.state === 'needs_review'" @click="$emit('versions', task.targets.map(target => target.screenId))">核对版本并同步平台</n-button>
-      <n-button v-if="task.action === 'ping' || task.action === 'status'" size="small" type="primary" secondary :disabled="running" @click="$emit('status')">查看平台状态差异</n-button>
+      <n-button v-if="isDeviceCheck || task.action === 'status'" size="small" type="primary" secondary :disabled="running" @click="$emit('status')">查看平台状态差异</n-button>
       <template v-if="task.mode==='real'&&task.action==='diagnostics'&&!running"><n-button size="small" :loading="diagnosticBusy" @click="diagnostics()">查看诊断文件</n-button><n-button size="small" :loading="diagnosticBusy" @click="diagnostics(true)">导出诊断</n-button></template>
       <span class="screen-spacer"></span><n-button size="small" text type="primary" title="查看当前任务日志" @click="openGlobalLogs"><template #icon><FileText :size="14" /></template>任务与日志面板</n-button>
     </div>
     <div v-if="isRemoteAssistance" class="screen-callout" data-testid="remote-assistance-result-notice"><template v-if="task.state === 'needs_review'">会话记录待核实，补存仅处理记录及占用。</template>会话记录不代表H5登录成功，登录结果以屏端页面为准；历史操作不会自动重发。</div>
     <div v-else-if="task.state === 'needs_review'" class="screen-callout">{{ unverifiedInstall ? '本次演示结果待核实，请先继续核实结果，不重复提交安装。' : '回读中断不等于动作失败。先核实已有结果，不重复提交、重装或再次重启。' }}</div>
     <div class="screen-result-table-wrap">
-      <div class="screen-result-table-header"><table class="screen-table screen-small-table screen-result-table" aria-label="结果列表表头"><colgroup><col v-for="column in columns" :key="column.key" :class="`result-col-${column.key}`" /></colgroup><thead><tr><th v-for="column in columns" :key="column.key">{{ column.label }}</th></tr></thead></table></div>
-      <div ref="resultBody" class="screen-table-scroll screen-result-table-body inx-scroll-area"><table class="screen-table screen-small-table screen-result-table" aria-label="智能屏操作结果"><colgroup><col v-for="column in columns" :key="column.key" :class="`result-col-${column.key}`" /></colgroup><tbody><tr v-for="target in visibleTargets" :key="target.screenId" :data-screen-id="target.screenId">
+      <div ref="resultHeader" class="screen-result-table-header"><table class="screen-table screen-small-table screen-result-table" aria-label="结果列表表头"><colgroup><col v-for="column in columns" :key="column.key" :class="`result-col-${column.key}`" /></colgroup><thead><tr><th v-for="column in columns" :key="column.key">{{ column.label }}</th></tr></thead></table></div>
+      <div ref="resultBody" class="screen-table-scroll screen-result-table-body inx-scroll-area" @scroll="syncResultScroll"><table class="screen-table screen-small-table screen-result-table" aria-label="智能屏操作结果"><colgroup><col v-for="column in columns" :key="column.key" :class="`result-col-${column.key}`" /></colgroup><tbody><tr v-for="target in visibleTargets" :key="target.screenId" :data-screen-id="target.screenId">
         <td :title="target.name">{{ target.name }}</td><td :title="target.ip">{{ target.ip }}</td>
-        <td><n-tag size="small" :bordered="false" :type="targetStateType(target)">{{ targetStateLabel(target) }}</n-tag></td>
+        <template v-if="isDeviceCheck">
+          <td class="screen-result-network" data-testid="screen-check-network"><n-tag size="small" :bordered="false" :type="networkType(target)">{{ networkLabel(target) }}</n-tag></td>
+          <td data-testid="screen-check-management" title="本次设备检查中的ADB管理连接"><n-tag size="small" :bordered="false" :type="managementConnection(target) === null ? 'default' : managementConnection(target) ? 'success' : 'error'">{{ managementConnectionLabel(target) }}</n-tag></td>
+          <td class="screen-check-device-info" data-testid="screen-check-device-info"><div :title="deviceInformation(target).system">{{ deviceInformation(target).system }}</div><div class="screen-secondary" :title="deviceInformation(target).application">{{ deviceInformation(target).application }}</div></td>
+        </template>
+        <td data-testid="screen-target-execution-result"><n-tag size="small" :bordered="false" :type="targetStateType(target)">{{ targetStateLabel(target) }}</n-tag></td>
         <template v-if="isConfig"><td v-for="stage in configStages" :key="stage" :class="configStageClass(target, stage)" :title="configStageLabel(target, stage)">{{ configStageLabel(target, stage) }}</td></template>
         <template v-if="isNtp"><td v-for="stage in ntpStages" :key="stage" :class="ntpResult(target)?.[stage] === 'failed' ? 'screen-danger' : ntpResult(target)?.[stage] === 'unknown' ? 'screen-warning' : ''" :title="ntpResultLabel(target, stage)">{{ ntpResultLabel(target, stage) }}</td></template>
-        <td><div class="screen-result-message" :title="targetMessage(target)">{{ targetMessage(target) }}</div><div v-if="isConfig && managementResult(target, 'owner')" class="screen-management-stages" data-testid="screen-owner-result"><b>OWNER</b><span v-for="stage in ownerStages" :key="stage.key" :class="managementStageClass(target, 'owner', stage.key)" :data-owner-stage="stage.key">{{ stage.label }}：{{ managementStageLabel(target, 'owner', stage.key) }}</span></div><div v-if="isConfig && managementResult(target, 'kiosk')" class="screen-management-stages" data-testid="screen-kiosk-result"><b>应用锁定</b><span v-for="stage in kioskStages" :key="stage.key" :class="managementStageClass(target, 'kiosk', stage.key)" :data-kiosk-stage="stage.key">{{ stage.label }}：{{ managementStageLabel(target, 'kiosk', stage.key) }}</span></div><div v-if="isNtp" class="screen-secondary" :title="ntpSummary(target)">{{ ntpSummary(target) }}</div><div v-if="isConfig && failedFields(target)" class="screen-result-message screen-warning" :title="`未保存字段：${failedFields(target)}`">未保存字段：{{ failedFields(target) }}</div><div v-if="target.result" class="screen-secondary" :title="resultSummary(target)">{{ resultSummary(target) }}</div></td>
+        <td><div class="screen-result-message" :title="targetMessage(target)">{{ targetMessage(target) }}</div><screen-settings-result-summary v-if="isSettings && screenSettingsEvidence(target)" :evidence="screenSettingsEvidence(target)!" /><div v-if="isConfig && managementResult(target, 'owner')" class="screen-management-stages" data-testid="screen-owner-result"><b>OWNER</b><span v-for="stage in ownerStages" :key="stage.key" :class="managementStageClass(target, 'owner', stage.key)" :data-owner-stage="stage.key">{{ stage.label }}：{{ managementStageLabel(target, 'owner', stage.key) }}</span></div><div v-if="isConfig && managementResult(target, 'kiosk')" class="screen-management-stages" data-testid="screen-kiosk-result"><b>应用锁定</b><span v-for="stage in kioskStages" :key="stage.key" :class="managementStageClass(target, 'kiosk', stage.key)" :data-kiosk-stage="stage.key">{{ stage.label }}：{{ managementStageLabel(target, 'kiosk', stage.key) }}</span></div><div v-if="isNtp" class="screen-secondary" :title="ntpSummary(target)">{{ ntpSummary(target) }}</div><div v-if="isConfig && failedFields(target)" class="screen-result-message screen-warning" :title="`未保存字段：${failedFields(target)}`">未保存字段：{{ failedFields(target) }}</div><div v-if="target.result" class="screen-secondary" :title="resultSummary(target)">{{ resultSummary(target) }}</div></td>
         <td v-if="showScreenDetail"><n-button size="tiny" text type="primary" title="查看本机保存的最新屏详情" @click="emit('detail', target.screenId)">查看屏详情</n-button></td>
       </tr><tr v-if="!task.targets.length"><td :colspan="columns.length" class="screen-muted">暂无设备结果</td></tr></tbody></table></div>
     </div>
@@ -258,13 +311,19 @@ async function openGlobalLogs() {
 .screen-task-results .screen-result-actions{flex:none;gap:8px;margin:0;min-height:28px}
 .screen-task-results>.screen-callout{flex:none;margin:0;padding:6px 10px;font-size:12px}
 .screen-result-table-wrap{display:flex;flex:1;flex-direction:column;min-width:0;min-height:0;border:1px solid var(--inx-color-border);border-radius:6px;overflow:hidden}
-.screen-result-table-header{flex:none;padding-right:4px;background:var(--inx-color-table-header)}
+.screen-result-table-header{flex:none;padding-right:4px;background:var(--inx-color-table-header);overflow:hidden}
 .screen-task-results .screen-result-table-body{flex:1;min-height:0;max-height:none;border:0;border-radius:0;overflow-y:auto;overflow-x:hidden}
 .screen-result-table{width:100%;table-layout:fixed}.screen-result-table .result-col-name{width:20%}.screen-result-table .result-col-ip{width:118px}.screen-result-table .result-col-state{width:100px}
 .screen-task-results-config .result-col-name{width:15%}.screen-task-results-config .result-col-ip{width:110px}
 .result-col-save{width:74px}.result-col-restart{width:84px}.result-col-readback{width:104px}
 .result-col-activation{width:74px}.result-col-sync{width:100px}
 .result-col-detail{width:96px}
+.screen-task-results-check .screen-result-table{min-width:980px}
+.screen-task-results-check .result-col-name{width:110px}.screen-task-results-check .result-col-ip{width:112px}
+.screen-task-results-check .result-col-network{width:92px}.screen-task-results-check .result-col-management{width:98px}.screen-task-results-check .result-col-deviceInfo{width:180px}
+.screen-task-results-check .result-col-state{width:88px}.screen-task-results-check .result-col-detail{width:72px}
+.screen-task-results-check .screen-result-table-body{overflow-x:auto}
+.screen-check-device-info>div{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .screen-result-table th{padding:6px 8px;font-size:10px;line-height:19px}
 .screen-result-table td{height:var(--inx-table-row-height);padding:4px 8px;line-height:20px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;vertical-align:middle}
 .screen-result-table .screen-secondary{margin-top:1px;max-width:none;font-size:10px;line-height:15px}
